@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 430" role="img" aria-labelledby="title desc">
+<title id="title">PiCar-X 교육용 차량 도식</title><desc id="desc">실물 사진이 아닌 PiCar-X의 형태를 단순화한 자체 제작 상단 도식입니다.</desc>
+<defs><linearGradient id="body" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#f5f6f5"/><stop offset=".5" stop-color="#c8ceca"/><stop offset="1" stop-color="#8c9690"/></linearGradient><linearGradient id="deck" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#4d5751"/><stop offset="1" stop-color="#202723"/></linearGradient><filter id="shadow" x="-.2" y="-.2" width="1.4" height="1.5"><feDropShadow dx="0" dy="16" stdDeviation="14" flood-color="#000" flood-opacity=".28"/></filter></defs>
+<g filter="url(#shadow)" transform="translate(0 2)">
+<!-- wheels -->
+<g fill="#111513" stroke="#535b56" stroke-width="5"><rect x="156" y="88" width="98" height="64" rx="27" transform="rotate(-12 205 120)"/><rect x="506" y="88" width="98" height="64" rx="27" transform="rotate(12 555 120)"/><rect x="156" y="278" width="98" height="64" rx="27" transform="rotate(12 205 310)"/><rect x="506" y="278" width="98" height="64" rx="27" transform="rotate(-12 555 310)"/></g>
+<path d="M260 54 Q380 24 500 54 L563 112 Q591 145 586 216 L562 300 Q551 337 508 359 Q380 393 252 359 Q209 337 198 300 L174 216 Q169 145 197 112 Z" fill="url(#body)" stroke="#f9fbf9" stroke-width="5"/>
+<path d="M282 76 Q380 51 478 76 L526 124 Q540 141 536 183 L520 259 Q510 292 480 316 Q380 345 280 316 Q250 292 240 259 L224 183 Q220 141 234 124 Z" fill="url(#deck)" stroke="#707a73" stroke-width="3"/>
+<path d="M272 91 Q380 66 488 91 L515 124 Q521 134 519 151 L241 151 Q239 134 245 124 Z" fill="#aab2ad" opacity=".85"/>
+<path d="M254 169 H506 L493 250 Q480 279 454 293 Q380 311 306 293 Q280 279 267 250 Z" fill="#2e3732" stroke="#737c76" stroke-width="2"/>
+<path d="M309 270 Q380 290 451 270" fill="none" stroke="#a9b2ac" stroke-width="3" opacity=".7"/>
+<!-- pan tilt camera and ultrasonic sensor -->
+<rect x="342" y="178" width="76" height="43" rx="11" fill="#737e77" stroke="#dce1dd" stroke-width="3"/><path d="M359 178 v-17 q21 -15 42 0 v17" fill="#aeb6b1" stroke="#e9ecea" stroke-width="3"/><circle cx="380" cy="157" r="12" fill="#18211c" stroke="#e2e6e3" stroke-width="4"/><circle cx="380" cy="157" r="5" fill="#8fb4a0"/>
+<circle cx="353" cy="75" r="12" fill="#141a16" stroke="#f8faf8" stroke-width="4"/><circle cx="407" cy="75" r="12" fill="#141a16" stroke="#f8faf8" stroke-width="4"/>
+<path d="M283 325 H477" stroke="#e9eeea" stroke-width="4" opacity=".65"/><text x="380" y="250" text-anchor="middle" fill="#b8c0bb" font-family="sans-serif" font-size="18" letter-spacing="4">PiCar-X</text>
+</g></svg>
