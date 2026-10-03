@@ -56,7 +56,7 @@ class ControlSafetyTests(unittest.TestCase):
             def set_cam_tilt_angle(self, value): self.calls.append(("tilt", value))
             def get_distance(self): return None
             def get_grayscale_data(self): return []
-            def get_cliff_status(self): return None
+            def get_cliff_status(self, grayscale): return False
         module = SimpleNamespace(Picarx=FakePicarx, __file__="/usr/local/lib/python3.13/dist-packages/picarx/__init__.py")
         with patch("app.hardware.importlib.util.find_spec", return_value=SimpleNamespace(origin=module.__file__)), \
              patch("app.hardware.importlib.import_module", return_value=module):
@@ -78,7 +78,7 @@ class ControlSafetyTests(unittest.TestCase):
             def set_motor_speed(self, motor, speed): self.calls.append(("motor", motor, speed))
             def get_distance(self): return None
             def get_grayscale_data(self): return []
-            def get_cliff_status(self): return None
+            def get_cliff_status(self, grayscale): return False
             def forward(self, speed): self.calls.append(("forward", speed))
             def backward(self, speed): self.calls.append(("backward", speed))
         adapter = PiCarXAdapter.__new__(PiCarXAdapter)
@@ -140,7 +140,7 @@ class ControlSafetyTests(unittest.TestCase):
             self.assertEqual(values["mode"], "mock")
             self.assertEqual(values["distance_cm"], 42.0)
             self.assertEqual(len(values["grayscale"]), 3)
-            self.assertEqual(len(values["cliff_status"]), 3)
+            self.assertFalse(values["cliff_status"])
         asyncio.run(scenario())
 
     def test_signed_steering_is_preserved_for_reverse_drive(self):

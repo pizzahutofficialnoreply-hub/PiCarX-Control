@@ -9,7 +9,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from .hardware import MockAdapter, PiCarXAdapter, UnavailableAdapter
-from .models import CalibrationUpdate, DriveCommand, SteeringTest
+from .models import AutonomyStart, CalibrationUpdate, DriveCommand, SteeringTest
+from .autonomy.registry import controller_catalog
+from .services.event_log import read_events, record_event
 
 WATCHDOG_SECONDS = 0.5
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "settings.json"
@@ -27,6 +29,9 @@ class ControlService:
                 self.adapter = UnavailableAdapter(str(exc))
         else:
             raise RuntimeError("PICARX_MODE must be 'mock' or 'hardware'.")
+        record_event("startup", "Control service initialized", details={"mode": self.adapter.mode, "connected": self.adapter.connected})
+        if not self.adapter.connected and self.adapter.connection_error:
+            record_event("hardware", "PiCar-X initialization unavailable", level="ERROR", details={"error": self.adapter.connection_error})
 
         saved = self._load_settings()
         self.steering_center = int(saved.get("steering_center", self.adapter.steering_center))
@@ -57,6 +62,7 @@ class ControlService:
                 self.fault = str(exc)
                 self.adapter.connected = False
                 self.adapter.connection_error = f"Startup stop failed: {exc}"
+                record_event("safety", "Startup stop failed", level="ERROR", details={"error": str(exc)})
         else:
             # No initialized device exists to stop; preserve its original diagnostic error.
             self.motion, self.speed, self.steering = "stopped", 0, 0
@@ -108,11 +114,16 @@ class ControlService:
             self.adapter.connection_error = f"Motor stop failed: {exc}"
             raise
 
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "user") -> None:
         # Invalidate older requests before they can acquire the shared hardware lock.
         self.stop_generation += 1
         async with self.lock:
-            self.stop_now()
+            try:
+                self.stop_now()
+                record_event("motion", "Stop command confirmed", details={"mode": self.adapter.mode, "reason": reason})
+            except Exception as exc:
+                record_event("safety", "Stop command failed", level="ERROR", details={"error": str(exc), "reason": reason})
+                raise
 
     async def drive(self, command: DriveCommand) -> None:
         request_generation = self.stop_generation
@@ -130,6 +141,8 @@ class ControlService:
                 self.fault = None
             except Exception as exc:
                 self.fault = str(exc)
+                record_event("motion", "Drive command failed; stop will be attempted", level="ERROR",
+                             details={"direction": command.direction, "pwm": command.speed, "steering": command.steering, "error": str(exc)})
                 try:
                     self.stop_now()
                 except Exception:
@@ -150,8 +163,9 @@ class ControlService:
             await asyncio.sleep(0.1)
             if self.updated_at is not None and time.monotonic() - self.updated_at > WATCHDOG_SECONDS:
                 try:
-                    await self.stop()
+                    await self.stop(reason="watchdog")
                 except Exception:
+                    record_event("safety", "Watchdog stop failed", level="ERROR")
                     pass
 
     def status(self) -> dict:
@@ -188,7 +202,26 @@ class ControlService:
             return await asyncio.to_thread(self.adapter.read_sensors)
         except Exception as exc:
             self.fault = f"Sensor read failed: {exc}"
+            record_event("sensor", "Sensor read failed", level="ERROR", details={"error": str(exc)})
             raise
+
+    def autonomy_capabilities(self) -> dict:
+        diagnostics = self.adapter.diagnostics()
+        api_methods = diagnostics.get("api_methods") or {}
+        physical = self.adapter.mode == "hardware" and self.adapter.connected
+        return {
+            "mode": self.adapter.mode,
+            "hardware_connected": self.adapter.connected if self.adapter.mode == "hardware" else None,
+            "motor": bool(physical and diagnostics.get("motor_control_available")),
+            "steering": bool(physical and diagnostics.get("steering_servo_available")),
+            "distance_sensor": bool(physical and api_methods.get("get_distance")),
+            "grayscale_sensor": bool(physical and api_methods.get("get_grayscale_data")),
+            "cliff_sensor": bool(physical and api_methods.get("get_cliff_status")),
+            "camera_servo": bool(physical and diagnostics.get("camera_servo_api_available")),
+            "camera_stream": False, "speed_sensor": False, "gps": False,
+            "line_following": False, "obstacle_avoidance": False,
+            "object_following": False, "camera_tracking": False, "ai_autonomy": False,
+        }
 
 control: ControlService
 
@@ -206,7 +239,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         try:
-            await control.stop()
+            await control.stop(reason="server_shutdown")
         finally:
             control.adapter.close()
 
@@ -231,6 +264,7 @@ async def sensors():
     try:
         return await control.sensors()
     except Exception as exc:
+        record_event("sensor", "Sensor API request failed", level="ERROR", details={"error": str(exc)})
         raise HTTPException(503, f"Sensor read failed: {exc}")
 
 @app.post("/api/drive")
@@ -238,14 +272,16 @@ async def drive(command: DriveCommand):
     try:
         await control.drive(command)
     except Exception as exc:
+        record_event("motion", "Drive API request failed", level="ERROR", details={"error": str(exc)})
         raise HTTPException(503, f"Drive command failed: {exc}")
     return control.status()
 
 @app.post("/api/stop")
 async def stop():
     try:
-        await control.stop()
+        await control.stop(reason="api_stop")
     except Exception as exc:
+        record_event("safety", "Stop API request failed", level="ERROR", details={"error": str(exc)})
         raise HTTPException(503, f"Stop failed: {exc}")
     return control.status()
 
@@ -254,6 +290,7 @@ async def steering_test(test: SteeringTest):
     try:
         await control.test_steering(test)
     except Exception as exc:
+        record_event("motion", "Steering test failed", level="ERROR", details={"error": str(exc)})
         raise HTTPException(503, f"Steering test failed: {exc}")
     return control.status()
 
@@ -264,9 +301,45 @@ async def calibration(update: CalibrationUpdate):
     try:
         await control.save_calibration(update)
     except Exception as exc:
+        record_event("settings", "Calibration update failed", level="ERROR", details={"error": str(exc)})
         raise HTTPException(503, f"Calibration failed: {exc}")
     return {"steering_center": control.steering_center, "pan_center": control.pan_center,
             "tilt_center": control.tilt_center, "applied_to_hardware": control.adapter.mode == "hardware" and control.adapter.connected}
+
+@app.get("/api/logs")
+@app.get("/api/autonomy/logs")
+async def logs(limit: int = 100):
+    return {"events": read_events(limit)}
+
+@app.get("/api/autonomy/modes")
+async def autonomy_modes():
+    return {"active_mode": "manual", "modes": controller_catalog()}
+
+@app.get("/api/autonomy/status")
+async def autonomy_status():
+    return {"active_mode": "manual", "running": False, "available": control.adapter.connected,
+            "hardware_mode": control.adapter.mode == "hardware", "state": "manual_ready" if control.adapter.connected else "hardware_unavailable"}
+
+@app.get("/api/autonomy/capabilities")
+async def autonomy_capabilities():
+    return control.autonomy_capabilities()
+
+@app.post("/api/autonomy/start")
+async def autonomy_start(command: AutonomyStart):
+    if command.mode == "manual":
+        return await autonomy_status()
+    record_event("autonomy", "Unavailable controller start requested", level="WARNING", details={"mode": command.mode})
+    raise HTTPException(409, {"code": "controller_unavailable", "mode": command.mode,
+                              "message": "This controller is not implemented or required hardware input is unavailable."})
+
+@app.post("/api/autonomy/stop")
+async def autonomy_stop():
+    try:
+        await control.stop(reason="autonomy_stop")
+    except Exception as exc:
+        record_event("autonomy", "Autonomy stop failed", level="ERROR", details={"error": str(exc)})
+        raise HTTPException(503, f"Autonomy stop failed: {exc}")
+    return {"active_mode": "manual", "running": False, "state": "stopped", **control.status()}
 
 @app.websocket("/api/ws")
 async def websocket_status(websocket: WebSocket):
@@ -283,7 +356,7 @@ async def websocket_status(websocket: WebSocket):
     finally:
         # WebSocket disappearance (phone closes browser/loses Wi-Fi) requests a backend stop.
         try:
-            await control.stop()
+            await control.stop(reason="websocket_disconnect")
         except Exception:
             pass
 

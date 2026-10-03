@@ -85,7 +85,7 @@ class MockAdapter:
     def read_sensors(self) -> dict:
         # 개발 화면 확인용 가상값이며 실제 장치 측정값이 아닙니다.
         return {"mode": "mock", "available": True, "distance_cm": 42.0,
-                "grayscale": [320, 340, 315], "cliff_status": [False, False, False],
+                "grayscale": [320, 340, 315], "cliff_status": False,
                 "error": None}
     def close(self) -> None:
         self.stop()
@@ -257,8 +257,11 @@ class PiCarXAdapter:
         # 라이브러리 호출은 별도 스레드에서 실행해 FastAPI 이벤트 루프를 막지 않습니다.
         methods = self.sensor_api_available or _method_map(car, ("get_distance", "get_grayscale_data", "get_cliff_status"))
         values = {}
-        for method, key in (("get_distance", "distance_cm"), ("get_grayscale_data", "grayscale"), ("get_cliff_status", "cliff_status")):
+        for method, key in (("get_distance", "distance_cm"), ("get_grayscale_data", "grayscale")):
             values[key] = getattr(car, method)() if methods.get(method) else None
+        grayscale = values.get("grayscale")
+        # 설치된 실제 API의 서명은 get_cliff_status(grayscale)입니다.
+        values["cliff_status"] = car.get_cliff_status(grayscale) if methods.get("get_cliff_status") and grayscale is not None else None
         return {"mode": "hardware", "available": any(methods.values()), "api_methods": methods, **values, "error": None}
 
     def close(self) -> None:

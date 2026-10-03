@@ -13,3 +13,6 @@ class CalibrationUpdate(BaseModel):
 class SteeringTest(BaseModel):
     direction: str = Field(pattern="^(left|right|center)$")
     angle: int = Field(default=20, ge=0, le=30)
+
+class AutonomyStart(BaseModel):
+    mode: str = Field(pattern="^(manual|line_following|obstacle_avoidance|object_following|camera_tracking|autonomous)$")
