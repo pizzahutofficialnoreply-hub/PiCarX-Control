@@ -57,6 +57,14 @@ export function getWebSocketUrl(path = '/api/ws'): string {
   return `${wsBase}${path}`;
 }
 
+export function getCameraStreamUrl(): string {
+  return `${baseUrl}/api/camera/stream`;
+}
+
+export function getCameraStatusUrl(): string {
+  return `${baseUrl}/api/camera/status`;
+}
+
 export async function apiRequest(
   path: string,
   options: RequestInit = {},

@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bat
 import vehicleSchematic from './assets/picarx-schematic.svg';
 import { apiRequest, getApiBaseUrl, getRecentApiBaseUrls, getWebSocketUrl, saveApiBaseUrl } from './services/api';
 import { t, type MessageKey } from './i18n';
+import { getCameraStreamUrl } from './services/api';
 
 type Mode = 'mock' | 'hardware';
 type Direction = 'forward' | 'backward' | 'left' | 'right';
@@ -43,6 +44,7 @@ export default function AppPhase41(){
  const [driveStyle,setDriveStyle]=useState<'buttons'|'joystick'>(()=>localStorage.getItem('picarx-drive-style')==='joystick'?'joystick':'buttons'),[joystick,setJoystick]=useState({x:0,y:0}),[joyPwm,setJoyPwm]=useState(0),joySpeed=useRef(0);
  const poll=useRef<number>(),hold=useRef<number>(),sensorPoll=useRef<number>(),lastSteeringAt=useRef(0),manualDisconnect=useRef(false),active=useRef<Direction|null>(null),desired=useRef<{direction:Direction;steering:number;speed?:number}>({direction:'forward',steering:0}),rampedSpeed=useRef(0),speedRef=useRef({forward,reverse,steer,targetPwm});speedRef.current={forward,reverse,steer,targetPwm};
  const setVehicleStatus=(value:Status)=>{statusRef.current=value;setStatus(value);};
+ const cameraStreamUrl = getCameraStreamUrl();
 
  // Local simulation keeps all control state in the browser and never calls REST or WebSocket.
  async function request(path:string,options?:RequestInit):Promise<any>{
@@ -131,7 +133,13 @@ export default function AppPhase41(){
   </section></>}
   <footer>{t('appName')} <span>&middot;</span> {t('local')} <span>&middot;</span> {t('watchdog')}</footer></main>
   {!driving&&<nav className="mobile-nav">{tabs.map(item=><button className={page===item.id?'selected':''} key={item.id} onClick={()=>navigate(item.id)}><item.icon size={19}/><small>{t(item.key)}</small></button>)}</nav>}
-  {driving&&<section className="drive-scene" aria-label={t('driveMode')}><div className="drive-video"><div className="video-empty"><div className="camera-empty-icon"><Camera size={26}/></div><b>{t('videoUnavailable')}</b><span>{t('cameraNeedsConnection')}</span></div></div>
+  {driving&&<section className="drive-scene" aria-label={t('driveMode')}><div className="drive-video"><div className="video-container">
+  <img
+    src={cameraStreamUrl}
+    alt="PiCar-X Camera"
+    className="camera-stream"
+  />
+</div></div>
    <header className="drive-hud"><div className="hud-brand"><span className={connected?'dot online':'dot'}/><div><b>{connectionLabel}</b><small>{simulated?t('simulation'):t('hardware')}</small></div></div><div className="hud-motion"><span className={connected?'dot online':'dot'}/><span>{stopping?t('stopPending'):motionName}</span><span className="hud-extra">{status?.steering??0}&deg;</span><span className="hud-extra">PWM {status?.speed??0}</span></div><div className="style-toggle" role="group" aria-label={t('driveStyle')}><button type="button" className={driveStyle==='buttons'?'selected':''} onClick={()=>changeDriveStyle('buttons')}>{t('styleButtons')}</button><button type="button" className={driveStyle==='joystick'?'selected':''} onClick={()=>changeDriveStyle('joystick')}>{t('styleJoystick')}</button></div><button className="emergency drive-emergency-head" onClick={()=>void stop()}><CircleStop size={18}/><span>{t('emergencyStop')}</span></button><button className="icon-button" aria-label={t('settings')} onClick={()=>navigate('settings')}><Settings size={19}/></button><button className="exit-drive" onClick={exitDrive}><X size={18}/>{t('exitDrive')}</button></header>
    {simulated&&<div className="drive-sim-banner">{t('simulation')}</div>}
    {error&&<div className="drive-error-banner"><AlertTriangle size={15}/>{error}</div>}
