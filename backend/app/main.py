@@ -6,12 +6,14 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from .hardware import MockAdapter, PiCarXAdapter, UnavailableAdapter
 from .models import AutonomyStart, CalibrationUpdate, DriveCommand, SteeringTest
 from .autonomy.registry import controller_catalog
 from .services.event_log import read_events, record_event
+from .camera import camera_service
 
 WATCHDOG_SECONDS = 0.5
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "settings.json"
@@ -359,6 +361,23 @@ async def websocket_status(websocket: WebSocket):
             await control.stop(reason="websocket_disconnect")
         except Exception:
             pass
+
+@app.get("/api/camera/status")
+def camera_status() -> dict:
+    return camera_service.status()
+
+
+@app.get("/api/camera/stream")
+def camera_stream() -> StreamingResponse:
+    return StreamingResponse(
+        camera_service.stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 # 프론트엔드가 빌드된 경우 같은 FastAPI 프로세스가 UI를 정적으로 제공합니다.
 # 개발 중 dist가 없으면 기존 API 전용 실행 흐름을 유지합니다.
