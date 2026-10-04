@@ -44,7 +44,8 @@ export default function AppPhase41(){
  const [driveStyle,setDriveStyle]=useState<'buttons'|'joystick'>(()=>localStorage.getItem('picarx-drive-style')==='joystick'?'joystick':'buttons'),[joystick,setJoystick]=useState({x:0,y:0}),[joyPwm,setJoyPwm]=useState(0),joySpeed=useRef(0);
  const poll=useRef<number>(),hold=useRef<number>(),sensorPoll=useRef<number>(),lastSteeringAt=useRef(0),manualDisconnect=useRef(false),active=useRef<Direction|null>(null),desired=useRef<{direction:Direction;steering:number;speed?:number}>({direction:'forward',steering:0}),rampedSpeed=useRef(0),speedRef=useRef({forward,reverse,steer,targetPwm});speedRef.current={forward,reverse,steer,targetPwm};
  const setVehicleStatus=(value:Status)=>{statusRef.current=value;setStatus(value);};
- const cameraStreamUrl = getCameraStreamUrl();
+ const cameraStreamUrl = const cameraStreamUrl = getCameraStreamUrl();
+ console.log('Camera stream URL:', cameraStreamUrl);
 
  // Local simulation keeps all control state in the browser and never calls REST or WebSocket.
  async function request(path:string,options?:RequestInit):Promise<any>{
