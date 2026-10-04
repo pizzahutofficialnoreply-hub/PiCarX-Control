@@ -77,51 +77,59 @@ button:focus-visible,input:focus-visible{outline:2px solid #727873;outline-offse
 .connection-note{padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft);font-size:.82rem;line-height:1.5;color:var(--muted)}
 
 
-/* RC mode: joystick on the left, vertical drive controls on the right, status below. */
-.drive-video{position:relative;z-index:0;inset:auto;height:clamp(58px,12vh,112px);margin:4px auto 0;max-width:1100px;border:1px solid #ffffff20;border-radius:16px;background:#121413;overflow:hidden}
-.drive-video:after{background:linear-gradient(90deg,#0b0c0b22,transparent,#0b0c0b22)}
-.video-empty{position:absolute;inset:0;gap:4px}.video-empty .camera-empty-icon{width:32px;height:32px;margin:0}.video-empty b{font-size:11px}.video-empty span{font-size:9px}
-.drive-controls{grid-template-columns:minmax(120px,.9fr) minmax(175px,1fr);grid-template-areas:"stick pedals" "info info";grid-template-rows:minmax(300px,45vh) auto;align-items:center;min-height:0;height:auto;max-width:980px;margin:8px auto 0;padding:8px 14px 22px;gap:8px 20px;transform-origin:center center;touch-action:pan-y}
-.joystick-column{grid-area:stick;align-self:center}.drive-center{grid-area:info;max-width:680px;align-self:start;gap:7px;padding:9px 12px;border:1px solid #ffffff20;border-radius:14px;background:#141715e8;backdrop-filter:blur(14px)}
-.drive-state-grid{padding:7px}.target-output-label{font-size:10px}.drive-center .output-adjust{max-width:380px}.current-speed-line{font-size:9px}
-.pedals{grid-area:pedals;position:relative;display:block;justify-self:center;width:min(100%,310px);height:clamp(300px,45vh,440px);min-height:300px;max-width:none;align-self:center;touch-action:none}
-.drive-button{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:88%;max-width:none;min-height:48px;height:auto;border-radius:13px;display:flex;justify-content:center;align-items:center;gap:9px;touch-action:none;user-select:none;-webkit-user-select:none}
-.drive-button:active{transform:translate(-50%,-50%) scale(.97)}.drive-button.is-editing{border-style:dashed;border-color:#e7eae780;cursor:grab}.drive-button.is-editing:active{transform:translate(-50%,-50%) scale(1.02)}
-.drive-glyph svg{width:19px;height:19px}.drive-button b{font-size:12px}.literal-plus{font-size:25px;line-height:1;font-weight:400}
-.layout-toggle{height:37px;padding:0 10px;border:1px solid #ffffff24;border-radius:9px;background:#171a18;color:#fff;font-size:10px;white-space:nowrap}
-.drive-controls .game-stick{width:min(27vw,178px);height:min(27vw,178px)}
-@media(max-width:650px){
- .drive-scene{overflow-y:auto;padding:env(safe-area-inset-top) 10px max(12px,env(safe-area-inset-bottom))}
- .drive-video{height:clamp(52px,10vh,82px);margin-top:2px}.video-empty .camera-empty-icon{display:none}.video-empty{flex-direction:row;gap:8px}.video-empty span{margin:0}
- .drive-hud{display:flex;flex-wrap:wrap;min-height:42px;gap:5px}.hud-brand{flex:1;min-width:0}.hud-motion{margin:0}.drive-emergency-head{order:4;flex:1 1 55%;min-height:40px}.layout-toggle{order:5;flex:1}.exit-drive{order:6;min-width:60px}
- .drive-controls{grid-template-columns:minmax(105px,.85fr) minmax(156px,1.15fr);grid-template-areas:"stick pedals" "info info";grid-template-rows:minmax(300px,43vh) auto;min-height:0;height:auto;padding:5px 0 10px;gap:5px 8px;}
- .game-stick{width:min(36vw,150px);height:min(36vw,150px);min-width:98px;min-height:98px}.joystick-column>small{max-width:130px}
- .pedals{width:100%;height:clamp(300px,43vh,390px);min-height:300px}.drive-button{width:96%;min-height:48px;padding:5px 7px}.drive-button b{font-size:11px}
- .drive-center{width:100%;padding:8px}.drive-state-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.drive-state-grid>div{display:grid;justify-items:center;text-align:center}.drive-state-grid b{font-size:9px}
- .rotate-hint{position:static;display:flex;width:max-content;margin:0 auto;font-size:8px}
-}
-@media(max-width:390px){.drive-controls{grid-template-columns:minmax(94px,.8fr) minmax(145px,1.2fr);gap:5px}.pedals{height:310px}.drive-button{min-height:45px}.layout-toggle{padding:0 6px;font-size:9px}}
-@media(orientation:landscape) and (max-height:520px){
- .drive-video{height:clamp(34px,9vh,54px);margin-top:0}.video-empty .camera-empty-icon{display:none}.video-empty{flex-direction:row;gap:8px}
- .drive-hud{min-height:38px;flex-wrap:nowrap}.drive-emergency-head{order:initial;flex:0 0 auto;min-height:34px}.layout-toggle,.exit-drive{order:initial;flex:0 0 auto;height:34px}
- .drive-controls{grid-template-columns:minmax(110px,.8fr) minmax(170px,1fr);grid-template-areas:"stick pedals" "info info";grid-template-rows:minmax(230px,58vh) auto;min-height:0;padding:3px 2vw 8px;gap:4px 12px}
- .pedals{height:min(56vh,280px);min-height:220px;width:min(95%,330px)}.drive-button{min-height:40px}.drive-center{padding:5px 9px}.drive-state-grid{padding:4px}.rotate-hint{display:none}
-}
-
-
 .autonomy-mode-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.autonomy-mode{min-height:68px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface2);color:var(--text);text-align:left;display:grid;gap:6px}.autonomy-mode span{display:flex;align-items:center;justify-content:space-between;gap:8px}.autonomy-mode b{font-size:12px}.autonomy-mode small{font-size:9px;color:var(--muted)}.autonomy-mode.selected{border-color:var(--text)}.autonomy-mode:disabled{opacity:.65;cursor:not-allowed}
 .runtime-log-list{display:grid;gap:8px}.runtime-log-entry{padding:13px 15px}.runtime-log-entry>b{display:block;margin-top:8px;font-size:12px}.runtime-log-meta{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:10px}.runtime-log-meta time{margin-left:auto}.log-level{padding:3px 7px;border-radius:20px;background:var(--surface2)}.log-level.error{background:#a9363022;color:#c24a42}.runtime-log-entry pre{max-height:180px;overflow:auto;padding:8px;border-radius:8px;background:var(--surface2);font-size:10px}
 
 .api-methods{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:6px}.api-methods>span{display:flex;justify-content:space-between;gap:6px;padding:7px 8px;border-radius:8px;background:var(--surface2);font-size:9px}.api-methods code{font-size:9px}.api-methods b{color:var(--muted);font-size:8px}
 
-
-@media(max-width:650px){
- .drive-hud{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-rows:36px 36px;gap:4px;min-height:76px;align-items:center}
- .drive-hud .hud-brand{grid-column:1;grid-row:1;width:auto;min-width:0;padding:6px 8px}.drive-hud .hud-brand b{font-size:9px;white-space:nowrap}.drive-hud .hud-brand small{font-size:7px;white-space:nowrap}
- .drive-hud .hud-motion{grid-column:2;grid-row:1;min-height:32px;padding:5px 7px;white-space:nowrap}.drive-hud .drive-emergency-head{grid-column:1/3;grid-row:2;min-height:34px}.drive-hud .layout-toggle{grid-column:3;grid-row:2;min-height:34px}.drive-hud .exit-drive{grid-column:3;grid-row:1;min-width:0;height:32px;padding:0 6px}
- .drive-controls{grid-template-rows:minmax(300px,37vh) auto}.drive-center{gap:5px;padding:6px 8px}.drive-state-grid{padding:5px}.drive-state-grid small{font-size:8px}.drive-state-grid b{font-size:9px}.target-output-label{margin-top:1px}.current-speed-line{font-size:8px}
+/* PUBG식 주행 화면: 카메라 배경 + 좌측 가감속/전후진 + 우측 조향 + 소형 정밀 속도 조절 */
+.drive-scene{padding:0;overflow:hidden}
+.drive-video>img,.drive-video>video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.drive-scene .drive-hud{position:absolute;z-index:3;top:env(safe-area-inset-top,0px);left:max(10px,env(safe-area-inset-left,0px));right:max(10px,env(safe-area-inset-right,0px));display:flex;flex-wrap:nowrap;align-items:center;gap:6px;min-height:0;padding-top:8px}
+.drive-scene .hud-brand{min-width:0;flex:0 1 auto}
+.drive-scene .hud-motion{margin-left:auto;gap:10px;white-space:nowrap}
+.hud-motion .dot{display:none}
+.drive-scene .drive-emergency-head{min-height:37px;height:37px;flex:none;grid-column:auto;grid-row:auto}
+.drive-scene .exit-drive{flex:none;grid-column:auto;grid-row:auto}
+.drive-hud .icon-button{width:37px;height:37px;flex:none;border:1px solid #ffffff22;border-radius:9px;background:#171a18;color:#fff}
+.drive-hud .icon-button:hover{background:#242825}
+.drive-scene .drive-sim-banner{position:absolute;z-index:3;top:calc(env(safe-area-inset-top,0px) + 54px);left:50%;transform:translateX(-50%);margin:0}
+.drive-scene .drive-error-banner{position:absolute;z-index:4;top:calc(env(safe-area-inset-top,0px) + 80px);left:50%;transform:translateX(-50%);margin:0}
+.drive-scene .rotate-hint{top:calc(env(safe-area-inset-top,0px) + 110px);bottom:auto}
+.drive-scene .drive-controls{position:absolute;z-index:2;left:0;right:0;bottom:0;display:flex;flex-wrap:nowrap;align-items:flex-end;justify-content:space-between;gap:10px;min-height:0;height:auto;max-width:none;margin:0;padding:0 max(16px,env(safe-area-inset-right,0px)) max(16px,env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));pointer-events:none}
+.drive-scene .drive-controls>*{pointer-events:auto}
+.drive-cluster{--s:clamp(54px,13vh,72px);--b:clamp(72px,19vh,100px);display:grid;gap:12px;align-items:center;justify-items:center}
+.cluster-left{grid-template-columns:var(--s) var(--b);grid-template-areas:"acc fwd" "dec fwd" "brk bwd"}
+.cluster-right{grid-template-columns:repeat(2,var(--b));grid-template-areas:"lt rt"}
+.cluster-left .act-increasePwm{grid-area:acc}.cluster-left .act-decreasePwm{grid-area:dec}.cluster-left .act-forward{grid-area:fwd}.cluster-left .act-brake{grid-area:brk}.cluster-left .act-backward{grid-area:bwd}
+.cluster-right .act-left{grid-area:lt}.cluster-right .act-right{grid-area:rt}
+.drive-btn{width:var(--s);height:var(--s);border:1px solid #ffffff40;border-radius:50%;background:#2a2d2bb3;color:#f2f4f2;display:grid;place-items:center;align-content:center;gap:2px;padding:0;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;backdrop-filter:blur(10px);box-shadow:0 6px 18px #0007;cursor:pointer}
+.drive-btn b{font-size:10px;font-weight:700}
+.drive-btn:active{transform:scale(.94);background:#4a4f4bd9}
+.drive-btn.act-forward,.drive-btn.act-backward,.drive-btn.act-left,.drive-btn.act-right{width:var(--b);height:var(--b)}
+.drive-btn.forward{background:#e9ece9d9;color:#171a18}
+.drive-btn.forward:active{background:#fff}
+.drive-btn .drive-glyph svg{width:20px;height:20px}
+.drive-btn.act-forward .drive-glyph svg,.drive-btn.act-backward .drive-glyph svg,.drive-btn.act-left .drive-glyph svg,.drive-btn.act-right .drive-glyph svg{width:30px;height:30px}
+.literal-plus{font-size:24px;line-height:1;font-weight:400}
+.fine-speed{display:flex;align-items:center;gap:6px;padding:5px;border:1px solid #ffffff2e;border-radius:99px;background:#141715d9;backdrop-filter:blur(12px);margin-bottom:6px}
+.fine-speed button{width:36px;height:36px;min-height:0;padding:0;border-radius:50%;border:1px solid #ffffff30;background:#2a2d2b;color:#fff;font-size:18px;line-height:1;touch-action:manipulation;cursor:pointer}
+.fine-speed button:active{background:#4a4f4b}
+.fine-speed label{display:grid;justify-items:center;gap:1px;min-width:66px}
+.fine-speed small{font-size:8px;color:#a9b0ab}
+.fine-speed label span{display:flex;align-items:baseline;gap:3px;font-size:9px;color:#a9b0ab}
+.fine-speed input{width:38px;height:22px;border:0;background:transparent;color:#fff;text-align:center;font-size:16px;font-weight:700;padding:0;appearance:textfield;-moz-appearance:textfield}
+.fine-speed input::-webkit-inner-spin-button,.fine-speed input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+@media(orientation:portrait){
+ .drive-scene .drive-controls{flex-wrap:wrap;row-gap:10px}
+ .fine-speed-slot{order:-1;flex:0 0 100%;display:flex;justify-content:center}
+ .fine-speed{margin-bottom:0}
 }
-@media(orientation:landscape) and (max-height:520px){
- .drive-hud{min-height:36px;height:36px;grid-template-rows:36px;display:flex;flex-wrap:nowrap}.drive-hud .drive-emergency-head,.drive-hud .layout-toggle,.drive-hud .exit-drive{grid-column:auto;grid-row:auto;min-height:32px;height:32px;flex:0 0 auto}
- .drive-controls{grid-template-rows:minmax(190px,52vh) auto}.pedals{height:min(49vh,220px);min-height:190px}.drive-button{min-height:36px}.drive-center{display:grid;grid-template-columns:1fr 1fr;gap:3px 8px;padding:4px 8px}.drive-state-grid{grid-column:1/-1;grid-template-columns:repeat(3,1fr);padding:3px}.drive-center .output-adjust{grid-column:2;grid-row:2/4}.drive-center .target-output-label{align-self:end}.drive-center .current-speed-line{font-size:7px}
+@media(orientation:landscape){.drive-scene .rotate-hint{display:none}}
+@media(max-width:520px){
+ .drive-cluster{--s:56px;--b:76px;gap:10px}
+ .drive-scene .hud-brand{display:none}
+ .hud-motion .dot{display:inline-block}
+ .hud-extra{display:none}
+ .drive-scene .drive-hud{gap:5px}
 }
