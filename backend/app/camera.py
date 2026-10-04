@@ -29,7 +29,7 @@ class CameraService:
 
                 config = camera.create_video_configuration(
                     main={
-                        "size": (640, 480),
+                        "size": (1280, 720),
                         "format": "RGB888",
                     },
                     buffer_count=4,
@@ -119,7 +119,7 @@ class CameraService:
             "available": self._available,
             "started": self._started,
             "error": self._error,
-            "resolution": [640, 480],
+            "resolution": [1280, 720],
             "format": "MJPEG",
         }
 
