@@ -133,3 +133,21 @@ button:focus-visible,input:focus-visible{outline:2px solid #727873;outline-offse
  .hud-extra{display:none}
  .drive-scene .drive-hud{gap:5px}
 }
+
+/* 조작 방식 선택: 버튼 / 조이스틱 */
+.style-toggle{display:flex;flex:none;height:37px;border:1px solid #ffffff22;border-radius:9px;background:#171a18;overflow:hidden}
+.style-toggle button{border:0;background:transparent;color:#a9b0ab;padding:0 10px;font-size:10px;font-weight:700;cursor:pointer}
+.style-toggle button.selected{background:#e9ece9;color:#171a18}
+.secondary.selected{background:var(--surface2);border-color:var(--text)}
+.drive-scene .joystick-column{align-self:flex-end;margin-bottom:6px}
+.drive-scene .game-stick{width:clamp(120px,34vh,176px);height:clamp(120px,34vh,176px);min-width:0;min-height:0;max-width:none;max-height:none}
+.cluster-rc{grid-template-columns:var(--s) var(--b);grid-template-areas:". fwd" "brk bwd"}
+.cluster-rc .act-forward{grid-area:fwd}.cluster-rc .act-backward{grid-area:bwd}.cluster-rc .act-brake{grid-area:brk}
+.fine-speed.readout{padding:6px 16px}
+.pwm-readout{font-size:18px;color:#fff}
+@media(max-width:520px){
+ .drive-scene .game-stick{width:124px;height:124px}
+ .drive-hud .icon-button{display:none}
+ .style-toggle button{padding:0 7px;font-size:9px}
+ .drive-scene .drive-hud{flex-wrap:wrap}
+}
