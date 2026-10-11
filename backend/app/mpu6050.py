@@ -25,6 +25,8 @@ class MPU6050Service:
     def __init__(self) -> None:
         self._bus = None
         self._lock = threading.RLock()
+        self._i2c_lock = threading.Lock()
+        self._attempted = False
         self._thread: threading.Thread | None = None
         self._running = False
         self._error: str | None = None
@@ -46,6 +48,9 @@ class MPU6050Service:
         with self._lock:
             if self._running and self._bus is not None:
                 return True
+            if self._attempted and self._error:
+                return False
+            self._attempted = True
             try:
                 import smbus
                 bus = smbus.SMBus(1)
@@ -73,12 +78,13 @@ class MPU6050Service:
         bus = self._bus
         if bus is None:
             raise RuntimeError("I²C 버스가 초기화되지 않았습니다.")
-        ax = self._signed_word(bus, 0x3B) / self.ACCEL_SENSITIVITY
-        ay = self._signed_word(bus, 0x3D) / self.ACCEL_SENSITIVITY
-        az = self._signed_word(bus, 0x3F) / self.ACCEL_SENSITIVITY
-        gx = self._signed_word(bus, 0x43) / self.GYRO_SENSITIVITY
-        gy = self._signed_word(bus, 0x45) / self.GYRO_SENSITIVITY
-        gz = self._signed_word(bus, 0x47) / self.GYRO_SENSITIVITY
+        with self._i2c_lock:
+            ax = self._signed_word(bus, 0x3B) / self.ACCEL_SENSITIVITY
+            ay = self._signed_word(bus, 0x3D) / self.ACCEL_SENSITIVITY
+            az = self._signed_word(bus, 0x3F) / self.ACCEL_SENSITIVITY
+            gx = self._signed_word(bus, 0x43) / self.GYRO_SENSITIVITY
+            gy = self._signed_word(bus, 0x45) / self.GYRO_SENSITIVITY
+            gz = self._signed_word(bus, 0x47) / self.GYRO_SENSITIVITY
         total_g = math.sqrt(ax * ax + ay * ay + az * az)
         with self._lock:
             bias = self._bias
@@ -105,7 +111,8 @@ class MPU6050Service:
             self._last_dynamic_g = dynamic_g or 0.0
             if dynamic_g is not None and dynamic_g >= self.PEAK_THRESHOLD_G:
                 # Suppress repeated peak reports within 150 ms; keep the strongest event.
-                if now - self._last_peak_time >= 0.15 or self._peak is None or dynamic_g > self._peak.get("dynamic_g", 0):
+                if self._peak is None or dynamic_g > self._peak.get("dynamic_g", 0):
+                    # Keep the strongest detected peak since the last reset/calibration.
                     self._peak = dict(sample)
                     self._last_peak_time = now
             self._samples.append(sample)
@@ -141,11 +148,12 @@ class MPU6050Service:
                 bus = self._bus
                 if bus is None:
                     raise RuntimeError("I²C 버스가 초기화되지 않았습니다.")
-                readings.append((
-                    self._signed_word(bus, 0x3B) / self.ACCEL_SENSITIVITY,
-                    self._signed_word(bus, 0x3D) / self.ACCEL_SENSITIVITY,
-                    self._signed_word(bus, 0x3F) / self.ACCEL_SENSITIVITY,
-                ))
+                with self._i2c_lock:
+                    readings.append((
+                        self._signed_word(bus, 0x3B) / self.ACCEL_SENSITIVITY,
+                        self._signed_word(bus, 0x3D) / self.ACCEL_SENSITIVITY,
+                        self._signed_word(bus, 0x3F) / self.ACCEL_SENSITIVITY,
+                    ))
             except Exception as exc:
                 with self._lock:
                     self._error = f"보정 실패: {exc}"
@@ -165,8 +173,22 @@ class MPU6050Service:
             self._last_peak_time = 0.0
         return self.status()
 
+    def close(self) -> None:
+        with self._lock:
+            self._running = False
+            thread = self._thread
+            bus = self._bus
+            self._bus = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.5)
+        if bus is not None:
+            try:
+                bus.close()
+            except Exception:
+                pass
+
     def status(self) -> dict[str, Any]:
-        if not self._running and self._bus is None:
+        if not self._running and self._bus is None and not self._error:
             self.start()
         with self._lock:
             samples = list(self._samples)
@@ -177,7 +199,7 @@ class MPU6050Service:
                 "calibrated": self._bias is not None,
                 "bias_g": list(self._bias) if self._bias is not None else None,
                 "latest": latest,
-                "samples": samples[-500:],
+                "samples": samples[-250:],
                 "peak": dict(self._peak) if self._peak else None,
                 "sample_rate_target_hz": 100,
                 "range_g": 8,
