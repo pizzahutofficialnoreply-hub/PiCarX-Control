@@ -401,6 +401,13 @@ async def impact_stop():
     return await asyncio.to_thread(mpu6050_service.stop_recording)
 
 
+@app.get("/api/impact/recording-data")
+async def impact_recording_data():
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 실제 측정 데이터를 내보낼 수 없습니다.")
+    return await asyncio.to_thread(mpu6050_service.recording_data)
+
+
 @app.post("/api/impact/reset-peak")
 async def impact_reset_peak():
     if control.adapter.mode != "hardware":
