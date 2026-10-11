@@ -14,6 +14,7 @@ from .models import AutonomyStart, CalibrationUpdate, DriveCommand, SteeringTest
 from .autonomy.registry import controller_catalog
 from .services.event_log import read_events, record_event
 from .camera import camera_service
+from .mpu6050 import mpu6050_service
 
 WATCHDOG_SECONDS = 0.5
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "settings.json"
@@ -361,6 +362,32 @@ async def websocket_status(websocket: WebSocket):
             await control.stop(reason="websocket_disconnect")
         except Exception:
             pass
+
+
+@app.get("/api/impact/status")
+async def impact_status():
+    if control.adapter.mode != "hardware":
+        return {"mode": "mock", "available": False, "calibrated": False, "latest": None,
+                "samples": [], "peak": None, "sample_rate_target_hz": 100, "range_g": 8,
+                "error": "시뮬레이션 모드에서는 실제 MPU-6050 측정값을 제공하지 않습니다."}
+    return await asyncio.to_thread(mpu6050_service.status)
+
+
+@app.post("/api/impact/calibrate")
+async def impact_calibrate():
+    if control.adapter.mode != "hardware" or not control.adapter.connected:
+        raise HTTPException(409, "실제 하드웨어 모드에서만 가속도 센서를 보정할 수 있습니다.")
+    result = await asyncio.to_thread(mpu6050_service.calibrate)
+    if not result.get("available") or not result.get("calibrated"):
+        raise HTTPException(503, result.get("error") or "MPU-6050 보정에 실패했습니다.")
+    return result
+
+
+@app.post("/api/impact/reset-peak")
+async def impact_reset_peak():
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 피크를 초기화할 수 없습니다.")
+    return await asyncio.to_thread(mpu6050_service.reset_peak)
 
 @app.get("/api/camera/status")
 def camera_status() -> dict:
