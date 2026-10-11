@@ -244,6 +244,7 @@ async def lifespan(app: FastAPI):
         try:
             await control.stop(reason="server_shutdown")
         finally:
+            mpu6050_service.close()
             control.adapter.close()
 
 app = FastAPI(title="PiCar X Control API", version="0.2.0", lifespan=lifespan)
