@@ -200,6 +200,14 @@ class MPU6050Service:
             self._recording = False
         return self.status()
 
+    def recording_data(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "recording": self._recording,
+                "count": len(self._recorded_samples),
+                "samples": [dict(sample) for sample in self._recorded_samples],
+            }
+
     def reset_peak(self) -> dict[str, Any]:
         with self._lock:
             self._peak = None
@@ -240,7 +248,8 @@ class MPU6050Service:
                 "latest": latest,
                 "samples": samples[-250:],
                 "recording": self._recording,
-                "recorded_samples": recorded,
+                "recorded_samples": recorded[-250:],
+                "recorded_sample_count": len(recorded),
                 "actual_sample_rate_hz": actual_rate,
                 "calibration_stability_g": self._calibration_stability_g,
                 "peak": dict(self._peak) if self._peak else None,
