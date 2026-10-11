@@ -146,6 +146,14 @@ class MPU6050Service:
     def calibrate(self) -> dict[str, Any]:
         if not self.start():
             return self.status()
+        # A failed recalibration must not leave an old baseline marked as valid.
+        with self._lock:
+            self._recording = False
+            self._bias = None
+            self._calibration_stability_g = None
+            self._recorded_samples.clear()
+            self._peak = None
+            self._error = None
         readings: list[tuple[float, float, float]] = []
         # User should keep the car stationary on a level surface during this step.
         for _ in range(60):
