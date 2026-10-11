@@ -384,6 +384,23 @@ async def impact_calibrate():
     return result
 
 
+@app.post("/api/impact/start")
+async def impact_start():
+    if control.adapter.mode != "hardware" or not control.adapter.connected:
+        raise HTTPException(409, "실제 하드웨어 모드에서만 측정을 시작할 수 있습니다.")
+    result = await asyncio.to_thread(mpu6050_service.start_recording)
+    if not result.get("available") or not result.get("calibrated") or result.get("error"):
+        raise HTTPException(409, result.get("error") or "MPU-6050 보정 후 측정을 시작하세요.")
+    return result
+
+
+@app.post("/api/impact/stop")
+async def impact_stop():
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 측정을 정지할 수 없습니다.")
+    return await asyncio.to_thread(mpu6050_service.stop_recording)
+
+
 @app.post("/api/impact/reset-peak")
 async def impact_reset_peak():
     if control.adapter.mode != "hardware":
