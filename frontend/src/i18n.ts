@@ -14,7 +14,7 @@ const ko = {
 styleButtons:'버튼 조작',
 styleJoystick:'조이스틱 조작',
 joystickSpeedHint:'조이스틱을 움직여 방향과 속도를 조절하세요.',
-impactTitle:'6축 가속도 센서 · 충격 분석', impactConnected:'MPU-6050 연결됨', impactNeedsConnection:'실제 센서 연결 필요', impactSampling:'목표 100 Hz', impactCalibrate:'정지 상태 보정', impactResetPeak:'피크 초기화', impactCalibrationHint:'차량을 평평한 바닥에 정지시키고 보정하세요. 보정 후의 변화량은 정지 자세를 기준으로 한 상대 가속도입니다.', impactDynamic:'동적 가속도 크기', impactMps2:'동적 가속도 환산', impactTotal:'전체 가속도 크기', impactRange:'가속도 범위', impactCalibration:'보정 상태', impactCalibrated:'보정 완료', impactNotCalibrated:'보정 필요', impactGraph:'최근 동적 가속도 그래프', impactWaiting:'센서 데이터 대기 중 · 실제 하드웨어 모드에서 확인하세요.', impactPeak:'감지된 피크', impactPeakTime:'피크 시각', impactPeakAcceleration:'피크 환산 가속도', impactNoPeak:'피크 미감지', impactAnalysisNote:'피크는 보정 기준 대비 0.15 g 이상인 변화에서 검출합니다. 반복 이벤트는 약 150 ms 간격으로 억제합니다. 포화 여부와 표본 간격도 실험 기록에서 확인하세요.', 
+impactTitle:'6축 가속도 센서 · 충격 분석', impactExportCsv:'최근 데이터 CSV', impactSaturationWarning:'가속도 범위 상한에 근접했습니다. 더 큰 충격에서는 포화 여부를 확인하세요.', impactConnected:'MPU-6050 연결됨', impactNeedsConnection:'실제 센서 연결 필요', impactSampling:'목표 100 Hz', impactCalibrate:'정지 상태 보정', impactResetPeak:'피크 초기화', impactCalibrationHint:'차량을 평평한 바닥에 정지시키고 보정하세요. 보정 후의 변화량은 정지 자세를 기준으로 한 상대 가속도입니다.', impactDynamic:'동적 가속도 크기', impactMps2:'동적 가속도 환산', impactTotal:'전체 가속도 크기', impactRange:'가속도 범위', impactCalibration:'보정 상태', impactCalibrated:'보정 완료', impactNotCalibrated:'보정 필요', impactGraph:'최근 동적 가속도 그래프', impactWaiting:'센서 데이터 대기 중 · 실제 하드웨어 모드에서 확인하세요.', impactPeak:'감지된 피크', impactPeakTime:'피크 시각', impactPeakAcceleration:'피크 환산 가속도', impactNoPeak:'피크 미감지', impactAnalysisNote:'피크는 보정 기준 대비 0.15 g 이상인 변화에서 검출합니다. 반복 이벤트는 약 150 ms 간격으로 억제합니다. 포화 여부와 표본 간격도 실험 기록에서 확인하세요.', 
 joystickSpeed:'조이스틱 속도',
 } as const;
 
