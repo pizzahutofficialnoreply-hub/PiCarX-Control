@@ -113,7 +113,7 @@ class MPU6050Service:
         with self._lock:
             self._last_dynamic_g = dynamic_g or 0.0
             if self._recording and dynamic_g is not None and dynamic_g >= self.PEAK_THRESHOLD_G:
-                # Suppress repeated peak reports within 150 ms; keep the strongest event.
+                # Keep only the strongest threshold-crossing sample in this recording.
                 if self._peak is None or dynamic_g > self._peak.get("dynamic_g", 0):
                     # Keep the strongest detected peak since the last reset/calibration.
                     self._peak = dict(sample)
