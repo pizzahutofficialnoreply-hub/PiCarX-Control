@@ -182,3 +182,22 @@ button:focus-visible,input:focus-visible{outline:2px solid #727873;outline-offse
 
 /* Keep the driving overlay visible while the sensor stream reconnects or warms up. */
 .drive-impact-overlay.is-waiting{min-height:54px;padding:10px 14px;border:1px solid #ffffff28;border-radius:10px;background:#11171355;backdrop-filter:blur(4px);opacity:.72;display:flex;flex-direction:column;justify-content:center;gap:4px}.drive-impact-waiting{font-size:10px;color:#f0f5f0;line-height:1.4;overflow-wrap:anywhere}.drive-impact-overlay.is-waiting .drive-impact-overlay-label{position:static;font-size:11px}
+
+/* Research experiment management */
+.experiment-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start}
+.experiment-card{min-width:0;padding:17px}
+.experiment-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;margin-top:16px}
+.experiment-fields label,.candidate-row label,.experiment-threshold label{display:grid;gap:6px;color:var(--muted);font-size:10px}
+.experiment-fields input,.experiment-fields select,.candidate-row select,.experiment-threshold input{width:100%;min-width:0;height:38px;padding:0 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface2);color:var(--text);font-size:11px}
+.experiment-fields .experiment-note{grid-column:1/-1}
+.experiment-mass{display:grid;grid-template-columns:1fr auto;align-items:center;gap:5px 12px;margin-top:15px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--surface2)}
+.experiment-mass span{font-size:10px;color:var(--muted)}.experiment-mass strong{font-size:20px;font-variant-numeric:tabular-nums}.experiment-mass small{grid-column:1/-1;font-size:9px;color:var(--muted)}
+.experiment-threshold{display:grid;grid-template-columns:1fr 100px;align-items:center;gap:8px;margin-top:14px}.experiment-threshold small{grid-column:1/-1;color:var(--muted);font-size:9px;line-height:1.5}
+.experiment-summary-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:16px 0}
+.experiment-summary-grid>div{display:grid;gap:8px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--surface2)}
+.experiment-summary-grid small{font-size:9px;color:var(--muted)}.experiment-summary-grid strong{font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.experiment-table-wrap{width:100%;overflow:auto}.experiment-table{width:100%;border-collapse:collapse;font-size:10px;white-space:nowrap}.experiment-table th,.experiment-table td{padding:10px 8px;border-top:1px solid var(--line);text-align:right}.experiment-table th{color:var(--muted);font-weight:600}.experiment-table th:first-child,.experiment-table td:first-child{text-align:left}
+.experiment-runs{display:grid;gap:10px;margin-top:18px}.section-subhead{display:grid;gap:5px;padding:0 2px 4px}.section-subhead h2{font-size:14px}.section-subhead p{color:var(--muted);font-size:10px;line-height:1.5}
+.experiment-run{padding:15px;min-width:0}.experiment-run h3{font-size:12px}.experiment-run .card-head{align-items:flex-start}.experiment-run .card-head>div{min-width:0}.experiment-run .card-head p{line-height:1.6}.candidate-list{display:grid;gap:7px;margin-top:12px}.candidate-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(135px,.55fr);gap:12px;align-items:center;padding:10px;border:1px solid var(--line);border-radius:8px}.candidate-row>div{display:grid;gap:5px;min-width:0}.candidate-row strong{font-size:13px;font-variant-numeric:tabular-nums}.candidate-row small{font-size:9px;color:var(--muted);line-height:1.5;overflow-wrap:anywhere}
+@media(max-width:950px){.experiment-layout{grid-template-columns:1fr}}
+@media(max-width:650px){.experiment-layout{gap:9px}.experiment-card{padding:13px}.experiment-fields{gap:9px}.experiment-fields label{font-size:9px}.experiment-fields input,.experiment-fields select{font-size:10px}.experiment-summary-grid>div{padding:10px}.experiment-summary-grid strong{font-size:19px}.experiment-run{padding:12px}.experiment-run .card-head{flex-wrap:wrap}.candidate-row{grid-template-columns:minmax(0,1fr);gap:9px}.candidate-row label{max-width:none}.experiment-layout .button-row{flex-wrap:wrap}.experiment-layout .button-row>*{flex:1}.experiment-table{font-size:9px}}
