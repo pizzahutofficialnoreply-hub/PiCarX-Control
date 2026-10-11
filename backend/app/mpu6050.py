@@ -36,6 +36,9 @@ class MPU6050Service:
         self._peak: dict[str, Any] | None = None
         self._last_peak_time = 0.0
         self._last_dynamic_g = 0.0
+        self._recording = False
+        self._recorded_samples: deque[dict[str, Any]] = deque(maxlen=12000)
+        self._calibration_stability_g: float | None = None
 
     @staticmethod
     def _signed_word(bus: Any, register: int) -> int:
@@ -109,13 +112,15 @@ class MPU6050Service:
         }
         with self._lock:
             self._last_dynamic_g = dynamic_g or 0.0
-            if dynamic_g is not None and dynamic_g >= self.PEAK_THRESHOLD_G:
+            if self._recording and dynamic_g is not None and dynamic_g >= self.PEAK_THRESHOLD_G:
                 # Suppress repeated peak reports within 150 ms; keep the strongest event.
                 if self._peak is None or dynamic_g > self._peak.get("dynamic_g", 0):
                     # Keep the strongest detected peak since the last reset/calibration.
                     self._peak = dict(sample)
                     self._last_peak_time = now
             self._samples.append(sample)
+            if self._recording:
+                self._recorded_samples.append(dict(sample))
             cutoff = now - self.HISTORY_SECONDS
             while self._samples and self._samples[0]["elapsed_s"] < cutoff:
                 self._samples.popleft()
@@ -160,11 +165,39 @@ class MPU6050Service:
                 return self.status()
             time.sleep(0.01)
         bias = tuple(sum(row[i] for row in readings) / len(readings) for i in range(3))
+        stability = max(math.sqrt(sum((row[i] - bias[i]) ** 2 for row in readings) / len(readings)) for i in range(3))
+        if stability > 0.05:
+            with self._lock:
+                self._error = f"보정 중 센서가 안정적이지 않습니다(표준편차 {stability:.3f} g). 차량을 고정하고 다시 보정하세요."
+                self._calibration_stability_g = stability
+            return self.status()
         with self._lock:
             self._bias = bias
+            self._calibration_stability_g = stability
             self._peak = None
+            self._recorded_samples.clear()
+            self._recording = False
             self._samples.clear()
             self._error = None
+        return self.status()
+
+    def start_recording(self) -> dict[str, Any]:
+        if not self.start():
+            return self.status()
+        with self._lock:
+            if self._bias is None:
+                self._error = "먼저 정지 상태 보정을 완료하세요."
+                return self.status()
+            self._recorded_samples.clear()
+            self._peak = None
+            self._last_peak_time = 0.0
+            self._recording = True
+            self._error = None
+        return self.status()
+
+    def stop_recording(self) -> dict[str, Any]:
+        with self._lock:
+            self._recording = False
         return self.status()
 
     def reset_peak(self) -> dict[str, Any]:
@@ -192,7 +225,13 @@ class MPU6050Service:
             self.start()
         with self._lock:
             samples = list(self._samples)
+            recorded = list(self._recorded_samples)
             latest = dict(samples[-1]) if samples else None
+            actual_rate = None
+            if len(samples) >= 2:
+                elapsed = samples[-1]["elapsed_s"] - samples[0]["elapsed_s"]
+                if elapsed > 0:
+                    actual_rate = round((len(samples) - 1) / elapsed, 1)
             return {
                 "mode": "hardware",
                 "available": self._available,
@@ -200,6 +239,10 @@ class MPU6050Service:
                 "bias_g": list(self._bias) if self._bias is not None else None,
                 "latest": latest,
                 "samples": samples[-250:],
+                "recording": self._recording,
+                "recorded_samples": recorded,
+                "actual_sample_rate_hz": actual_rate,
+                "calibration_stability_g": self._calibration_stability_g,
                 "peak": dict(self._peak) if self._peak else None,
                 "sample_rate_target_hz": 100,
                 "range_g": 8,
