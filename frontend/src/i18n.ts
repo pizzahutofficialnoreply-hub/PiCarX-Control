@@ -1,7 +1,7 @@
 // 사용자에게 보이는 문구는 이 파일에서 관리합니다. 기본 언어는 한국어입니다.
 
 const ko = {
-  home:'홈', camera:'카메라', sensors:'센서', logs:'주행 기록', settings:'설정', appName:'PiCar-X', simulation:'시뮬레이션 모드', serverMock:'서버 모의 모드', hardware:'실제 차량', local:'가상 차량 연결',
+  home:'홈', camera:'카메라', sensors:'센서', experiment:'실험 관리', logs:'주행 기록', settings:'설정', appName:'PiCar-X', simulation:'시뮬레이션 모드', serverMock:'서버 모의 모드', hardware:'실제 차량', local:'가상 차량 연결',
   connecting:'연결 중…', serverOffline:'서버 연결 안 됨', vehicleOffline:'서버 연결됨 · 차량 연결 안 됨', picarxConnected:'PiCar-X 연결됨', stopped:'정지됨', forward:'전진 중', backward:'후진 중', left:'좌회전 중', right:'우회전 중', error:'오류 발생',
   overview:'차량 상태', refresh:'새로고침', reconnect:'다시 연결', settingsEntry:'설정', mockNotice:'시뮬레이션 모드 · 실제 차량에 명령을 보내지 않습니다', hardwareNotice:'실제 차량 제어 모드', startDrive:'주행 시작', cameraAction:'카메라', sensorsAction:'센서', logsAction:'주행 기록', battery:'배터리', batteryNoSource:'배터리 측정 API 미지원', cameraStatus:'카메라', measuredSpeed:'실측 속도', sensorStatus:'센서', pwm:'목표 PWM',
   unknown:'확인 불가', unsupported:'미지원', needsConnection:'연결 필요', notMeasured:'측정 불가', cameraWaiting:'카메라 연결 대기', noCameraStream:'영상 스트림을 사용할 수 없습니다.', cameraDescription:'현재 실제 영상 스트림은 연결되어 있지 않습니다. 확인된 카메라 서보만 제어할 수 있습니다.', deviceUnknown:'장치 상태 확인 불가', imageUntested:'장치 감지 · 영상 미검증', deviceMissing:'장치 미감지', sensorsTitle:'센서 및 진단', sensorsDescription:'모의 데이터와 실제 하드웨어 응답을 구분해 표시합니다.', simulated:'시뮬레이션 데이터', simulatedDisclaimer:'가상 값이며 실제 센서 측정값이 아닙니다.', distance:'거리', lineSensor:'그레이스케일 센서', cliffSensor:'절벽 감지', batteryStatus:'배터리 상태', speedEstimate:'실제 속도', simulatedLine:'가운데 (가상)', noSensor:'센서 API 연결 필요', noBattery:'배터리 API 미지원',
