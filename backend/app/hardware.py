@@ -30,7 +30,7 @@ class HardwareAdapter(Protocol):
     tilt_center: int
     def stop(self) -> None: ...
     def drive(self, direction: str, speed: int, steering: int) -> None: ...
-    def drive_experiment(self, mode: str, value: float) -> None: ...
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None: ...
     def test_steering(self, direction: str, angle: int) -> None: ...
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None: ...
     def close(self) -> None: ...
@@ -61,8 +61,8 @@ class MockAdapter:
         self.motion = "stopped"
     def drive(self, direction: str, speed: int, steering: int) -> None:
         self.motion = direction
-    def drive_experiment(self, mode: str, value: float) -> None:
-        self.motion = "forward"
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None:
+        self.motion = direction
     def test_steering(self, direction: str, angle: int) -> None:
         pass
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -105,7 +105,7 @@ class UnavailableAdapter:
         return
     def drive(self, direction: str, speed: int, steering: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
-    def drive_experiment(self, mode: str, value: float) -> None:
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def test_steering(self, direction: str, angle: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
@@ -222,8 +222,8 @@ class PiCarXAdapter:
         else:
             raise ValueError(f"Unsupported direction: {direction}")
 
-    def drive_experiment(self, mode: str, value: float) -> None:
-        """방지턱 실험용 직진.
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None:
+        """방지턱 실험용 직진·후진(자동 측정 주행과 복귀).
 
         - ``pwm``  : 라이브러리 값 0~100을 그대로 ``forward()``에 전달합니다.
           라이브러리가 내부에서 ``speed/2 + 50``으로 바꾸므로 실제 듀티비는 약 50~100%입니다.
@@ -233,16 +233,20 @@ class PiCarXAdapter:
         """
         car = self._require_car()
         output = self._clamp(round(value), 0, 100)
-        self._set_steering(0)
+        if direction not in ("forward", "backward"):
+            raise ValueError(f"Unsupported experiment direction: {direction}")
+        move = car.forward if direction == "forward" else car.backward
+        # 자이로 직진 보정값(작은 각도)을 앱 조향 중심값과 함께 적용합니다.
+        self._set_steering(self._clamp(round(steering), -MAX_STEERING, MAX_STEERING))
         if mode == "pwm":
-            car.forward(output)
+            move(output)
             return
         if mode != "duty":
             raise ValueError(f"Unsupported experiment output mode: {mode}")
         pins = getattr(car, "motor_speed_pins", None)
         if not pins or not all(callable(getattr(pin, "pulse_width_percent", None)) for pin in pins):
             raise RuntimeError("설치된 picarx 라이브러리에서 motor_speed_pins를 찾지 못해 직접 듀티 모드를 쓸 수 없습니다. PWM 모드를 사용하세요.")
-        car.forward(1)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
+        move(1)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
         for pin in pins:
             pin.pulse_width_percent(output)
 

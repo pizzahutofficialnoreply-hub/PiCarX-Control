@@ -59,6 +59,11 @@ class MPU6050Service:
         self._record_started_wall: datetime | None = None
         self._peak: Sample | None = None
         self._calibration_stability_g: float | None = None
+        # 자이로 직진 보정용 방향(yaw) 적분. 반시계 방향(위에서 볼 때) +
+        self._heading = 0.0
+        self._heading_active = False
+        self._gyro_bias = 0.0
+        self._last_t: float | None = None
         # 단조 시간 ↔ 실제 시각 변환 기준
         self._mono0 = time.monotonic()
         self._wall0 = datetime.now(timezone.utc)
@@ -124,6 +129,10 @@ class MPU6050Service:
             try:
                 sample = self._read_raw()
                 with self._lock:
+                    if self._heading_active and self._last_t is not None and self._bias is not None:
+                        yaw = self._vertical_sign * sample[4 + self._vertical_axis] - self._gyro_bias
+                        self._heading += yaw * (sample[0] - self._last_t)
+                    self._last_t = sample[0]
                     self._samples.append(sample)
                     if self._recording:
                         if len(self._record) < max_record:
@@ -189,15 +198,53 @@ class MPU6050Service:
             self._peak = s
 
     def _decimate(self, rows: list[Sample], points: int) -> list[Sample]:
-        """구간마다 변화량이 가장 큰 표본을 남겨 피크가 사라지지 않게 줄입니다."""
-        if len(rows) <= points:
+        """구간마다 수직 가속도 변화가 가장 큰 표본을 남겨 피크가 사라지지 않게 줄입니다.
+
+        라즈베리파이에서도 가볍도록 수직 축 값만 비교합니다.
+        """
+        n = len(rows)
+        if n <= points:
             return rows
+        bias = self._bias
+        axis = 1 + self._vertical_axis
+        ref = bias[self._vertical_axis] if bias else 0.0
         out: list[Sample] = []
-        step = len(rows) / points
+        step = n / points
         for i in range(points):
-            chunk = rows[int(i * step):int((i + 1) * step)] or [rows[min(len(rows) - 1, int(i * step))]]
-            out.append(max(chunk, key=lambda s: abs((self._vertical(s) or 1.0) - 1.0) + self._dynamic(s)))
+            a = int(i * step)
+            b = max(a + 1, int((i + 1) * step))
+            best = rows[a]
+            best_score = abs(best[axis] - ref)
+            for j in range(a + 1, min(b, n)):
+                score = abs(rows[j][axis] - ref)
+                if score > best_score:
+                    best, best_score = rows[j], score
+            out.append(best)
         return out
+
+    # ------------------------------------------------------------ 직진 보정
+    def heading_reset(self, still_window_s: float = 0.4) -> bool:
+        """차가 정지한 상태에서 호출: 최근 구간 평균으로 자이로 영점을 잡고 방향을 0으로 둡니다."""
+        with self._lock:
+            if self._bias is None or not self._samples:
+                return False
+            t_end = self._samples[-1][0]
+            axis = 4 + self._vertical_axis
+            recent = [s[axis] for s in self._samples if t_end - s[0] <= still_window_s]
+            if len(recent) < 10:
+                return False
+            self._gyro_bias = self._vertical_sign * sum(recent) / len(recent)
+            self._heading = 0.0
+            self._heading_active = True
+            return True
+
+    def heading_deg(self) -> float | None:
+        with self._lock:
+            return self._heading if self._heading_active else None
+
+    def heading_stop(self) -> None:
+        with self._lock:
+            self._heading_active = False
 
     # ------------------------------------------------------------ 보정
     def calibrate(self) -> dict[str, Any]:
@@ -285,6 +332,16 @@ class MPU6050Service:
             "columns": cols,
         }
 
+    def recording_csv(self) -> str:
+        """현재 기록 전체를 CSV 문자열로 만듭니다(축소 없음)."""
+        meta = self.recording_columns()
+        cols = meta["columns"]
+        keys = list(cols.keys())
+        lines = [",".join(keys)]
+        for i in range(len(cols["t_s"])):
+            lines.append(",".join(str(cols[k][i]) for k in keys))
+        return "\n".join(lines) + "\n"
+
     def recording_data(self) -> dict[str, Any]:
         """기존 API 호환: dict 목록(피크 보존 다운샘플, 최대 2000개)."""
         with self._lock:
@@ -336,7 +393,8 @@ class MPU6050Service:
             "latest": latest,
             "samples": [self._derived(s) for s in self._decimate(live, self.LIVE_POINTS)],
             "recording": recording,
-            "recorded_samples": [self._derived(s) for s in self._decimate(record, 400)],
+            # 기록 중 미리보기는 최근 구간만 보냅니다(전체 원자료는 recording.csv로 내려받음).
+            "recorded_samples": [self._derived(s) for s in self._decimate(_tail(record, self.HISTORY_SECONDS), 400)],
             "recorded_sample_count": len(record),
             "recorded_seconds": round(record[-1][0] - record[0][0], 3) if len(record) > 1 else 0.0,
             "actual_sample_rate_hz": _rate(live),
@@ -346,6 +404,20 @@ class MPU6050Service:
             "range_g": 8,
             "error": error,
         }
+
+
+def _tail(rows: list[Sample], seconds: float) -> list[Sample]:
+    if not rows:
+        return rows
+    t_end = rows[-1][0]
+    lo, hi = 0, len(rows)
+    while lo < hi:  # 이진 탐색으로 최근 구간 시작점
+        mid = (lo + hi) // 2
+        if t_end - rows[mid][0] > seconds:
+            lo = mid + 1
+        else:
+            hi = mid
+    return rows[lo:]
 
 
 def _rate(rows: Iterable[Sample]) -> float | None:

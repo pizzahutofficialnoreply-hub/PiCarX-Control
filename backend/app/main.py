@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from .hardware import MockAdapter, PiCarXAdapter, UnavailableAdapter
@@ -153,7 +153,8 @@ class ControlService:
                     pass
                 raise
 
-    async def experiment_drive(self, mode: str, value: float, generation: int) -> bool:
+    async def experiment_drive(self, mode: str, value: float, generation: int,
+                               direction: str = "forward", steering: float = 0.0) -> bool:
         """실험용 직진 명령. 자동 측정 주행이 0.1초마다 호출해 watchdog을 갱신합니다.
 
         정지 명령으로 generation이 바뀌면 즉시 False를 반환해 주행을 끝냅니다.
@@ -164,8 +165,8 @@ class ControlService:
             if not self.adapter.connected:
                 raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
             try:
-                self.adapter.drive_experiment(mode, value)
-                self.motion, self.speed, self.steering = "forward", int(round(value)), 0
+                self.adapter.drive_experiment(mode, value, direction, steering)
+                self.motion, self.speed, self.steering = direction, int(round(value)), int(round(steering))
                 self.updated_at = time.monotonic()
                 self.fault = None
                 return True
@@ -435,6 +436,17 @@ async def impact_recording_data():
     if control.adapter.mode != "hardware":
         raise HTTPException(409, "시뮬레이션 모드에서는 실제 측정 데이터를 내보낼 수 없습니다.")
     return await asyncio.to_thread(mpu6050_service.recording_data)
+
+
+@app.get("/api/impact/recording.csv")
+async def impact_recording_csv():
+    """센서 화면에서 기록한 원자료 전체(축소 없음)."""
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 실제 측정 데이터를 내보낼 수 없습니다.")
+    text = await asyncio.to_thread(mpu6050_service.recording_csv)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return Response(content="\ufeff" + text, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="impact_{stamp}.csv"'})
 
 
 @app.post("/api/impact/reset-peak")

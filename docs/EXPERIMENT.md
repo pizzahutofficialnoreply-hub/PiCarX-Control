@@ -27,6 +27,31 @@
 
 축간거리나 검출 기준을 나중에 바꾸면 *저장 후 전체 재분석*으로 저장된 원자료를 다시 계산할 수 있습니다.
 
+## 반복 측정 (직진 → 후진 복귀)
+
+*반복 측정 시작*을 누르면 아래를 정해진 횟수만큼 반복하고, 회차마다 별도 시행으로 저장합니다(회차 번호 자동 증가).
+
+1. 정지 기록(기본 1 s) – 이때 자이로 영점을 잡고 방향을 0으로 둡니다.
+2. 직진 측정(기본 2.5 s) – 기록·분석·저장
+3. 정지 후 기록(기본 0.6 s)
+4. 출발선으로 후진 복귀 – 직진과 같은 시간 × *복귀 시간 배율*, 출력은 *복귀 출력*(빈칸이면 측정 출력)
+5. 회차 사이 대기(기본 1.5 s) – 차체 진동이 가라앉도록
+
+후진은 시간 기준이라 출발선과 조금 어긋날 수 있습니다. 덜 돌아오면 배율을 늘리고, 더 가면 줄이세요. 정지를 누르면 즉시 멈추고 남은 반복을 취소합니다.
+
+### 자이로 직진 보정
+
+MPU-6050의 수직축 자이로를 적분해 차의 방향(yaw)을 추적하고, 방향이 틀어진 만큼 조향을 반대로 줍니다(조향 = 배율 × 방향 오차, 최대 ±12°). 후진 복귀에도 같은 기준 방향을 유지합니다. 보정을 꺼도 방향은 측정해 시행마다 *방향 오차 최대*로 남기므로 직진도를 비교할 수 있습니다. 차가 좌우로 흔들리면 *직진 보정 배율*을 낮추고, 계속 한쪽으로 휘면 높이세요. 기본값은 1.2입니다.
+
+## 허용 최대 수직 가속도 기준
+
+분석 카드의 *허용 최대 수직 가속도 기준*에서 고릅니다.
+
+- **직접 입력**: a_lim을 입력하고 *적용*(기본 2.0 g).
+- **첫 점프 조건**: 같은 방지턱에서 점프가 나타난 조건 중 가장 느린 조건의 평균 최대 가속도를 a_lim으로 씁니다(보고서 기준 ②).
+
+기준이 정해지면 측정한 질량마다 v_max를 표로 보여 주고, 다른 질량의 예측값도 계산합니다. 원운동 모델의 이론 점프 속도 v_c = √(g·R_eff)도 함께 표시합니다.
+
 ## 출력 방식
 
 - **라이브러리 PWM**: `picarx.forward(speed)`에 0~100을 그대로 전달합니다. 라이브러리가 내부에서 `speed/2 + 50`으로 바꾸므로 실제 듀티비는 약 50~100%이고, 출력 차이에 비해 속도 차이가 작습니다.
@@ -58,10 +83,11 @@
 | Method | Path | 설명 |
 |---|---|---|
 | GET/PUT | `/api/experiment/settings` | 축간거리, 바퀴 반지름, 검출 기준, 허용 가속도, 방지턱 형상 등 |
-| POST | `/api/experiment/auto-run` | `{condition, run_seconds?, pre_roll_s?, tail_s?}` 자동 측정 주행 시작 |
-| GET | `/api/experiment/auto-run` | 진행 상태(`pre_roll`, `driving`, `tail`, `analyzing`, `done`, `aborted`, `error`)와 결과 |
+| POST | `/api/experiment/auto-run` | `{condition, run_seconds?, pre_roll_s?, tail_s?, repeats?, return_enabled?, return_output?, return_scale?, rest_s?, heading_hold?}` 자동·반복 측정 시작 |
+| GET | `/api/experiment/auto-run` | 진행 상태(`pre_roll`, `driving`, `tail`, `analyzing`, `returning`, `rest`, `done`, `aborted`, `error`), 회차, 완료된 시행 ID, 현재 방향(°) |
+| GET | `/api/impact/recording.csv` | 센서 화면에서 기록한 원자료 전체(축소 없음) |
 | POST | `/api/experiment/save-recording` | 센서 화면에서 수동으로 기록한 데이터를 조건과 함께 저장 |
-| GET | `/api/experiment/runs` | 시행 목록, 조건별 집계, 방지턱별 회귀식 |
+| GET | `/api/experiment/runs` | 시행 목록, 조건별 집계, 방지턱별 회귀식, 허용 기준과 질량별 v_max |
 | GET | `/api/experiment/runs/{id}` | 시행 상세 + 그래프용 시계열(피크 보존 다운샘플) |
 | GET | `/api/experiment/runs/{id}/raw.csv` | 원자료 CSV |
 | PATCH/DELETE | `/api/experiment/runs/{id}` | 제외 표시·메모 수정 / 삭제 |
@@ -74,6 +100,24 @@
 ```json
 {"trial":1,"bump_id":"A","base_mass_g":1020,"added_mass_g":150,"output_mode":"duty","output_value":45,"video_speed_mps":null,"note":""}
 ```
+
+## 라즈베리파이 업데이트와 접속 방법
+
+화면을 HTTPS 주소로 열고 서버를 `http://<Pi-IP>:8000`으로 연결하면 브라우저가 요청·다운로드·카메라를 막습니다(콘솔의 *Mixed Content* 오류). 라즈베리파이가 화면도 제공하므로 **브라우저 주소창에 `http://<Pi-IP>:8000`을 직접 여는 것**이 가장 확실합니다.
+
+```bash
+# Raspberry Pi
+cd ~/PiCarX-Control
+git fetch && git checkout feature/mpu6050-impact-analysis && git pull
+cd frontend && npm install && npm run build      # frontend/dist 생성 → FastAPI가 / 에서 제공
+cd ../backend && sudo systemctl restart picarx-control   # 또는 uvicorn을 다시 실행
+```
+
+실험 관리 화면에 *백엔드가 이전 버전* 안내가 보이면 Pi의 서버가 아직 예전 코드로 돌고 있는 것입니다(콘솔에 `/api/experiment/settings 404`). 위 명령으로 업데이트하고 재시작하세요. systemd 예시 파일은 `PICARX_MODE=mock`이므로 실제 주행에는 `hardware`로 바꿔야 합니다.
+
+## 차량 없이 하드웨어 경로 시험
+
+`backend/devtools/fake_hardware/`의 가짜 picarx·MPU-6050으로 센서 보정·측정·내보내기, 반복 측정, 직진 보정을 PC에서 시험할 수 있습니다. 사용법은 그 폴더의 README를 보세요.
 
 ## 라즈베리파이 준비
 

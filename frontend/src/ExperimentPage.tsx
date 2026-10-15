@@ -1,9 +1,9 @@
 // 실험 관리 화면 – 보고서 III~V장의 절차(조건 입력 → 자동 측정 주행 → 시행 확인 → 조건별 집계 → 회귀식)를 따릅니다.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, AlertTriangle, Download, FlaskConical, Play, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { Activity, AlertTriangle, CircleStop, Download, FlaskConical, Play, RefreshCw, Repeat, Save, Trash2 } from 'lucide-react';
 import { apiDownload } from './services/api';
 import {
-  bumpRadiusMm, effectiveDuty, fmt, G, outputLabel, predictVmax, readCondition, writeCondition,
+  bumpRadiusMm, DEFAULT_SETTINGS, effectiveDuty, fmt, G, outputLabel, predictVmax, readCondition, writeCondition,
   type AutoRunState, type BumpProfile, type ExperimentCondition, type ExperimentSettings, type RunDetail, type RunsResponse,
 } from './services/experiment';
 import { PiChart, RunTraceChart, SpeedImpactChart } from './components/ExperimentCharts';
@@ -18,8 +18,8 @@ type Props = {
   impact: ImpactInfo;
   onOpenSensors: () => void;
 };
-const BUSY: AutoRunState['state'][] = ['pre_roll', 'driving', 'tail', 'analyzing'];
-const PHASE_LABEL: Record<string, string> = { pre_roll: '정지 기록', driving: '주행', tail: '정지 후 기록', analyzing: '분석·저장', done: '완료', error: '오류', aborted: '중단', idle: '대기' };
+const BUSY: AutoRunState['state'][] = ['pre_roll', 'driving', 'tail', 'analyzing', 'returning', 'rest'];
+const PHASE_LABEL: Record<string, string> = { pre_roll: '정지 기록', driving: '직진 측정', tail: '정지 후 기록', analyzing: '분석·저장', returning: '후진 복귀', rest: '대기', done: '완료', error: '오류', aborted: '중단', idle: '대기' };
 
 export default function ExperimentPage({ request: requestProp, controlMode, connected, serverMode, vehicleConnected, impact, onOpenSensors }: Props) {
   const [settings, setSettings] = useState<ExperimentSettings | null>(null);
@@ -34,6 +34,8 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
+  const [outdated, setOutdated] = useState(false);
+  const seenRuns = useRef(0);
   const pollRef = useRef<number>();
   // App은 센서 폴링으로 자주 다시 그려지므로 request 함수를 ref로 고정해 불필요한 재요청을 막습니다.
   const requestRef = useRef(requestProp);
@@ -59,8 +61,21 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     if (!serverAvailable) return;
     let cancelled = false;
     (async () => {
+      let s: ExperimentSettings;
       try {
-        const s = await request('/api/experiment/settings') as ExperimentSettings;
+        // 이전 버전 서버에는 새 항목이 없을 수 있으므로 기본값 위에 덮어씁니다.
+        s = { ...DEFAULT_SETTINGS, ...(await request('/api/experiment/settings') as ExperimentSettings) };
+        setOutdated(false);
+      } catch (e) {
+        if (cancelled) return;
+        const notFound = e instanceof Error && e.message.includes('404');
+        setOutdated(notFound);
+        if (!notFound) fail(e);
+        // 설정을 못 받아도 방지턱 선택과 조건 입력은 할 수 있게 기본값을 씁니다.
+        setSettings(DEFAULT_SETTINGS); setDraft(DEFAULT_SETTINGS);
+        return;
+      }
+      try {
         if (cancelled) return;
         setSettings(s); setDraft(s);
         setConditionState(prev => {
@@ -92,11 +107,19 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       try {
         const state = await request('/api/experiment/auto-run') as AutoRunState;
         setAuto(state);
+        const done = state.completed_run_ids ?? [];
+        if (done.length > seenRuns.current) {
+          // 반복 측정 중에도 한 회가 끝날 때마다 목록과 그래프를 갱신합니다.
+          seenRuns.current = done.length;
+          await loadRuns(done[done.length - 1]);
+        }
         if (!BUSY.includes(state.state)) {
           window.clearInterval(pollRef.current); pollRef.current = undefined;
           if (state.state === 'done' || state.state === 'aborted') {
+            // 다음 측정 회차를 먼저 올린 뒤 목록을 새로 고칩니다.
+            const count = done.length || (state.result ? 1 : 0);
+            if (count) setConditionState(prev => { const next = { ...prev, trial: prev.trial + count }; writeCondition(next); return next; });
             await loadRuns(state.result?.id ?? null);
-            if (state.state === 'done') setConditionState(prev => { const next = { ...prev, trial: prev.trial + 1 }; writeCondition(next); return next; });
           }
         }
       } catch (e) { fail(e); }
@@ -109,14 +132,35 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     : condition.output_value <= 0 || condition.output_value > maxOutput ? `출력값은 1~${maxOutput} 사이여야 합니다.`
     : !settings?.bumps.some(b => b.id === condition.bump_id) ? '방지턱을 선택하세요.' : '';
   const sensorReady = simulated || (impact?.available && impact.calibrated && !impact.recording);
-  const canAutoRun = serverAvailable && vehicleConnected && !busy && !conditionError && sensorReady;
+  const canAutoRun = serverAvailable && vehicleConnected && !busy && !conditionError && sensorReady && !outdated;
+  const runOpts = draft ?? DEFAULT_SETTINGS;
+  const setRunOpts = (patch: Partial<ExperimentSettings>) => setDraft(d => ({ ...(d ?? DEFAULT_SETTINGS), ...patch }));
 
   async function startAutoRun() {
     setError(''); setMessage('');
     try {
-      const body = { condition: { ...condition, total_mass_g: undefined } };
+      const body = {
+        condition: { ...condition, total_mass_g: undefined },
+        repeats: runOpts.repeats, return_enabled: runOpts.return_enabled, return_output: runOpts.return_output || null,
+        return_scale: runOpts.return_scale, rest_s: runOpts.rest_s, heading_hold: runOpts.heading_hold,
+      };
+      seenRuns.current = 0;
       setAuto(await request('/api/experiment/auto-run', { method: 'POST', body: JSON.stringify(body) }) as AutoRunState);
       startPolling();
+    } catch (e) { fail(e); }
+  }
+  async function stopNow() {
+    try { await request('/api/stop', { method: 'POST' }); setMessage('정지 명령을 보냈습니다.'); } catch (e) { fail(e); }
+  }
+  async function applyCriterion(patch: Partial<ExperimentSettings>) {
+    const next = { ...(settings ?? DEFAULT_SETTINGS), ...patch };
+    setDraft(d => ({ ...(d ?? next), ...patch }));
+    try {
+      const body = { ...next, bumps: next.bumps.map(({ id, name, height_mm, width_mm }) => ({ id, name, height_mm, width_mm })) };
+      delete (body as Partial<ExperimentSettings>).max_output;
+      const saved = { ...DEFAULT_SETTINGS, ...(await request('/api/experiment/settings', { method: 'PUT', body: JSON.stringify(body) }) as ExperimentSettings) };
+      setSettings(saved);
+      await loadRuns();
     } catch (e) { fail(e); }
   }
   async function saveManualRecording() {
@@ -160,7 +204,8 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const bumpRuns = runs.filter(r => r.condition.bump_id === bump && !r.excluded);
   const bumpGroups = (data?.groups ?? []).filter(g => g.bump_id === bump);
   const fit = data?.fits?.[bump];
-  const aLimit = settings?.a_limit_g ?? null;
+  const criterion = data?.criteria?.[bump];
+  const aLimit = criterion ? criterion.a_limit_g : (settings?.a_limit_mode === 'manual' ? settings?.a_limit_g ?? null : null);
   const masses = Array.from(new Set(bumpGroups.map(g => g.total_mass_g))).sort((a, b) => a - b);
   const vmaxMass = calcMass === '' ? (masses[0] ?? totalMass) : calcMass;
   const vmax = aLimit ? predictVmax(fit, aLimit, vmaxMass) : null;
@@ -180,6 +225,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       <div className="button-row"><button className="secondary" disabled={!serverAvailable} onClick={() => void loadRuns().catch(fail)}><RefreshCw size={14} /> 새로고침</button></div></section>
     {simulated && <div className="simulation-strip"><span className="simulation-indicator" />서버 모의 모드 · 합성 데이터이며 실제 측정값이 아닙니다. 실제 차량 기록과 분리해 저장합니다.</div>}
     {!serverAvailable && <div className="error-banner"><AlertTriangle size={17} /><span>서버에 연결되어 있지 않습니다. 설정에서 연결 테스트를 하세요.</span></div>}
+    {outdated && <div className="error-banner exp-outdated"><AlertTriangle size={17} /><span><b>라즈베리파이의 백엔드가 이전 버전이라 실험 기능(/api/experiment)이 없습니다.</b> 화면은 기본값으로 표시합니다. Pi 터미널에서 <code>cd ~/PiCarX-Control && git fetch && git checkout feature/mpu6050-impact-analysis && git pull</code> 후 서버를 재시작하세요(systemd를 쓰면 <code>sudo systemctl restart picarx-control</code>).</span></div>}
     {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span><button aria-label="닫기" onClick={() => setError('')}>×</button></div>}
     {message && <p className="data-tag exp-message">{message}</p>}
 
@@ -196,12 +242,25 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
           <label>실험 메모<input value={condition.note} onChange={e => setCondition({ note: e.target.value })} placeholder="예: 배터리 완충 직후" /></label>
         </div>
         <div className="experiment-mass"><span>총 질량</span><strong>{totalMass.toLocaleString()} g</strong><small>실제 모터 듀티 약 {effectiveDuty(condition.output_mode, condition.output_value)}% · 축간거리 {settings?.wheelbase_mm ? `${settings.wheelbase_mm} mm` : '미입력 (속도 계산 불가)'}</small></div>
+        <div className="exp-repeat">
+          <div className="exp-repeat-head"><Repeat size={14} /><b>반복 측정</b><small>직진하며 측정 → 출발선으로 후진 → 대기를 정해진 횟수만큼 반복합니다. 회차는 자동으로 1씩 늘어납니다.</small></div>
+          <div className="experiment-fields">
+            <label>반복 횟수<input type="number" min={1} max={20} value={runOpts.repeats} onChange={e => setRunOpts({ repeats: Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1))) })} /></label>
+            <label>회차 사이 대기 (s)<input type="number" min={0.3} max={10} step={0.5} value={runOpts.rest_s} onChange={e => setRunOpts({ rest_s: Math.max(0.3, Number(e.target.value) || 1.5) })} /></label>
+            <label className="exp-check"><input type="checkbox" checked={runOpts.return_enabled} onChange={e => setRunOpts({ return_enabled: e.target.checked })} /> 측정 후 출발선으로 후진 복귀</label>
+            <label className="exp-check"><input type="checkbox" checked={runOpts.heading_hold} onChange={e => setRunOpts({ heading_hold: e.target.checked })} /> 자이로 직진 보정 (반듯하게)</label>
+            {runOpts.return_enabled && <><label>복귀 출력 (빈칸 = 측정과 같음)<input type="number" min={1} max={maxOutput} value={runOpts.return_output ?? ''} placeholder={String(condition.output_value)} onChange={e => setRunOpts({ return_output: e.target.value === '' ? null : Math.max(1, Math.min(maxOutput, Number(e.target.value))) })} /></label>
+            <label>복귀 시간 배율<input type="number" min={0.3} max={3} step={0.05} value={runOpts.return_scale} onChange={e => setRunOpts({ return_scale: Math.max(0.3, Math.min(3, Number(e.target.value) || 1)) })} /></label></>}
+          </div>
+          <small className="exp-hint">한 회 약 {(runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s).toFixed(1)}초 · 전체 약 {((runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s) * runOpts.repeats).toFixed(0)}초. 후진은 측정과 같은 시간만큼 하므로, 출발선보다 덜 오면 배율을 늘리고 더 가면 줄이세요. 이 값들은 '설정 저장'을 누르면 기본값으로 남습니다.</small>
+        </div>
         {!simulated && !sensorReady && <div className="warning">센서 화면에서 MPU-6050 정지 상태 보정을 먼저 하세요. {impact?.recording ? '수동 측정이 진행 중입니다.' : ''} <button className="text-button" onClick={onOpenSensors}>센서 화면으로</button></div>}
         {conditionError && <p className="diagnostic-error">{conditionError}</p>}
-        <div className="button-row"><button className="primary" disabled={!canAutoRun} onClick={() => void startAutoRun()}><Play size={15} /> 자동 측정 주행</button>
+        <div className="button-row"><button className="primary" disabled={!canAutoRun} onClick={() => void startAutoRun()}><Play size={15} /> {runOpts.repeats > 1 ? `반복 측정 시작 (${runOpts.repeats}회)` : '자동 측정 주행'}</button>
+          <button className="emergency exp-stop" disabled={!serverAvailable} onClick={() => void stopNow()}><CircleStop size={15} /> 정지</button>
           {!simulated && <button className="secondary" disabled={!serverAvailable || busy || !!conditionError || !impact?.recorded_sample_count} onClick={() => void saveManualRecording()}><Save size={15} /> 수동 측정 기록 저장</button>}</div>
-        {auto && auto.state !== 'idle' && <div className={'exp-auto-state ' + auto.state}><span className="exp-phase">{PHASE_LABEL[auto.state] ?? auto.state}</span><span>{auto.message}</span>{auto.phase_remaining_s != null && busy && <b>{auto.phase_remaining_s.toFixed(1)} s</b>}</div>}
-        <p className="data-tag">긴급 정지가 필요하면 상단 주행 화면의 긴급 정지 또는 정지 API를 쓰세요. 중단된 시행은 '제외' 상태로 저장됩니다.</p>
+        {auto && auto.state !== 'idle' && <div className={'exp-auto-state ' + auto.state}><span className="exp-phase">{PHASE_LABEL[auto.state] ?? auto.state}</span>{auto.cycles && auto.cycles > 1 ? <span className="exp-cycle">{Math.min(auto.cycle ?? 0, auto.cycles)}/{auto.cycles}</span> : null}<span>{auto.message}</span>{auto.heading_deg != null && busy && <span className="exp-heading">방향 {auto.heading_deg > 0 ? '+' : ''}{auto.heading_deg.toFixed(1)}°</span>}{auto.phase_remaining_s != null && busy && <b>{auto.phase_remaining_s.toFixed(1)} s</b>}</div>}
+        <p className="data-tag">정지를 누르면 즉시 멈추고 남은 반복을 취소합니다. 측정 중이던 시행은 '제외' 상태로 저장됩니다.</p>
       </article>
 
       <article className="card experiment-card"><div className="card-head"><div><h2>차량·분석 설정</h2><p>축간거리와 바퀴 반지름은 자로 실측해 입력하세요. 속도와 Π 계산에 쓰입니다.</p></div></div>
@@ -210,7 +269,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
             <label>축간거리 L (mm)<input type="number" min={10} value={draft.wheelbase_mm ?? ''} placeholder="앞·뒤 바퀴 중심 거리" onChange={e => setDraft({ ...draft, wheelbase_mm: e.target.value === '' ? null : Number(e.target.value) })} /></label>
             <label>바퀴 반지름 r (mm)<input type="number" min={5} value={draft.wheel_radius_mm ?? ''} onChange={e => setDraft({ ...draft, wheel_radius_mm: e.target.value === '' ? null : Number(e.target.value) })} /></label>
             <label>기본 질량 기본값 (g)<input type="number" min={1} value={draft.base_mass_g ?? ''} onChange={e => setDraft({ ...draft, base_mass_g: e.target.value === '' ? null : Number(e.target.value) })} /></label>
-            <label>허용 최대 가속도 a_lim (g)<input type="number" min={1.01} step={0.05} value={draft.a_limit_g ?? ''} placeholder="예: 2.0" onChange={e => setDraft({ ...draft, a_limit_g: e.target.value === '' ? null : Number(e.target.value) })} /></label>
+            <label>직진 보정 배율 (조향°/방향 오차°)<input type="number" min={0} max={5} step={0.1} value={draft.heading_gain} onChange={e => setDraft({ ...draft, heading_gain: Math.max(0, Number(e.target.value) || 0) })} /></label>
             <label>피크 검출 기준 Δa (g)<input type="number" min={0.02} step={0.05} value={draft.threshold_delta_g} onChange={e => setDraft({ ...draft, threshold_delta_g: Number(e.target.value) || 0.3 })} /></label>
             <label>피크 최소 간격 (s)<input type="number" min={0.005} step={0.005} value={draft.min_gap_s} onChange={e => setDraft({ ...draft, min_gap_s: Number(e.target.value) || 0.03 })} /></label>
             <label>지면 이탈 기준 (g)<input type="number" min={0} max={0.9} step={0.05} value={draft.jump_g} onChange={e => setDraft({ ...draft, jump_g: Number(e.target.value) })} /></label>
@@ -235,7 +294,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
           <div><small>최소 가속도 · 점프</small><b>{fmt(selected.analysis.min_g, 3, 'g')}</b><span>{selected.analysis.jump == null ? '판정 불가' : selected.analysis.jump ? `지면 이탈${selected.analysis.airborne_s ? ` · 공중 ${(selected.analysis.airborne_s * 1000).toFixed(0)} ms` : ''}${selected.analysis.landing_g ? ` · 착지 ${selected.analysis.landing_g.toFixed(2)} g` : ''}` : '접지 유지'}</span></div>
           <div><small>충격력 F = m·a</small><b>{fmt(selected.analysis.peak_force_n, 2, 'N')}</b><span>증가분 {fmt(selected.analysis.dynamic_force_n, 2, 'N')}</span></div>
           <div><small>Π = v²/(g·R_eff)</small><b>{fmt(selected.analysis.pi, 3)}</b><span>v_c {fmt(selected.analysis.critical_speed_mps, 3, 'm/s')}</span></div>
-          <div><small>앞 / 뒤 바퀴 피크</small><b>{fmt(selected.analysis.front_g, 2)} / {fmt(selected.analysis.rear_g, 2)} g</b><span>검출 피크 {selected.analysis.peak_count}개</span></div>
+          <div><small>앞 / 뒤 바퀴 피크</small><b>{fmt(selected.analysis.front_g, 2)} / {fmt(selected.analysis.rear_g, 2)} g</b><span>검출 피크 {selected.analysis.peak_count}개{selected.heading_max_deg != null ? ` · 방향 오차 최대 ${selected.heading_max_deg.toFixed(1)}°${selected.heading_hold ? ' (보정)' : ''}` : ''}</span></div>
         </div>
         {selected.analysis.flags.length > 0 && <ul className="exp-flags">{selected.analysis.flags.map(f => <li key={f}><AlertTriangle size={13} />{f}</li>)}</ul>}
       </article> : <div className="card empty-chart">{runs.length ? '시행 데이터를 불러오는 중…' : '아직 저장된 시행이 없습니다. 조건을 입력하고 자동 측정 주행을 하세요.'}</div>}
@@ -252,11 +311,16 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
           <div className="button-row">{bumpIds.length > 1 && <div className="segmented">{bumpIds.map(id => <button key={id} type="button" className={id === bump ? 'selected' : ''} onClick={() => setAnalysisBump(id)}>방지턱 {id}</button>)}</div>}<button className="secondary" onClick={() => download('/api/experiment/export/conditions.csv', 'picarx_conditions.csv')}><Download size={14} /> 조건별 CSV</button></div></div>
           <SpeedImpactChart runs={bumpRuns} groups={bumpGroups} fit={fit} aLimit={aLimit} title={`그래프 1. 통과 속도와 최대 수직 가속도 (방지턱 ${bump})`} name={`graph1_speed_impact_${bump}`} />
           <div className="exp-fit">
-            <div><small>회귀식</small><b>{fit?.formula ?? '—'}</b><span>{fit?.overall ? `R² = ${fit.overall.r2.toFixed(3)} · n = ${fit.overall.n.toFixed(3)} (n≈1 충돌 지배, n≈2 원운동 지배) · p = ${fit.overall.p.toFixed(3)} (p<0: 무거울수록 가속도 감소)` : fit?.note ?? ''}</span></div>
+            <div><small>회귀식</small><b>{fit?.formula ?? '—'}</b><span>{fit?.overall ? `R² = ${fit.overall.r2.toFixed(3)} · n = ${fit.overall.n.toFixed(3)} (n≈1 충돌 지배, n≈2 원운동 지배) · p = ${fit.overall.p.toFixed(3)} (p<0: 무거울수록 가속도 감소)${fit.note ? ' · ' + fit.note : ''}` : fit?.note ?? ''}</span></div>
             {fit && fit.per_mass.length > 0 && <div><small>질량별 거듭제곱 맞춤</small>{fit.per_mass.map(p => <span key={p.mass_g}>{p.mass_g.toLocaleString()} g: Δa = {p.k.toPrecision(3)}·v^{p.n.toFixed(3)} (R² {p.r2.toFixed(3)}, {p.points}점)</span>)}</div>}
-            <div className="exp-vmax"><small>최대 통과 속도 예측 v_max</small>
-              <div className="exp-inline"><label>질량 (g)<input type="number" min={1} value={calcMass === '' ? vmaxMass : calcMass} onChange={e => setCalcMass(e.target.value === '' ? '' : Number(e.target.value))} /></label><span>a_lim {aLimit ? `${aLimit} g` : '미설정 (설정 카드에서 입력)'}</span></div>
-              <b>{vmax == null ? '—' : `${vmax.toFixed(3)} m/s`}</b><span>v_max = ((a_lim − 1) / (k₀·m^p))^(1/n). 검증하려면 실험하지 않은 질량을 넣고 그 속도 근처에서 다시 측정해 오차율을 구하세요.</span></div>
+            <div className="exp-vmax"><small>허용 최대 수직 가속도 기준</small>
+              <div className="segmented"><button type="button" className={(settings?.a_limit_mode ?? 'manual') === 'manual' ? 'selected' : ''} onClick={() => void applyCriterion({ a_limit_mode: 'manual' })}>직접 입력</button><button type="button" className={settings?.a_limit_mode === 'first_jump' ? 'selected' : ''} onClick={() => void applyCriterion({ a_limit_mode: 'first_jump' })}>첫 점프 조건</button></div>
+              {(settings?.a_limit_mode ?? 'manual') === 'manual' && <div className="exp-inline"><label>a_lim (g)<input type="number" min={1.05} max={8} step={0.1} value={draft?.a_limit_g ?? ''} placeholder="2.0" onChange={e => setDraft(d => ({ ...(d ?? DEFAULT_SETTINGS), a_limit_g: e.target.value === '' ? null : Number(e.target.value) }))} /></label><button type="button" className="secondary" onClick={() => void applyCriterion({ a_limit_mode: 'manual', a_limit_g: draft?.a_limit_g ?? 2 })}>적용</button></div>}
+              <b>{aLimit ? `a_lim = ${aLimit.toFixed(2)} g` : '기준 없음'}</b>
+              <span>{criterion?.source ?? '측정 후 계산됩니다.'}</span>
+              {criterion && criterion.vmax_by_mass.length > 0 && <table className="exp-mini"><thead><tr><th>질량</th><th>v_max</th></tr></thead><tbody>{criterion.vmax_by_mass.map(v => <tr key={v.mass_g}><td>{v.mass_g.toLocaleString()} g</td><td>{fmt(v.vmax_mps, 3, 'm/s')}</td></tr>)}</tbody></table>}
+              <div className="exp-inline"><label>다른 질량 (g)<input type="number" min={1} value={calcMass === '' ? vmaxMass : calcMass} onChange={e => setCalcMass(e.target.value === '' ? '' : Number(e.target.value))} /></label><b>{vmax == null ? '—' : `${vmax.toFixed(3)} m/s`}</b></div>
+              <span>v_max = ((a_lim − 1) / (k₀·m^p))^(1/n){criterion?.critical_speed_mps ? ` · 이론 점프 속도 v_c = ${criterion.critical_speed_mps.toFixed(3)} m/s` : ''}. 검증: 실험하지 않은 질량을 넣고 그 속도 근처에서 다시 측정해 오차율을 구하세요.</span></div>
           </div>
           <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>총질량</th><th>출력</th><th>시행 (사용)</th><th>평균 속도 (m/s)</th><th>평균 최대 (g)</th><th>평균 Δa (g)</th><th>범위 Δa</th><th>제외값</th><th>충격력 (N)</th><th>Π</th><th>점프</th></tr></thead>
             <tbody>{bumpGroups.map(g => <tr key={`${g.total_mass_g}-${g.output_mode}-${g.output_value}`}><td>{g.total_mass_g} g</td><td>{outputLabel(g.output_mode, g.output_value)}</td><td>{g.n_runs} ({g.n_used})</td><td>{fmt(g.mean_speed_mps, 3)}</td><td>{fmt(g.mean_peak_g, 3)}</td><td>{fmt(g.mean_peak_delta_g, 3)}</td><td>{g.kept_min_delta_g.toFixed(2)}–{g.kept_max_delta_g.toFixed(2)}</td><td>{g.dropped_delta_g.map(v => v.toFixed(2)).join(', ') || '—'}</td><td>{fmt(g.mean_force_n, 2)}</td><td>{fmt(g.mean_pi, 2)}</td><td>{g.jump_count}/{g.n_runs}</td></tr>)}</tbody></table></div>

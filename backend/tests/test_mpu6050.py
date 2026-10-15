@@ -19,7 +19,8 @@ class FakeBus:
         az = -1.0 - (2.0 if self.spike else 0.0)  # 뒤집힌 장착: 충돌 시 더 음수
         raw = int(az * 4096)
         raw &= 0xFFFF
-        out = [0, 0, 0, 0, raw >> 8, raw & 0xFF] + [0] * 8
+        g = int(getattr(self, "gz", 0.0) * 65.5) & 0xFFFF
+        out = [0, 0, 0, 0, raw >> 8, raw & 0xFF] + [0] * 6 + [g >> 8, g & 0xFF]
         return out
 
     def close(self):
@@ -27,6 +28,22 @@ class FakeBus:
 
 
 class MPU6050ServiceTests(unittest.TestCase):
+    def test_heading_integrates_yaw_after_reset(self):
+        bus = FakeBus()
+        bus.gz = 0.0
+        service = MPU6050Service()
+        with patch.object(MPU6050Service, "_open_bus", return_value=bus):
+            service.start()
+            service.calibrate()
+            time.sleep(0.5)
+            self.assertTrue(service.heading_reset())
+            bus.gz = -20.0  # 뒤집힌 장착: 센서 −20 °/s = 실제 반시계 +20 °/s
+            time.sleep(0.5)
+            heading = service.heading_deg()
+            service.close()
+        self.assertGreater(heading, 7)
+        self.assertLess(heading, 13)
+
     def test_inverted_mount_still_reports_vertical_one_g_and_peaks(self):
         bus = FakeBus()
         service = MPU6050Service()
@@ -50,6 +67,9 @@ class MPU6050ServiceTests(unittest.TestCase):
         self.assertAlmostEqual(max(cols["vertical_g"]), 3.0, places=2)
         self.assertEqual(cols["t_s"][0] >= 0, True)
         live = service.status()
+        self.assertLessEqual(len(live["recorded_samples"]), 400)
+        csv_text = service.recording_csv()
+        self.assertEqual(len(csv_text.strip().splitlines()) - 1, data["count"])
         self.assertLessEqual(len(live["samples"]), MPU6050Service.LIVE_POINTS)
 
 

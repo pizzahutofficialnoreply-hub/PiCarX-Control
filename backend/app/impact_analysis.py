@@ -284,7 +284,7 @@ def _solve(a: list[list[float]], b: list[float]) -> list[float] | None:
 
 def linear_least_squares(x: list[list[float]], y: list[float]) -> tuple[list[float], float] | None:
     """y = X·β 최소제곱. (β, R²) 반환. X의 첫 열은 상수항 1이어야 합니다."""
-    if len(y) < len(x[0]) + 1:
+    if len(y) < len(x[0]):
         return None
     k = len(x[0])
     xtx = [[sum(row[i] * row[j] for row in x) for j in range(k)] for i in range(k)]
@@ -332,6 +332,8 @@ def fit_power_law(groups: list[dict[str, Any]], bump_id: str | None = None) -> d
             out["overall"] = {"k0": round(math.exp(c), 6), "n": round(n, 4), "p": 0.0, "r2": round(r2, 4)}
             out["formula"] = f"Δa = {math.exp(c):.4g} · v^{n:.3f}   (질량 1단계만 있어 p = 0으로 둠)"
             out["note"] = "질량이 2단계 이상이어야 질량 지수 p를 구할 수 있습니다."
+            if len(pts) == 2:
+                out["note"] += " 속도 조건이 2개뿐이라 곡선이 두 점을 그대로 지납니다(R² = 1, 신뢰도 낮음). 속도를 4~5단계로 늘리세요."
     else:
         out["note"] = "서로 다른 속도의 조건 평균이 2개 이상 필요합니다."
     return out

@@ -12,12 +12,32 @@ export type ExperimentSettings = {
   threshold_delta_g: number;
   min_gap_s: number;
   jump_g: number;
+  a_limit_mode: 'manual' | 'first_jump';
   a_limit_g: number | null;
   pre_roll_s: number;
   run_seconds: number;
   tail_s: number;
+  repeats: number;
+  return_enabled: boolean;
+  return_output: number | null;
+  return_scale: number;
+  rest_s: number;
+  heading_hold: boolean;
+  heading_gain: number;
   bumps: BumpProfile[];
   max_output?: number;
+};
+
+/** 서버 설정을 받지 못했을 때(이전 버전 백엔드 등) 화면이 동작하도록 쓰는 기본값 */
+export const DEFAULT_SETTINGS: ExperimentSettings = {
+  wheelbase_mm: null, wheel_radius_mm: null, base_mass_g: null, threshold_delta_g: 0.3, min_gap_s: 0.03, jump_g: 0.2,
+  a_limit_mode: 'manual', a_limit_g: 2.0, pre_roll_s: 1.0, run_seconds: 2.5, tail_s: 0.6,
+  repeats: 5, return_enabled: true, return_output: null, return_scale: 1.0, rest_s: 1.5, heading_hold: true, heading_gain: 1.2,
+  bumps: [
+    { id: 'A', name: 'A형 (완만)', height_mm: 10, width_mm: 60, radius_mm: 50 },
+    { id: 'B', name: 'B형 (급함)', height_mm: 10, width_mm: 30, radius_mm: 16.25 },
+  ],
+  max_output: 100,
 };
 
 export type ExperimentCondition = {
@@ -49,6 +69,7 @@ export type RunSummary = {
   bump: BumpProfile;
   analysis: RunAnalysis;
   recording?: { sample_rate_hz?: number | null; count?: number | null };
+  heading_hold?: boolean | null; heading_max_deg?: number | null; heading_end_deg?: number | null;
 };
 
 export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[] } };
@@ -67,11 +88,17 @@ export type PowerFit = {
   formula: string | null; note: string | null;
 };
 
-export type RunsResponse = { simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit> };
+export type Criterion = {
+  mode: 'manual' | 'first_jump'; a_limit_g: number | null; source: string;
+  vmax_by_mass: { mass_g: number; vmax_mps: number | null }[]; critical_speed_mps: number | null;
+};
+
+export type RunsResponse = { simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit>; criteria?: Record<string, Criterion> };
 
 export type AutoRunState = {
-  state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'done' | 'error' | 'aborted';
+  state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'returning' | 'rest' | 'done' | 'error' | 'aborted';
   message: string; run_id: string | null; phase_remaining_s: number | null; result: RunSummary | null;
+  cycle?: number; cycles?: number; completed_run_ids?: string[]; heading_deg?: number | null;
 };
 
 export const EXPERIMENT_CONDITION_KEY = 'picarx-impact-experiment-condition-v2';

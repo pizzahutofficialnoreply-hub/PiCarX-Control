@@ -56,6 +56,13 @@ class AnalysisTests(unittest.TestCase):
         self.assertIsNone(result["speed_mps"])
         self.assertTrue(any("축간거리" in f for f in result["flags"]))
 
+    def test_two_speed_conditions_still_give_a_curve(self):
+        groups = [{"bump_id": "A", "total_mass_g": 1000, "mean_speed_mps": v, "mean_peak_delta_g": 2 * v ** 1.5} for v in (0.4, 0.6)]
+        fit = ia.fit_power_law(groups, "A")
+        self.assertAlmostEqual(fit["overall"]["n"], 1.5, places=4)
+        self.assertIn("신뢰도 낮음", fit["note"])
+        self.assertEqual(len(fit["per_mass"]), 1)
+
     def test_trimmed_mean_drops_one_max_and_min(self):
         runs = [{"id": str(i), "condition": {"bump_id": "A", "total_mass_g": 1000, "output_mode": "pwm", "output_value": 50},
                  "analysis": {"peak_delta_g": d, "speed_mps": 0.5}} for i, d in enumerate([1.0, 2.0, 2.2, 2.4, 9.0])]
@@ -94,6 +101,10 @@ class DutyModeTests(unittest.TestCase):
         car.reset_mock()
         adapter.drive_experiment("pwm", 80)
         car.forward.assert_called_once_with(80)
+        car.reset_mock()
+        adapter.drive_experiment("pwm", 40, "backward", 5.4)
+        car.backward.assert_called_once_with(40)
+        car.set_dir_servo_angle.assert_called_with(5)
 
 
 class ExperimentApiTests(unittest.TestCase):
@@ -126,7 +137,7 @@ class ExperimentApiTests(unittest.TestCase):
                 for trial in (1, 2, 3):
                     body = {"condition": {"trial": trial, "bump_id": "A", "base_mass_g": 1000, "added_mass_g": 0,
                                           "output_mode": "pwm", "output_value": output},
-                            "pre_roll_s": 0.3, "run_seconds": 0.3, "tail_s": 0.1}
+                            "pre_roll_s": 0.3, "run_seconds": 0.3, "tail_s": 0.1, "repeats": 1, "return_enabled": False}
                     r = client.post("/api/experiment/auto-run", json=body)
                     self.assertEqual(r.status_code, 200, r.text)
                     state = self._wait(client)
@@ -161,13 +172,58 @@ class ExperimentApiTests(unittest.TestCase):
     def test_stop_aborts_auto_run(self):
         from app.main import app
         with TestClient(app) as client:
-            body = {"condition": {"base_mass_g": 1000, "output_value": 50}, "pre_roll_s": 0.3, "run_seconds": 3, "tail_s": 0.1}
+            body = {"condition": {"base_mass_g": 1000, "output_value": 50}, "pre_roll_s": 0.3, "run_seconds": 3, "tail_s": 0.1, "repeats": 1}
             self.assertEqual(client.post("/api/experiment/auto-run", json=body).status_code, 200)
             time.sleep(0.6)
             client.post("/api/stop")
             state = self._wait(client)
             self.assertEqual(state["state"], "aborted")
             self.assertTrue(state["result"]["excluded"])
+
+    def test_repeated_runs_with_return_and_criterion(self):
+        from app.main import app
+        with TestClient(app) as client:
+            settings = client.get("/api/experiment/settings").json()
+            self.assertEqual(settings["a_limit_g"], 2.0)
+            settings.update(wheelbase_mm=95, wheel_radius_mm=33, a_limit_mode="manual", a_limit_g=1.8)
+            settings["bumps"] = [{k: b[k] for k in ("id", "name", "height_mm", "width_mm")} for b in settings["bumps"]]
+            settings.pop("max_output")
+            client.put("/api/experiment/settings", json=settings)
+            body = {"condition": {"trial": 4, "base_mass_g": 1000, "output_value": 60},
+                    "pre_roll_s": 0.3, "run_seconds": 0.3, "tail_s": 0.1, "repeats": 3, "return_enabled": True,
+                    "return_scale": 1.0, "rest_s": 0.3}
+            self.assertEqual(client.post("/api/experiment/auto-run", json=body).status_code, 200)
+            phases = set()
+            for _ in range(200):
+                state = client.get("/api/experiment/auto-run").json()
+                phases.add(state["state"])
+                if state["state"] in ("done", "error", "aborted"):
+                    break
+                time.sleep(0.03)
+            self.assertEqual(state["state"], "done", state["message"])
+            self.assertIn("returning", phases)
+            self.assertEqual(len(state["completed_run_ids"]), 3)
+            listing = client.get("/api/experiment/runs").json()
+            self.assertEqual(sorted(r["condition"]["trial"] for r in listing["runs"]), [4, 5, 6])
+            crit = listing["criteria"]["A"]
+            self.assertEqual(crit["a_limit_g"], 1.8)
+            self.assertEqual(len(crit["vmax_by_mass"]), 1)
+            settings["a_limit_mode"] = "first_jump"
+            client.put("/api/experiment/settings", json=settings)
+            crit = client.get("/api/experiment/runs").json()["criteria"]["A"]
+            self.assertIsNone(crit["a_limit_g"])  # 아직 점프한 조건이 없음
+            self.assertIn("점프", crit["source"])
+
+    def test_criterion_first_jump_uses_slowest_jumping_condition(self):
+        groups = [
+            {"bump_id": "A", "total_mass_g": 1000, "output_mode": "pwm", "output_value": 50, "jump_count": 0, "mean_speed_mps": 0.5, "mean_peak_g": 2.0},
+            {"bump_id": "A", "total_mass_g": 1000, "output_mode": "pwm", "output_value": 80, "jump_count": 2, "mean_speed_mps": 0.9, "mean_peak_g": 3.4},
+            {"bump_id": "A", "total_mass_g": 1000, "output_mode": "pwm", "output_value": 70, "jump_count": 1, "mean_speed_mps": 0.8, "mean_peak_g": 3.0},
+        ]
+        settings = experiment.ExperimentSettings(a_limit_mode="first_jump", wheel_radius_mm=33)
+        crit = experiment.criterion_for("A", groups, {"overall": None}, settings)
+        self.assertEqual(crit["a_limit_g"], 3.0)
+        self.assertAlmostEqual(crit["critical_speed_mps"], math.sqrt(9.80665 * 0.083), places=3)
 
     def test_rejects_invalid_output(self):
         from app.main import app
