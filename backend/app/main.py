@@ -15,6 +15,7 @@ from .autonomy.registry import controller_catalog
 from .services.event_log import read_events, record_event
 from .camera import camera_service
 from .mpu6050 import mpu6050_service
+from .experiment import router as experiment_router, bind_control
 
 WATCHDOG_SECONDS = 0.5
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "settings.json"
@@ -152,6 +153,32 @@ class ControlService:
                     pass
                 raise
 
+    async def experiment_drive(self, mode: str, value: float, generation: int) -> bool:
+        """실험용 직진 명령. 자동 측정 주행이 0.1초마다 호출해 watchdog을 갱신합니다.
+
+        정지 명령으로 generation이 바뀌면 즉시 False를 반환해 주행을 끝냅니다.
+        """
+        async with self.lock:
+            if generation != self.stop_generation:
+                return False
+            if not self.adapter.connected:
+                raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
+            try:
+                self.adapter.drive_experiment(mode, value)
+                self.motion, self.speed, self.steering = "forward", int(round(value)), 0
+                self.updated_at = time.monotonic()
+                self.fault = None
+                return True
+            except Exception as exc:
+                self.fault = str(exc)
+                record_event("experiment", "Experiment drive failed; stop will be attempted", level="ERROR",
+                             details={"mode": mode, "value": value, "error": str(exc)})
+                try:
+                    self.stop_now()
+                except Exception:
+                    pass
+                raise
+
     async def test_steering(self, test: SteeringTest) -> None:
         self.stop_generation += 1
         async with self.lock:
@@ -249,6 +276,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PiCar X Control API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(experiment_router)
+bind_control(lambda: control)
 
 @app.get("/api/health")
 async def health():
@@ -369,7 +398,7 @@ async def websocket_status(websocket: WebSocket):
 async def impact_status():
     if control.adapter.mode != "hardware":
         return {"mode": "mock", "available": False, "calibrated": False, "latest": None,
-                "samples": [], "peak": None, "sample_rate_target_hz": 100, "range_g": 8,
+                "samples": [], "peak": None, "sample_rate_target_hz": 1000, "range_g": 8,
                 "error": "시뮬레이션 모드에서는 실제 MPU-6050 측정값을 제공하지 않습니다."}
     return await asyncio.to_thread(mpu6050_service.status)
 

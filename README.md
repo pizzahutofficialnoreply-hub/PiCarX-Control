@@ -72,6 +72,11 @@ PC에서는 `http://localhost:5173`, 스마트폰에서는 같은 Wi-Fi의 Raspb
 - [아키텍처](docs/ARCHITECTURE.md)
 - [API 명세](docs/API.md)
 - [안전 안내](docs/SAFETY.md)
+- [방지턱 충격 실험 기능](docs/EXPERIMENT.md)
+
+## 방지턱 충격 실험 (MPU-6050)
+
+**실험 관리** 화면에서 조건을 입력하고 *자동 측정 주행*을 누르면, 차량이 정지 기록 → 직진 → 정지 순으로 움직이며 MPU-6050 수직 가속도를 약 1 kHz로 기록합니다. 시행마다 앞·뒤 바퀴 피크 간격으로 통과 속도를 계산하고, 지면 이탈·착지 충격·충격력·Π를 함께 구합니다. 조건별 절사평균과 회귀식 Δa = k₀·vⁿ·mᵖ, 허용 가속도에 대한 최대 통과 속도 예측을 보여 주며, 그래프는 PNG/SVG, 표는 CSV로 저장합니다. 기록은 Raspberry Pi의 `backend/data/experiments/`에 저장됩니다. 자세한 내용은 [docs/EXPERIMENT.md](docs/EXPERIMENT.md)를 보세요.
 
 ## Phase 5 기능 상태
 

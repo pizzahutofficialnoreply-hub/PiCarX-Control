@@ -65,15 +65,32 @@ export function getCameraStatusUrl(): string {
   return `${baseUrl}/api/camera/status`;
 }
 
+/** 서버가 만든 파일(CSV 등)을 내려받습니다. */
+export async function apiDownload(path: string, fallbackName: string): Promise<void> {
+  const response = await fetch(`${baseUrl}${path}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body?.detail || `서버 오류 (${response.status})`);
+  }
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = match?.[1] || fallbackName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export async function apiRequest(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit & { timeoutMs?: number } = {},
 ): Promise<any> {
   const controller = new AbortController();
 
   const timeout = window.setTimeout(() => {
     controller.abort();
-  }, 3500);
+  }, options.timeoutMs ?? 3500);
 
   let response: Response;
 

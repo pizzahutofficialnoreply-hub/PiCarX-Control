@@ -30,6 +30,7 @@ class HardwareAdapter(Protocol):
     tilt_center: int
     def stop(self) -> None: ...
     def drive(self, direction: str, speed: int, steering: int) -> None: ...
+    def drive_experiment(self, mode: str, value: float) -> None: ...
     def test_steering(self, direction: str, angle: int) -> None: ...
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None: ...
     def close(self) -> None: ...
@@ -60,6 +61,8 @@ class MockAdapter:
         self.motion = "stopped"
     def drive(self, direction: str, speed: int, steering: int) -> None:
         self.motion = direction
+    def drive_experiment(self, mode: str, value: float) -> None:
+        self.motion = "forward"
     def test_steering(self, direction: str, angle: int) -> None:
         pass
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -101,6 +104,8 @@ class UnavailableAdapter:
     def stop(self) -> None:
         return
     def drive(self, direction: str, speed: int, steering: int) -> None:
+        raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
+    def drive_experiment(self, mode: str, value: float) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def test_steering(self, direction: str, angle: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
@@ -216,6 +221,30 @@ class PiCarXAdapter:
             car.backward(pwm)
         else:
             raise ValueError(f"Unsupported direction: {direction}")
+
+    def drive_experiment(self, mode: str, value: float) -> None:
+        """방지턱 실험용 직진.
+
+        - ``pwm``  : 라이브러리 값 0~100을 그대로 ``forward()``에 전달합니다.
+          라이브러리가 내부에서 ``speed/2 + 50``으로 바꾸므로 실제 듀티비는 약 50~100%입니다.
+        - ``duty`` : 방향만 ``forward(1)``로 설정한 뒤 좌·우 뒷바퀴 PWM 핀에
+          듀티비(%)를 직접 지정합니다. 저속 구간까지 써서 속도 범위를 넓힙니다.
+          듀티가 너무 낮으면 모터가 출발하지 못할 수 있습니다.
+        """
+        car = self._require_car()
+        output = self._clamp(round(value), 0, 100)
+        self._set_steering(0)
+        if mode == "pwm":
+            car.forward(output)
+            return
+        if mode != "duty":
+            raise ValueError(f"Unsupported experiment output mode: {mode}")
+        pins = getattr(car, "motor_speed_pins", None)
+        if not pins or not all(callable(getattr(pin, "pulse_width_percent", None)) for pin in pins):
+            raise RuntimeError("설치된 picarx 라이브러리에서 motor_speed_pins를 찾지 못해 직접 듀티 모드를 쓸 수 없습니다. PWM 모드를 사용하세요.")
+        car.forward(1)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
+        for pin in pins:
+            pin.pulse_width_percent(output)
 
     def test_steering(self, direction: str, angle: int) -> None:
         car = self._require_car()

@@ -1,144 +1,134 @@
-export type ImpactSample = {
-  timestamp: string;
-  elapsed_s: number;
-  ax_g: number;
-  ay_g: number;
-  az_g: number;
-  gx_dps: number;
-  gy_dps: number;
-  gz_dps: number;
-  total_g: number;
-  delta_x_g: number | null;
-  delta_y_g: number | null;
-  delta_z_g: number | null;
-  dynamic_g: number | null;
-  dynamic_m_s2: number | null;
-  saturated_possible: boolean;
-};
+// 방지턱 충격 실험 – 서버(/api/experiment) 데이터 타입과 보조 함수.
+// 실험 기록은 Raspberry Pi 디스크에 저장되며, 브라우저에는 입력 중인 조건만 기억합니다.
 
-export type ImpactClassification = 'pending' | 'bump' | 'other' | 'uncertain';
+export type OutputMode = 'pwm' | 'duty';
 
-export type ImpactCandidate = {
-  id: string;
-  timestamp: string;
-  elapsed_s: number;
-  peak_g: number;
-  peak_m_s2: number | null;
-  classification: ImpactClassification;
+export type BumpProfile = { id: string; name: string; height_mm: number | null; width_mm: number | null; radius_mm?: number | null };
+
+export type ExperimentSettings = {
+  wheelbase_mm: number | null;
+  wheel_radius_mm: number | null;
+  base_mass_g: number | null;
+  threshold_delta_g: number;
+  min_gap_s: number;
+  jump_g: number;
+  a_limit_g: number | null;
+  pre_roll_s: number;
+  run_seconds: number;
+  tail_s: number;
+  bumps: BumpProfile[];
+  max_output?: number;
 };
 
 export type ExperimentCondition = {
-  baseMassG: number;
-  addedWeightCount: number;
-  eachWeightG: number;
-  speedLevel: number;
-  measuredSpeedMps: number | null;
-  bumpHeightMm: number;
-  bumpWidthMm: number | null;
-  trialNumber: number;
+  trial: number;
+  bump_id: string;
+  base_mass_g: number;
+  added_mass_g: number;
+  output_mode: OutputMode;
+  output_value: number;
+  video_speed_mps: number | null;
   note: string;
+  total_mass_g?: number;
 };
 
-export type ExperimentRun = {
-  id: string;
-  createdAt: string;
-  condition: ExperimentCondition;
-  samples: ImpactSample[];
-  candidates: ImpactCandidate[];
-  sampleCount: number;
+export type RunAnalysis = {
+  sample_count: number; duration_s: number; sample_rate_hz: number | null;
+  peak_g: number | null; peak_delta_g: number | null; peak_t_s: number | null; peak_dynamic_g: number | null;
+  front_t_s: number | null; front_g: number | null; rear_t_s: number | null; rear_g: number | null;
+  axle_dt_s: number | null; speed_mps: number | null; min_g: number | null; jump: boolean | null;
+  airborne_s?: number | null; landing_t_s?: number | null; landing_g?: number | null;
+  peak_force_n: number | null; dynamic_force_n: number | null; pi: number | null; r_eff_m: number | null;
+  critical_speed_mps: number | null; peak_count: number; flags: string[];
+  params?: Record<string, number | null>;
 };
 
-export const EXPERIMENT_RUNS_KEY = 'picarx-impact-experiment-runs-v1';
-export const EXPERIMENT_CONDITION_KEY = 'picarx-impact-experiment-condition-v1';
-export const IMPACT_THRESHOLD_KEY = 'picarx-impact-experiment-threshold-v1';
+export type RunSummary = {
+  id: string; created_at: string; simulated: boolean; source: 'auto' | 'manual'; aborted: boolean; excluded: boolean;
+  condition: ExperimentCondition & { total_mass_g: number };
+  bump: BumpProfile;
+  analysis: RunAnalysis;
+  recording?: { sample_rate_hz?: number | null; count?: number | null };
+};
 
-export function totalMassG(condition: Pick<ExperimentCondition, 'baseMassG' | 'addedWeightCount' | 'eachWeightG'>): number {
-  return Math.max(0, condition.baseMassG) + Math.max(0, condition.addedWeightCount) * Math.max(0, condition.eachWeightG);
-}
+export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[] } };
 
-export function readExperimentRuns(): ExperimentRun[] {
+export type ConditionGroup = {
+  bump_id: string; total_mass_g: number; output_mode: OutputMode; output_value: number;
+  n_runs: number; n_used: number; mean_speed_mps: number | null; speed_min_mps: number | null; speed_max_mps: number | null;
+  mean_peak_delta_g: number | null; mean_peak_g: number | null; kept_min_delta_g: number; kept_max_delta_g: number;
+  dropped_delta_g: number[]; mean_force_n: number | null; mean_pi: number | null; jump_count: number; run_ids: string[];
+};
+
+export type PowerFit = {
+  bump_id: string | null; points: number;
+  per_mass: { mass_g: number; k: number; n: number; r2: number; points: number }[];
+  overall: { k0: number; n: number; p: number; r2: number } | null;
+  formula: string | null; note: string | null;
+};
+
+export type RunsResponse = { simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit> };
+
+export type AutoRunState = {
+  state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'done' | 'error' | 'aborted';
+  message: string; run_id: string | null; phase_remaining_s: number | null; result: RunSummary | null;
+};
+
+export const EXPERIMENT_CONDITION_KEY = 'picarx-impact-experiment-condition-v2';
+export const G = 9.80665;
+
+export const DEFAULT_CONDITION: ExperimentCondition = {
+  trial: 1, bump_id: 'A', base_mass_g: 0, added_mass_g: 0, output_mode: 'pwm', output_value: 50, video_speed_mps: null, note: '',
+};
+
+export function readCondition(): ExperimentCondition {
   try {
-    const value: unknown = JSON.parse(localStorage.getItem(EXPERIMENT_RUNS_KEY) || '[]');
-    return Array.isArray(value) ? value.filter((item): item is ExperimentRun =>
-      item && typeof item.id === 'string' && Array.isArray(item.samples) && Array.isArray(item.candidates)
-    ) : [];
+    const saved = JSON.parse(localStorage.getItem(EXPERIMENT_CONDITION_KEY) || 'null');
+    if (!saved || typeof saved !== 'object') return { ...DEFAULT_CONDITION };
+    return {
+      trial: Math.max(1, Math.round(Number(saved.trial) || 1)),
+      bump_id: typeof saved.bump_id === 'string' ? saved.bump_id : 'A',
+      base_mass_g: Math.max(0, Number(saved.base_mass_g) || 0),
+      added_mass_g: Math.max(0, Number(saved.added_mass_g) || 0),
+      output_mode: saved.output_mode === 'duty' ? 'duty' : 'pwm',
+      output_value: Math.max(0, Math.min(100, Number(saved.output_value) || 50)),
+      video_speed_mps: typeof saved.video_speed_mps === 'number' ? saved.video_speed_mps : null,
+      note: typeof saved.note === 'string' ? saved.note : '',
+    };
   } catch {
-    return [];
+    return { ...DEFAULT_CONDITION };
   }
 }
 
-export function writeExperimentRuns(runs: ExperimentRun[]): void {
-  try {
-    localStorage.setItem(EXPERIMENT_RUNS_KEY, JSON.stringify(runs.slice(0, 100)));
-  } catch {
-    // Storage quota errors must not interfere with vehicle control.
-  }
+export function writeCondition(condition: ExperimentCondition): void {
+  try { localStorage.setItem(EXPERIMENT_CONDITION_KEY, JSON.stringify(condition)); } catch { /* 저장 실패는 무시 */ }
 }
 
-export function detectImpactCandidates(samples: ImpactSample[], thresholdG: number): ImpactCandidate[] {
-  const threshold = Math.max(0.01, Math.min(8, thresholdG));
-  const candidates: ImpactCandidate[] = [];
-  let group: ImpactSample[] = [];
-
-  const flush = () => {
-    if (!group.length) return;
-    const peak = group.reduce((best, sample) => {
-      const value = typeof sample.dynamic_g === 'number' && Number.isFinite(sample.dynamic_g) ? sample.dynamic_g : -1;
-      const bestValue = typeof best.dynamic_g === 'number' && Number.isFinite(best.dynamic_g) ? best.dynamic_g : -1;
-      return value > bestValue ? sample : best;
-    }, group[0]);
-    const peakG = typeof peak.dynamic_g === 'number' && Number.isFinite(peak.dynamic_g) ? peak.dynamic_g : 0;
-    candidates.push({
-      id: `${peak.timestamp}-${peak.elapsed_s.toFixed(4)}`,
-      timestamp: peak.timestamp,
-      elapsed_s: peak.elapsed_s,
-      peak_g: peakG,
-      peak_m_s2: typeof peak.dynamic_m_s2 === 'number' && Number.isFinite(peak.dynamic_m_s2) ? peak.dynamic_m_s2 : null,
-      classification: 'pending',
-    });
-    group = [];
-  };
-
-  for (const sample of samples) {
-    const value = typeof sample.dynamic_g === 'number' && Number.isFinite(sample.dynamic_g) ? sample.dynamic_g : null;
-    if (value !== null && value >= threshold) {
-      if (group.length && sample.elapsed_s - group[group.length - 1].elapsed_s > 0.08) flush();
-      group.push(sample);
-    } else {
-      flush();
-    }
-  }
-  flush();
-  return candidates;
+/** 원호 단면 방지턱 곡률 반경 R = (w²/4 + h²) / (2h) */
+export function bumpRadiusMm(heightMm: number | null | undefined, widthMm: number | null | undefined): number | null {
+  if (!heightMm || !widthMm || heightMm <= 0 || widthMm <= 0) return null;
+  return (widthMm ** 2 / 4 + heightMm ** 2) / (2 * heightMm);
 }
 
-export function buildExperimentRun(
-  samples: ImpactSample[],
-  condition: ExperimentCondition,
-  thresholdG: number,
-): ExperimentRun | null {
-  if (!samples.length) return null;
-  const copied = samples.map(sample => ({ ...sample }));
-  return {
-    id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    createdAt: new Date().toISOString(),
-    condition: { ...condition, trialNumber: Math.max(1, Math.round(condition.trialNumber)) },
-    samples: copied,
-    candidates: detectImpactCandidates(copied, thresholdG),
-    sampleCount: copied.length,
-  };
+/** 실제 모터 듀티비(%). 라이브러리 PWM은 내부에서 speed/2 + 50 으로 바뀝니다. */
+export function effectiveDuty(mode: OutputMode, value: number): number {
+  if (mode === 'duty') return value;
+  return value > 0 ? Math.floor(value / 2) + 50 : 0;
 }
 
-export function summarizeSamples(samples: ImpactSample[]) {
-  const values = samples
-    .map(sample => sample.dynamic_g)
-    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-  if (!values.length) return { peakG: null as number | null, meanG: null as number | null, standardDeviationG: null as number | null };
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
-  return {
-    peakG: Math.max(...values),
-    meanG: mean,
-    standardDeviationG: Math.sqrt(variance),
-  };
+/** v_max = ((a_lim − 1) / (k₀ · m^p))^(1/n),  m: kg */
+export function predictVmax(fit: PowerFit | undefined, aLimitG: number, massG: number): number | null {
+  const o = fit?.overall;
+  if (!o || aLimitG <= 1 || massG <= 0 || o.n <= 0 || o.k0 <= 0) return null;
+  const base = (aLimitG - 1) / (o.k0 * (massG / 1000) ** o.p);
+  return base > 0 ? base ** (1 / o.n) : null;
+}
+
+export function fmt(value: number | null | undefined, digits = 3, unit = ''): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  return `${value.toFixed(digits)}${unit ? ' ' + unit : ''}`;
+}
+
+export function outputLabel(mode: OutputMode, value: number): string {
+  return mode === 'duty' ? `듀티 ${value}%` : `PWM ${value}`;
 }
