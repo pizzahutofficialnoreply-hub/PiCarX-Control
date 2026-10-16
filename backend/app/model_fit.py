@@ -291,6 +291,10 @@ def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, 
         r2 = chosen["r2"]
         lines.append(f"여러 후보식 중 교차검증 오차가 가장 작은(또는 선택한) 식은 '{chosen['name']}' {chosen['formula']}이며, "
                      f"결정계수 R² = {r2:.3f}{'(점 수와 매개변수 수가 같아 R²=1은 의미가 약함)' if chosen.get('exact_fit') else ''}이다.")
+        if r2 < 0.3 and not chosen.get("exact_fit"):
+            lines.append(f"주의: R²가 {r2:.2f}로 낮아(0이하는 평균값보다도 못 맞춤) 아직 속도와 충격 사이에 뚜렷한 관계가 보이지 않는다. "
+                         "조건 사이 속도 차이가 작거나(같은 출력에서 속도 편차가 큼) 회차별 충격 편차가 커서일 수 있으므로, "
+                         "이 식의 지수와 v_max는 결론으로 쓰지 말 것.")
         n_param = next((p for p in chosen["params"] if p["name"] == "n"), None)
         if n_param:
             ci = n_param["ci95"]
