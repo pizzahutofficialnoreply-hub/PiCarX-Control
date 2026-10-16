@@ -24,6 +24,13 @@ export type ExperimentSettings = {
   rest_s: number;
   heading_hold: boolean;
   heading_gain: number;
+  steering_source?: 'gyro' | 'line' | 'none';
+  kick_ms?: number;
+  model_id?: string;
+  plan_added_masses?: number[];
+  plan_outputs?: number[];
+  plan_repeats?: number;
+  line?: LineSettings;
   bumps: BumpProfile[];
   max_output?: number;
 };
@@ -33,6 +40,7 @@ export const DEFAULT_SETTINGS: ExperimentSettings = {
   wheelbase_mm: null, wheel_radius_mm: null, base_mass_g: null, threshold_delta_g: 0.3, min_gap_s: 0.03, jump_g: 0.2,
   a_limit_mode: 'manual', a_limit_g: 2.0, pre_roll_s: 1.0, run_seconds: 2.5, tail_s: 0.6,
   repeats: 5, return_enabled: true, return_output: null, return_scale: 1.0, rest_s: 1.5, heading_hold: true, heading_gain: 1.2,
+  steering_source: 'gyro', kick_ms: 0, model_id: 'auto', plan_added_masses: [0, 150, 300], plan_outputs: [40, 55, 70, 85, 100], plan_repeats: 5,
   bumps: [
     { id: 'A', name: 'A형 (완만)', height_mm: 10, width_mm: 60, radius_mm: 50 },
     { id: 'B', name: 'B형 (급함)', height_mm: 10, width_mm: 30, radius_mm: 16.25 },
@@ -48,6 +56,7 @@ export type ExperimentCondition = {
   output_mode: OutputMode;
   output_value: number;
   video_speed_mps: number | null;
+  purpose?: Purpose;
   note: string;
   total_mass_g?: number;
 };
@@ -58,6 +67,7 @@ export type RunAnalysis = {
   front_t_s: number | null; front_g: number | null; rear_t_s: number | null; rear_g: number | null;
   axle_dt_s: number | null; speed_mps: number | null; min_g: number | null; jump: boolean | null;
   airborne_s?: number | null; landing_t_s?: number | null; landing_g?: number | null;
+  candidates?: PeakCandidate[]; pair_source?: 'auto' | 'manual' | null;
   peak_force_n: number | null; dynamic_force_n: number | null; pi: number | null; r_eff_m: number | null;
   critical_speed_mps: number | null; peak_count: number; flags: string[];
   params?: Record<string, number | null>;
@@ -70,6 +80,8 @@ export type RunSummary = {
   analysis: RunAnalysis;
   recording?: { sample_rate_hz?: number | null; count?: number | null };
   heading_hold?: boolean | null; heading_max_deg?: number | null; heading_end_deg?: number | null;
+  battery_v?: number | null; steering_source?: string | null; data_source?: string | null; line_lost?: boolean | null; kick_ms?: number | null;
+  peak_override?: { front_t_s: number; rear_t_s: number } | null;
 };
 
 export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[] } };
@@ -93,7 +105,11 @@ export type Criterion = {
   vmax_by_mass: { mass_g: number; vmax_mps: number | null }[]; critical_speed_mps: number | null;
 };
 
-export type RunsResponse = { simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit>; criteria?: Record<string, Criterion> };
+export type RunsResponse = {
+  simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit>; criteria?: Record<string, Criterion>;
+  models?: Record<string, ModelComparison>; chosen_models?: Record<string, string | null>; interpretation?: Record<string, string[]>;
+  speed_maps?: SpeedMap[]; validation?: ValidationBundle; progress?: Progress;
+};
 
 export type AutoRunState = {
   state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'returning' | 'rest' | 'done' | 'error' | 'aborted';
@@ -120,6 +136,7 @@ export function readCondition(): ExperimentCondition {
       output_mode: saved.output_mode === 'duty' ? 'duty' : 'pwm',
       output_value: Math.max(0, Math.min(100, Number(saved.output_value) || 50)),
       video_speed_mps: typeof saved.video_speed_mps === 'number' ? saved.video_speed_mps : null,
+      purpose: saved.purpose === 'validation' || saved.purpose === 'pilot' ? saved.purpose : 'main',
       note: typeof saved.note === 'string' ? saved.note : '',
     };
   } catch {
@@ -158,4 +175,61 @@ export function fmt(value: number | null | undefined, digits = 3, unit = ''): st
 
 export function outputLabel(mode: OutputMode, value: number): string {
   return mode === 'duty' ? `듀티 ${value}%` : `PWM ${value}`;
+}
+
+// ---------------------------------------------------------------- 확장: 모델 비교·검증·진행표·라인
+export type Purpose = 'main' | 'validation' | 'pilot';
+export const PURPOSE_LABEL: Record<Purpose, string> = { main: '본 실험', validation: '식 검증', pilot: '예비' };
+
+export type ModelParam = { name: string; value: number; se: number | null; ci95: [number, number] | null };
+export type ModelResult = {
+  id: string; kind: 'power' | 'linear' | 'quadratic'; coef: Record<string, number>;
+  name: string; formula: string; explain: string; n_params: number; df: number;
+  r2: number; rmse: number; loocv_rmse: number | null; aic: number | null; params: ModelParam[]; exact_fit: boolean;
+};
+export type ModelComparison = { points: number; masses: number; speeds: number; models: ModelResult[]; best: string | null; rank_by?: string; note: string | null };
+export type SpeedMap = { bump_id: string; total_mass_g: number; output_mode: OutputMode; points: { output: number; speed_mps: number }[]; a: number | null; b: number | null; r2: number | null };
+export type ValidationRow = {
+  run_id: string; created_at: string; bump_id: string; total_mass_g: number; output_mode: OutputMode; output_value: number; trial: number;
+  speed_mps: number | null; measured_delta_g: number | null; predicted_delta_g: number | null; error_pct: number | null; abs_error_g: number | null; model_id: string | null;
+};
+export type ValidationBundle = { rows: ValidationRow[]; summary: { count: number; evaluated: number; mape: number | null; bias_pct: number | null; within_10pct: number; within_20pct: number } };
+export type ProgressCell = { bump_id: string; added_mass_g: number; output_value: number; done: number; need: number };
+export type Progress = { cells: ProgressCell[]; done: number; need: number; next: ProgressCell | null };
+export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number };
+export type PeakCandidate = { t_s: number; g: number; landing: boolean };
+
+export function modelPredict(model: { kind: string; coef: Record<string, number> } | null | undefined, v: number, mKg: number): number | null {
+  if (!model) return null;
+  const c = model.coef;
+  if (model.kind === 'power') return v > 0 && mKg > 0 ? c.k0 * v ** c.n * mKg ** (c.p ?? 0) : 0;
+  if (model.kind === 'linear') return c.a + c.b * v + (c.c ?? 0) * mKg;
+  return c.a + c.b * v * v + (c.c ?? 0) * mKg;
+}
+
+/** 예측 Δa가 목표값이 되는 속도(증가 함수 가정, 이분법) */
+export function modelSolveSpeed(model: ModelResult | null | undefined, deltaTarget: number, mKg: number): number | null {
+  if (!model || deltaTarget <= 0 || mKg <= 0) return null;
+  let lo = 1e-4, hi = 6;
+  const f = (v: number) => (modelPredict(model, v, mKg) ?? 0) - deltaTarget;
+  if (f(lo) > 0 || f(hi) < 0) return null;
+  for (let i = 0; i < 80; i++) { const mid = (lo + hi) / 2; if (f(mid) > 0) hi = mid; else lo = mid; }
+  return (lo + hi) / 2;
+}
+
+/** 목표 속도에 필요한 출력(가장 가까운 질량의 출력→속도 직선) */
+export function outputForSpeed(maps: SpeedMap[] | undefined, bumpId: string, massG: number, mode: OutputMode, targetV: number) {
+  const cands = (maps ?? []).filter(m => m.bump_id === bumpId && m.output_mode === mode && m.b && m.b > 0);
+  if (!cands.length) return null;
+  const best = cands.reduce((a, b) => Math.abs(a.total_mass_g - massG) <= Math.abs(b.total_mass_g - massG) ? a : b);
+  const out = (targetV - (best.a as number)) / (best.b as number);
+  const xs = best.points.map(p => p.output);
+  return { output: out, basedOnMass: best.total_mass_g, extrapolated: out < Math.min(...xs) || out > Math.max(...xs), r2: best.r2 };
+}
+
+export function paramText(p: ModelParam, digits = 3): string {
+  const v = p.name === 'ln k₀' ? `k₀ = ${Math.exp(p.value).toPrecision(4)}` : `${p.name} = ${p.value.toFixed(digits)}`;
+  if (!p.ci95) return v;
+  if (p.name === 'ln k₀') return `${v} (95% CI ${Math.exp(p.ci95[0]).toPrecision(3)} ~ ${Math.exp(p.ci95[1]).toPrecision(3)})`;
+  return `${v} (95% CI ${p.ci95[0].toFixed(digits)} ~ ${p.ci95[1].toFixed(digits)})`;
 }

@@ -6,11 +6,15 @@ import importlib
 import importlib.util
 import inspect
 import sys
+import time
 from typing import Protocol
 
-MAX_PWM = 60
+MAX_PWM = 100
 MAX_STEERING = 30
 CAMERA_ANGLE_LIMITS = (-30, 30)  # Conservative application limit; hardware is not probed.
+# 주행 중 방향키로 살짝씩 돌리는 카메라 시야 범위(보정값과 별개, 저장하지 않음)
+CAMERA_VIEW_LIMITS = {"pan": (-45, 45), "tilt": (-25, 35)}
+OUTPUT_MAPPINGS = ("library", "duty")
 
 CONFIRMED_API = (
     "forward", "backward", "stop", "set_motor_speed", "set_dir_servo_angle",
@@ -29,7 +33,10 @@ class HardwareAdapter(Protocol):
     pan_center: int
     tilt_center: int
     def stop(self) -> None: ...
-    def drive(self, direction: str, speed: int, steering: int) -> None: ...
+    def drive(self, direction: str, speed: int, steering: int, mapping: str = "library", trim: float = 1.0) -> None: ...
+    def set_camera_view(self, pan: int, tilt: int) -> None: ...
+    def read_battery(self) -> float | None: ...
+    def read_grayscale(self) -> list[float] | None: ...
     def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None: ...
     def test_steering(self, direction: str, angle: int) -> None: ...
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None: ...
@@ -57,12 +64,23 @@ class MockAdapter:
         self.motion = "stopped"
         self.steering_center = self.pan_center = self.tilt_center = 0
         self.library_installed, self.library_path = _installed_module_info()
+        self.last_command: dict | None = None
+        self.camera_view = {"pan": 0, "tilt": 0}
     def stop(self) -> None:
         self.motion = "stopped"
-    def drive(self, direction: str, speed: int, steering: int) -> None:
+        self.last_command = {"direction": "stopped", "at": time.time()}
+    def drive(self, direction: str, speed: int, steering: int, mapping: str = "library", trim: float = 1.0) -> None:
         self.motion = direction
-    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None:
+        self.last_command = describe_command(direction, "library" if mapping not in OUTPUT_MAPPINGS else mapping, speed, trim, steering, None)
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0, trim: float = 1.0) -> None:
         self.motion = direction
+        self.last_command = describe_command(direction, "duty" if mode == "duty" else "library", value, trim, steering, None)
+    def set_camera_view(self, pan: int, tilt: int) -> None:
+        self.camera_view = {"pan": pan, "tilt": tilt}
+    def read_battery(self) -> float | None:
+        return None
+    def read_grayscale(self) -> list[float] | None:
+        return [320.0, 340.0, 315.0]
     def test_steering(self, direction: str, angle: int) -> None:
         pass
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -103,10 +121,17 @@ class UnavailableAdapter:
         self.steering_center = self.pan_center = self.tilt_center = 0
     def stop(self) -> None:
         return
-    def drive(self, direction: str, speed: int, steering: int) -> None:
+    last_command = None
+    def drive(self, direction: str, speed: int, steering: int, mapping: str = "library", trim: float = 1.0) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
-    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None:
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0, trim: float = 1.0) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
+    def set_camera_view(self, pan: int, tilt: int) -> None:
+        raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
+    def read_battery(self) -> float | None:
+        return None
+    def read_grayscale(self) -> list[float] | None:
+        raise RuntimeError(self.connection_error or "PiCar-X is unavailable.")
     def test_steering(self, direction: str, angle: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -153,6 +178,9 @@ class PiCarXAdapter:
         self.library_installed, self.library_path = _installed_module_info()
         self.steering_center = self.pan_center = self.tilt_center = 0
         self._car = None
+        self.last_command: dict | None = None
+        self.camera_view = {"pan": 0, "tilt": 0}
+        self._battery_reader = None
         try:
             if not self.library_installed:
                 raise ModuleNotFoundError("Python package 'picarx' is not installed in this interpreter.")
@@ -205,50 +233,77 @@ class PiCarXAdapter:
         car = self._require_car()
         car.stop()
         self._set_steering(0)
+        self.last_command = {"direction": "stopped", "at": time.time()}
 
-    def drive(self, direction: str, speed: int, steering: int) -> None:
-        car = self._require_car()
-        pwm = self._clamp(speed, 0, MAX_PWM)
-        # signed steering (-30..30)는 조이스틱의 연속 입력을 그대로 전달합니다.
-        angle = self._clamp(steering, -MAX_STEERING, MAX_STEERING)
-        if direction in ("left", "right", "forward"):
-            if direction == "left": angle = -abs(angle)
-            if direction == "right": angle = abs(angle)
-            self._set_steering(angle)
-            car.forward(pwm)
-        elif direction == "backward":
-            self._set_steering(angle)
-            car.backward(pwm)
-        else:
-            raise ValueError(f"Unsupported direction: {direction}")
+    def _apply_output(self, direction: str, mapping: str, value: float, steering: float, trim: float) -> None:
+        """전진·후진 모두 같은 경로로 모터 출력을 적용합니다(방향만 다름).
 
-    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None:
-        """방지턱 실험용 직진·후진(자동 측정 주행과 복귀).
-
-        - ``pwm``  : 라이브러리 값 0~100을 그대로 ``forward()``에 전달합니다.
-          라이브러리가 내부에서 ``speed/2 + 50``으로 바꾸므로 실제 듀티비는 약 50~100%입니다.
-        - ``duty`` : 방향만 ``forward(1)``로 설정한 뒤 좌·우 뒷바퀴 PWM 핀에
-          듀티비(%)를 직접 지정합니다. 저속 구간까지 써서 속도 범위를 넓힙니다.
-          듀티가 너무 낮으면 모터가 출발하지 못할 수 있습니다.
+        - ``library``: 0~100을 ``forward()/backward()``에 전달. 라이브러리가 ``value/2 + 50``(%)로 바꿉니다.
+        - ``duty``   : 방향 핀만 라이브러리로 정한 뒤 좌·우 PWM 핀에 듀티비(%)를 직접 씁니다.
+        ``trim``은 방향별 출력 보정 배율(전·후진 속도 차이를 맞출 때)입니다.
         """
         car = self._require_car()
-        output = self._clamp(round(value), 0, 100)
         if direction not in ("forward", "backward"):
-            raise ValueError(f"Unsupported experiment direction: {direction}")
+            raise ValueError(f"Unsupported direction: {direction}")
+        if mapping not in OUTPUT_MAPPINGS:
+            raise ValueError(f"Unsupported output mapping: {mapping}")
+        output = self._clamp(round(max(0.0, value) * max(0.1, trim)), 0, MAX_PWM)
         move = car.forward if direction == "forward" else car.backward
-        # 자이로 직진 보정값(작은 각도)을 앱 조향 중심값과 함께 적용합니다.
         self._set_steering(self._clamp(round(steering), -MAX_STEERING, MAX_STEERING))
-        if mode == "pwm":
+        if mapping == "library":
             move(output)
-            return
-        if mode != "duty":
-            raise ValueError(f"Unsupported experiment output mode: {mode}")
-        pins = getattr(car, "motor_speed_pins", None)
-        if not pins or not all(callable(getattr(pin, "pulse_width_percent", None)) for pin in pins):
-            raise RuntimeError("설치된 picarx 라이브러리에서 motor_speed_pins를 찾지 못해 직접 듀티 모드를 쓸 수 없습니다. PWM 모드를 사용하세요.")
-        move(1)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
-        for pin in pins:
-            pin.pulse_width_percent(output)
+        else:
+            pins = getattr(car, "motor_speed_pins", None)
+            if not pins or not all(callable(getattr(pin, "pulse_width_percent", None)) for pin in pins):
+                raise RuntimeError("설치된 picarx 라이브러리에서 motor_speed_pins를 찾지 못해 직접 듀티 모드를 쓸 수 없습니다. 라이브러리 PWM 모드를 사용하세요.")
+            move(1 if output > 0 else 0)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
+            for pin in pins:
+                pin.pulse_width_percent(output)
+        self.last_command = describe_command(direction, mapping, value, trim, steering, car)
+
+    def drive(self, direction: str, speed: int, steering: int, mapping: str = "library", trim: float = 1.0) -> None:
+        # signed steering (-30..30)는 조이스틱의 연속 입력을 그대로 전달합니다.
+        angle = self._clamp(steering, -MAX_STEERING, MAX_STEERING)
+        if direction == "left":
+            angle, direction = -abs(angle), "forward"
+        elif direction == "right":
+            angle, direction = abs(angle), "forward"
+        if direction not in ("forward", "backward"):
+            raise ValueError(f"Unsupported direction: {direction}")
+        self._apply_output(direction, mapping, self._clamp(speed, 0, MAX_PWM), angle, trim)
+
+    def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0, trim: float = 1.0) -> None:
+        """방지턱 실험용 직진·후진(자동 측정 주행과 복귀). ``pwm`` = 라이브러리, ``duty`` = 직접 듀티."""
+        self._apply_output(direction, "duty" if mode == "duty" else "library", value, steering, trim)
+
+    def set_camera_view(self, pan: int, tilt: int) -> None:
+        """주행 중 카메라 시야 조절. 모터를 멈추지 않고 저장하지도 않습니다(보정 중심값 기준)."""
+        car = self._require_car()
+        pan = self._clamp(pan, *CAMERA_VIEW_LIMITS["pan"])
+        tilt = self._clamp(tilt, *CAMERA_VIEW_LIMITS["tilt"])
+        car.set_cam_pan_angle(self._clamp(pan + self.pan_center, -90, 90))
+        car.set_cam_tilt_angle(self._clamp(tilt + self.tilt_center, -35, 65))
+        self.camera_view = {"pan": pan, "tilt": tilt}
+
+    def read_battery(self) -> float | None:
+        if self._battery_reader is None:
+            try:
+                from robot_hat.utils import get_battery_voltage  # type: ignore
+                self._battery_reader = get_battery_voltage
+            except Exception:
+                self._battery_reader = False
+        if not self._battery_reader:
+            return None
+        try:
+            return round(float(self._battery_reader()), 3)
+        except Exception:
+            return None
+
+    def read_grayscale(self) -> list[float] | None:
+        car = self._require_car()
+        if not callable(getattr(car, "get_grayscale_data", None)):
+            return None
+        return [float(x) for x in car.get_grayscale_data()]
 
     def test_steering(self, direction: str, angle: int) -> None:
         car = self._require_car()
@@ -258,6 +313,7 @@ class PiCarXAdapter:
 
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
         car = self._require_car()
+        self.camera_view = {"pan": 0, "tilt": 0}
         steering = self._clamp(steering_center, -20, 20)
         pan = self._clamp(pan_center, *CAMERA_ANGLE_LIMITS)
         tilt = self._clamp(tilt_center, *CAMERA_ANGLE_LIMITS)
@@ -302,3 +358,49 @@ class PiCarXAdapter:
         if self._car is not None:
             self._car.stop()
             self.connected = False
+
+
+def _read_pins(car) -> dict | None:
+    """모터 핀에 실제로 적용된 듀티비와 방향 핀 값을 읽습니다(robot_hat이 지원할 때만)."""
+    if car is None:
+        return None
+    out: dict = {}
+    try:
+        pins = getattr(car, "motor_speed_pins", None) or []
+        duties = []
+        for pin in pins:
+            value = pin.pulse_width_percent()
+            duties.append(None if value is None else round(float(value), 1))
+        if duties:
+            out["duty_percent"] = duties
+    except Exception:
+        pass
+    try:
+        dirs = getattr(car, "motor_direction_pins", None) or []
+        values = [int(pin.value()) for pin in dirs]
+        if values:
+            out["direction_pins"] = values
+    except Exception:
+        pass
+    try:
+        cali = getattr(car, "cali_speed_value", None)
+        if cali is not None:
+            out["cali_speed_value"] = list(cali)
+        cali_dir = getattr(car, "cali_dir_value", None)
+        if cali_dir is not None:
+            out["cali_dir_value"] = list(cali_dir)
+    except Exception:
+        pass
+    return out or None
+
+
+def describe_command(direction: str, mapping: str, value: float, trim: float, steering: float, car) -> dict:
+    """화면에 보여 줄 마지막 모터 명령. 전진과 후진의 실제 듀티가 같은지 확인하는 데 씁니다."""
+    requested = max(0.0, float(value))
+    applied = max(0, min(MAX_PWM, round(requested * max(0.1, trim))))
+    expected = applied if mapping == "duty" else (applied // 2 + 50 if applied > 0 else 0)
+    return {
+        "direction": direction, "mapping": mapping, "requested": round(requested, 1), "trim": round(trim, 3),
+        "applied": applied, "expected_duty_percent": expected, "steering": round(float(steering), 1),
+        "pins": _read_pins(car), "at": time.time(),
+    }

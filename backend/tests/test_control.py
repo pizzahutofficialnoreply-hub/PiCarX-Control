@@ -85,8 +85,9 @@ class ControlSafetyTests(unittest.TestCase):
         adapter._car = FakePicarx()
         adapter.connected = True
         adapter.steering_center = 0
-        adapter.drive("left", 99, 35)
-        self.assertEqual(adapter._car.calls, [("steer", -30), ("forward", 60)])
+        adapter.drive("left", 130, 35)
+        self.assertEqual(adapter._car.calls, [("steer", -30), ("forward", 100)])
+        self.assertEqual(adapter.last_command["expected_duty_percent"], 100)
         adapter._car.calls.clear()
         adapter.drive("backward", 20, 10)
         self.assertEqual(adapter._car.calls, [("steer", 10), ("backward", 20)])
@@ -107,7 +108,7 @@ class ControlSafetyTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             DriveCommand(direction="launch", speed=20, steering=10)
         with self.assertRaises(ValidationError):
-            DriveCommand(direction="forward", speed=61, steering=10)
+            DriveCommand(direction="forward", speed=101, steering=10)
 
     def test_motor_exception_attempts_stop_and_preserves_fault(self):
         async def scenario():

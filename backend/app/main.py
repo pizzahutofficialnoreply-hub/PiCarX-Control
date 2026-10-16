@@ -9,8 +9,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from .hardware import MockAdapter, PiCarXAdapter, UnavailableAdapter
-from .models import AutonomyStart, CalibrationUpdate, DriveCommand, SteeringTest
+from .hardware import MAX_PWM, MockAdapter, PiCarXAdapter, UnavailableAdapter
+from .models import AutonomyStart, CalibrationUpdate, CameraView, DriveCommand, DriveSettingsUpdate, SteeringTest
 from .autonomy.registry import controller_catalog
 from .services.event_log import read_events, record_event
 from .camera import camera_service
@@ -18,7 +18,8 @@ from .mpu6050 import mpu6050_service
 from .experiment import router as experiment_router, bind_control
 
 WATCHDOG_SECONDS = 0.5
-SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "settings.json"
+SETTINGS_PATH = Path(os.getenv("PICARX_DATA_DIR") or Path(__file__).resolve().parent.parent / "data") / "settings.json"
+DRIVE_DEFAULTS = {"mapping": "library", "trim_forward": 1.0, "trim_backward": 1.0}
 
 class ControlService:
     """Serialize motor operations and enforce command expiry server-side."""
@@ -41,6 +42,8 @@ class ControlService:
         self.steering_center = int(saved.get("steering_center", self.adapter.steering_center))
         self.pan_center = int(saved.get("pan_center", self.adapter.pan_center))
         self.tilt_center = int(saved.get("tilt_center", self.adapter.tilt_center))
+        drive = saved.get("drive") if isinstance(saved.get("drive"), dict) else {}
+        self.drive_settings = {**DRIVE_DEFAULTS, **{k: v for k, v in drive.items() if k in DRIVE_DEFAULTS}}
         if self.adapter.connected:
             try:
                 self.adapter.set_calibration(self.steering_center, self.pan_center, self.tilt_center)
@@ -87,6 +90,7 @@ class ControlService:
             "steering_center": self.steering_center,
             "pan_center": self.pan_center,
             "tilt_center": self.tilt_center,
+            "drive": self.drive_settings,
         }, indent=2), encoding="utf-8")
         temp_path.replace(SETTINGS_PATH)
 
@@ -137,7 +141,8 @@ class ControlService:
             if not self.adapter.connected:
                 raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
             try:
-                self.adapter.drive(command.direction, command.speed, command.steering)
+                trim = self.drive_settings["trim_backward" if command.direction == "backward" else "trim_forward"]
+                self.adapter.drive(command.direction, command.speed, command.steering, self.drive_settings["mapping"], trim)
                 self.motion = command.direction
                 self.speed = command.speed
                 self.steering = command.steering
@@ -165,7 +170,8 @@ class ControlService:
             if not self.adapter.connected:
                 raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
             try:
-                self.adapter.drive_experiment(mode, value, direction, steering)
+                trim = self.drive_settings["trim_backward" if direction == "backward" else "trim_forward"]
+                self.adapter.drive_experiment(mode, value, direction, steering, trim)
                 self.motion, self.speed, self.steering = direction, int(round(value)), int(round(steering))
                 self.updated_at = time.monotonic()
                 self.fault = None
@@ -179,6 +185,18 @@ class ControlService:
                 except Exception:
                     pass
                 raise
+
+    def save_drive_settings(self, update: dict) -> dict:
+        self.drive_settings = {**self.drive_settings, **{k: v for k, v in update.items() if k in DRIVE_DEFAULTS and v is not None}}
+        self._write_settings()
+        return dict(self.drive_settings)
+
+    async def set_camera_view(self, pan: int, tilt: int) -> dict:
+        # 주행 lock을 잡지 않아 주행 명령과 서로 막지 않습니다(서보만 움직임).
+        if not self.adapter.connected:
+            raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
+        await asyncio.to_thread(self.adapter.set_camera_view, pan, tilt)
+        return dict(getattr(self.adapter, "camera_view", {"pan": pan, "tilt": tilt}))
 
     async def test_steering(self, test: SteeringTest) -> None:
         self.stop_generation += 1
@@ -214,6 +232,10 @@ class ControlService:
             "last_command_age_ms": age,
             "watchdog_ms": int(WATCHDOG_SECONDS * 1000),
             "fault": self.fault,
+            "max_pwm": MAX_PWM,
+            "drive_settings": self.drive_settings,
+            "last_motor_command": getattr(self.adapter, "last_command", None),
+            "camera_view": getattr(self.adapter, "camera_view", None),
         }
 
     def diagnostics(self) -> dict:
@@ -339,6 +361,36 @@ async def calibration(update: CalibrationUpdate):
         raise HTTPException(503, f"Calibration failed: {exc}")
     return {"steering_center": control.steering_center, "pan_center": control.pan_center,
             "tilt_center": control.tilt_center, "applied_to_hardware": control.adapter.mode == "hardware" and control.adapter.connected}
+
+@app.get("/api/settings/drive")
+async def get_drive_settings():
+    return {**control.drive_settings, "max_pwm": MAX_PWM}
+
+
+@app.put("/api/settings/drive")
+async def put_drive_settings(update: DriveSettingsUpdate):
+    await control.stop(reason="drive_settings_change")
+    return {**control.save_drive_settings(update.model_dump()), "max_pwm": MAX_PWM}
+
+
+@app.post("/api/camera/view")
+async def camera_view(view: CameraView):
+    """주행 중 방향키로 카메라를 살짝씩 돌립니다. 주행을 멈추지 않습니다."""
+    current = getattr(control.adapter, "camera_view", {"pan": 0, "tilt": 0}) or {"pan": 0, "tilt": 0}
+    pan = view.pan if view.pan is not None else current["pan"] + (view.pan_delta or 0)
+    tilt = view.tilt if view.tilt is not None else current["tilt"] + (view.tilt_delta or 0)
+    try:
+        return await control.set_camera_view(int(round(pan)), int(round(tilt)))
+    except Exception as exc:
+        raise HTTPException(503, f"Camera view failed: {exc}")
+
+
+@app.get("/api/battery")
+async def battery():
+    volts = await asyncio.to_thread(control.adapter.read_battery) if control.adapter.connected else None
+    return {"mode": control.adapter.mode, "voltage": volts,
+            "level": None if volts is None else ("low" if volts < 7.0 else "ok" if volts >= 7.6 else "medium")}
+
 
 @app.get("/api/logs")
 @app.get("/api/autonomy/logs")

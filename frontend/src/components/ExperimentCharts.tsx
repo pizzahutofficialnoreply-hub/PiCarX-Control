@@ -2,7 +2,7 @@
 // 화면에 보이는 그대로 PNG/SVG로 저장합니다.
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Download, Image as ImageIcon } from 'lucide-react';
-import type { ConditionGroup, PowerFit, RunAnalysis, RunSummary } from '../services/experiment';
+import { modelPredict, modelSolveSpeed, type ConditionGroup, type ModelResult, type PowerFit, type RunAnalysis, type RunSummary } from '../services/experiment';
 
 const W = 640, H = 360, M = { l: 58, r: 18, t: 30, b: 48 };
 const PW = W - M.l - M.r, PH = H - M.t - M.b;
@@ -87,8 +87,8 @@ export function Figure({ name, caption, tools, children }: { name: string; capti
 }
 
 /* ------------------------------------------------------------------ 시행 원자료 */
-export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, name }: {
-  series: { t_s: number[]; vertical_g: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string;
+export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, name, showCandidates = true }: {
+  series: { t_s: number[]; vertical_g: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string; showCandidates?: boolean;
 }) {
   const hasPair = analysis.front_t_s != null && analysis.rear_t_s != null;
   const [zoom, setZoom] = useState<'bump' | 'all'>(hasPair ? 'bump' : 'all');
@@ -115,6 +115,8 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
       <text x={M.l + 4} y={sy(1 + thresholdDelta) - 4} fontSize={10} fill="#a77f12" fontFamily={FONT} {...HALO}>피크 검출 기준 {(1 + thresholdDelta).toFixed(2)} g</text>
       {y[0] <= jumpG && <><line x1={M.l} x2={M.l + PW} y1={sy(jumpG)} y2={sy(jumpG)} stroke="#c44" strokeDasharray="2 4" /><text x={M.l + PW - 4} y={sy(jumpG) + 13} fontSize={10} textAnchor="end" fill="#b33" fontFamily={FONT} {...HALO}>지면 이탈 기준 {jumpG} g</text></>}
       <path d={path} fill="none" stroke="#2f6fb0" strokeWidth={1.4} strokeLinejoin="round" />
+      {showCandidates && (analysis.candidates ?? []).map((c, i) => c.t_s < x[0] || c.t_s > x[1] || c.t_s === analysis.front_t_s || c.t_s === analysis.rear_t_s ? null :
+        <g key={'cand' + i} fontFamily={FONT}><path d={`M${sx(c.t_s)},${sy(Math.min(c.g, y[1])) - 9} l4,-7 l-8,0 z`} fill="#8a939c" /><text x={sx(c.t_s)} y={sy(Math.min(c.g, y[1])) - 19} fontSize={9.5} textAnchor="middle" fill="#6a737d" {...HALO}>#{i + 1}</text></g>)}
       {marker(analysis.front_t_s, analysis.front_g, '앞바퀴', '#d0782a')}
       {marker(analysis.rear_t_s, analysis.rear_g, '뒷바퀴', '#3c9a5f')}
       {analysis.landing_t_s != null && analysis.landing_t_s !== analysis.rear_t_s && marker(analysis.landing_t_s, analysis.landing_g ?? null, '착지', '#a04fa0')}
@@ -128,8 +130,8 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
 }
 
 /* ------------------------------------------------------------------ 속도–Δa 산점도 + 회귀곡선 */
-export function SpeedImpactChart({ runs, groups, fit, aLimit, title, name }: {
-  runs: RunSummary[]; groups: ConditionGroup[]; fit?: PowerFit; aLimit: number | null; title: string; name: string;
+export function SpeedImpactChart({ runs, groups, fit, model: chosen, aLimit, title, name }: {
+  runs: RunSummary[]; groups: ConditionGroup[]; fit?: PowerFit; model?: ModelResult | null; aLimit: number | null; title: string; name: string;
 }) {
   const masses = Array.from(new Set(groups.map(g => g.total_mass_g).concat(runs.map(r => Math.round(r.condition.total_mass_g / 5) * 5)))).sort((a, b) => a - b);
   const color = (m: number) => MASS_COLORS[Math.max(0, masses.indexOf(m)) % MASS_COLORS.length];
@@ -141,11 +143,13 @@ export function SpeedImpactChart({ runs, groups, fit, aLimit, title, name }: {
   const y = niceRange([...ys, 0], 0.08, true);
   const { sx, sy } = scales(x, y);
   const model = (m: number): ((v: number) => number) | null => {
+    if (chosen) return (v: number) => modelPredict(chosen, v, m / 1000) ?? 0;
     const o = fit?.overall; const per = fit?.per_mass.find(p => p.mass_g === m);
     return o ? (v: number) => o.k0 * v ** o.n * (m / 1000) ** o.p : per ? (v: number) => per.k * v ** per.n : null;
   };
   // 허용 기준 Δa_lim = a_lim − 1 과 회귀곡선의 교점 = 그 질량의 v_max
   const vmaxOf = (m: number): number | null => {
+    if (chosen) return aLimit && aLimit > 1 ? modelSolveSpeed(chosen, aLimit - 1, m / 1000) : null;
     const o = fit?.overall; const per = fit?.per_mass.find(p => p.mass_g === m);
     if (!aLimit || aLimit <= 1) return null;
     const k = o ? o.k0 * (m / 1000) ** o.p : per?.k, n = o ? o.n : per?.n;
@@ -159,7 +163,7 @@ export function SpeedImpactChart({ runs, groups, fit, aLimit, title, name }: {
     const lo = Math.max(x[0], 1e-3, Math.min(...mv) * 0.9), hi = Math.min(x[1], Math.max(...mv) * 1.1);
     return Array.from({ length: 50 }, (_, i) => lo + (hi - lo) * i / 49).map((v, i) => `${i ? 'L' : 'M'}${sx(v).toFixed(1)},${sy(Math.min(y[1], f(v))).toFixed(1)}`).join('');
   };
-  return <Figure name={name} caption={<>점: 개별 시행 · 큰 점과 막대: 조건 평균(상·하위 1회 제외)과 남은 값의 범위 · 선: 회귀식 Δa = k₀·vⁿ·mᵖ{aLimit ? ` · 빨간 점선: 허용 기준 ${aLimit} g, ◆: 질량별 v_max` : ''}</>}>
+  return <Figure name={name} caption={<>점: 개별 시행 · 큰 점과 막대: 조건 평균(상·하위 1회 제외)과 남은 값의 범위 · 선: {chosen ? `선택한 관계식 ${chosen.formula}` : '회귀식 Δa = k₀·vⁿ·mᵖ'}{aLimit ? ` · 빨간 점선: 허용 기준 ${aLimit} g, ◆: 질량별 v_max` : ''}</>}>
     {ref => <svg ref={ref} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title}>
       <Axes x={x} y={y} xLabel="측정 속도 v (m/s)" yLabel="최대 수직 가속도 증가분 Δa (g)" title={title} />
       {aLimit && aLimit - 1 <= y[1] && <><line x1={M.l} x2={M.l + PW} y1={sy(aLimit - 1)} y2={sy(aLimit - 1)} stroke="#c33" strokeDasharray="6 4" /><text x={M.l + PW - 4} y={sy(aLimit - 1) - 5} fontSize={10.5} textAnchor="end" fill="#b22" fontFamily={FONT} {...HALO}>허용 기준 a = {aLimit} g</text></>}
@@ -202,6 +206,33 @@ export function PiChart({ runs, title, name }: { runs: RunSummary[]; title: stri
       {x[1] >= 1 && <><line x1={sx(1)} x2={sx(1)} y1={M.t} y2={M.t + PH} stroke="#c33" strokeDasharray="6 4" /><text x={sx(1) + 5} y={M.t + PH - 8} fontSize={10.5} fill="#b22" fontFamily={FONT} {...HALO}>Π = 1 (점프 경계)</text></>}
       {shown.map(r => <Mark key={r.id} shape={SHAPES[bumps.indexOf(r.condition.bump_id) % SHAPES.length]} x={sx(r.analysis.pi as number)} y={sy(r.analysis.peak_g as number)} color={MASS_COLORS[bumps.indexOf(r.condition.bump_id) % MASS_COLORS.length]} hollow={!!r.analysis.jump} />)}
       <g fontFamily={FONT} fontSize={10.5}>{bumps.map((b, i) => <g key={b} transform={`translate(${M.l + PW - 80 * (bumps.length - i)} 18)`}><Mark shape={SHAPES[i % SHAPES.length]} x={0} y={-3.5} color={MASS_COLORS[i % MASS_COLORS.length]} /><text x={10} y={0} fill={INK}>방지턱 {b}</text></g>)}</g>
+    </svg>}
+  </Figure>;
+}
+
+
+/* ------------------------------------------------------------------ 범용 XY 그래프 (검증·점검·라인 추종) */
+export type XYSeries = { name: string; color: string; points: { x: number; y: number; label?: string }[]; line?: boolean; dots?: boolean };
+export function XYChart({ series, title, name, xLabel, yLabel, identity, band, zeroLine, caption, xZero, yZero }: {
+  series: XYSeries[]; title: string; name: string; xLabel: string; yLabel: string;
+  identity?: boolean; band?: number; zeroLine?: boolean; caption?: ReactNode; xZero?: boolean; yZero?: boolean;
+}) {
+  const xs = series.flatMap(s => s.points.map(p => p.x)), ys = series.flatMap(s => s.points.map(p => p.y));
+  let x = niceRange(xs.length ? xs : [0, 1], 0.08, xZero), y = niceRange(ys.length ? ys : [0, 1], 0.08, yZero);
+  if (identity) { const lo = Math.min(x[0], y[0]), hi = Math.max(x[1], y[1]); x = [lo, hi]; y = [lo, hi]; }
+  const { sx, sy } = scales(x, y);
+  return <Figure name={name} caption={caption}>
+    {ref => <svg ref={ref} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title}>
+      <Axes x={x} y={y} xLabel={xLabel} yLabel={yLabel} title={title} />
+      <defs><clipPath id={`clip-${name}`}><rect x={M.l} y={M.t} width={PW} height={PH} /></clipPath></defs>
+      {identity && band ? <path clipPath={`url(#clip-${name})`} d={`M${sx(x[0])},${sy(x[0] * (1 + band))} L${sx(x[1])},${sy(x[1] * (1 + band))} L${sx(x[1])},${sy(x[1] * (1 - band))} L${sx(x[0])},${sy(x[0] * (1 - band))} Z`} fill="#3c9a5f" opacity={0.12} /> : null}
+      {identity && <><line x1={sx(x[0])} y1={sy(x[0])} x2={sx(x[1])} y2={sy(x[1])} stroke="#3c9a5f" strokeDasharray="5 4" /><text x={sx(x[1]) - 4} y={sy(x[1]) + 14} textAnchor="end" fontSize={10} fill="#2d7a4a" fontFamily={FONT} {...HALO}>예측 = 실측{band ? ` (±${Math.round(band * 100)}% 띠)` : ''}</text></>}
+      {zeroLine && y[0] < 0 && y[1] > 0 && <line x1={M.l} x2={M.l + PW} y1={sy(0)} y2={sy(0)} stroke="#9aa3ad" strokeDasharray="5 4" />}
+      {series.map(s => <g key={s.name}>
+        {s.line && s.points.length > 1 && <path d={s.points.map((p, i) => `${i ? 'L' : 'M'}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join('')} fill="none" stroke={s.color} strokeWidth={1.6} />}
+        {(s.dots ?? !s.line) && s.points.map((p, i) => <g key={i}><circle cx={sx(p.x)} cy={sy(p.y)} r={4} fill="#fff" stroke={s.color} strokeWidth={2} />{p.label && <text x={sx(p.x) + 6} y={sy(p.y) - 6} fontSize={9.5} fill={MUTED} fontFamily={FONT} {...HALO}>{p.label}</text>}</g>)}
+      </g>)}
+      <g fontFamily={FONT} fontSize={10.5}>{series.length > 1 && series.map((s, i) => <g key={'l' + s.name} transform={`translate(${M.l + 10} ${M.t + 14 + i * 16})`}><rect x={-4} y={-8} width={9} height={9} fill={s.color} /><text x={10} y={0} fill={INK}>{s.name}</text></g>)}</g>
     </svg>}
   </Figure>;
 }

@@ -19,7 +19,7 @@
 {"direction":"forward","speed":35,"steering":25}
 ```
 
-`direction` accepts `forward`, `backward`, `left`, or `right`. Speed is an integer from 0 to 60; steering is a signed integer from -30 to 30 degrees. Out-of-range and unknown values return 422.
+`direction` accepts `forward`, `backward`, `left`, or `right`. Speed is an integer from 0 to 100 (output mapping and per-direction trim: `GET/PUT /api/settings/drive`); steering is a signed integer from -30 to 30 degrees. Out-of-range and unknown values return 422.
 
 `POST /api/stop`은 `{ "motion":"stopped", "speed":0, "steering":0 }` 상태를 반환합니다. 하드웨어 오류 시 503과 오류 설명을 반환하며 가능한 한 정지 상태로 복귀합니다.
 

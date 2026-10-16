@@ -62,7 +62,7 @@ PC에서는 `http://localhost:5173`, 스마트폰에서는 같은 Wi-Fi의 Raspb
 
 - 주행 버튼은 누르는 동안만 명령을 반복 전송하도록 설계되어야 하며, 서버 watchdog이 0.5초간 명령 갱신이 없으면 정지합니다.
 - 정지 API는 즉시 속도/조향 상태를 0으로 만들고 하드웨어 stop을 호출합니다.
-- 속도 0–60%, 조향 입력 0–35°로 백엔드에서 검증합니다.
+- 출력 0–100(라이브러리 PWM 또는 직접 듀티, 방향별 배율은 /api/settings/drive), 조향 −30–30°로 백엔드에서 검증합니다.
 - `PICARX_MODE=hardware` selects the verified adapter; driver initialization failure keeps status endpoints online and rejects movement. The API reports initialization state, not proof that every motor and wire works.
 - API는 현재 인증이 없습니다. 신뢰하는 로컬 Wi-Fi에서만 사용하세요.
 
@@ -76,7 +76,7 @@ PC에서는 `http://localhost:5173`, 스마트폰에서는 같은 Wi-Fi의 Raspb
 
 ## 방지턱 충격 실험 (MPU-6050)
 
-**실험 관리** 화면에서 조건을 입력하고 *자동 측정 주행*을 누르면, 차량이 정지 기록 → 직진 → 정지 순으로 움직이며 MPU-6050 수직 가속도를 약 1 kHz로 기록합니다. 시행마다 앞·뒤 바퀴 피크 간격으로 통과 속도를 계산하고, 지면 이탈·착지 충격·충격력·Π를 함께 구합니다. 조건별 절사평균과 회귀식 Δa = k₀·vⁿ·mᵖ, 허용 가속도에 대한 최대 통과 속도 예측을 보여 주며, 그래프는 PNG/SVG, 표는 CSV로 저장합니다. 기록은 Raspberry Pi의 `backend/data/experiments/`에 저장됩니다. 자세한 내용은 [docs/EXPERIMENT.md](docs/EXPERIMENT.md)를 보세요.
+주행 화면은 PC에서 **WASD**(주행)·**방향키**(카메라)로 조작할 수 있고 출력 상한은 100입니다. **실험 관리**는 측정·분석 / 식 검증 / 라인 추종 / 점검·데이터 / 해석 가이드 하위 탭으로 나뉩니다. 화면에서 조건을 입력하고 *자동 측정 주행*을 누르면, 차량이 정지 기록 → 직진 → 정지 순으로 움직이며 MPU-6050 수직 가속도를 약 1 kHz로 기록합니다. 시행마다 앞·뒤 바퀴 피크 간격으로 통과 속도를 계산하고, 지면 이탈·착지 충격·충격력·Π를 함께 구합니다. 조건별 절사평균과 회귀식 Δa = k₀·vⁿ·mᵖ, 허용 가속도에 대한 최대 통과 속도 예측을 보여 주며, 그래프는 PNG/SVG, 표는 CSV로 저장합니다. 기록은 Raspberry Pi의 `backend/data/experiments/`에 저장됩니다. 자세한 내용은 [docs/EXPERIMENT.md](docs/EXPERIMENT.md)를 보세요.
 
 ## Phase 5 기능 상태
 

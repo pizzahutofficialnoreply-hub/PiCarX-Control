@@ -199,8 +199,8 @@ export type DriveDirection =
 export interface DriveCommand {
   direction: DriveDirection;
 
-  // 백엔드의 speed는 실제 km/h가 아니라 Motor PWM입니다.
-  // 현재 백엔드 제한: 0 ~ 60
+  // 백엔드의 speed는 실제 km/h가 아니라 모터 출력(0~100)입니다.
+  // 출력 방식(라이브러리 PWM/직접 듀티)과 방향별 배율은 /api/settings/drive에서 정합니다.
   speed: number;
 
   // -30 = 최대 좌회전
@@ -214,7 +214,7 @@ export async function drive(command: DriveCommand) {
     method: 'POST',
     body: JSON.stringify({
       direction: command.direction,
-      speed: Math.max(0, Math.min(60, Math.round(command.speed))),
+      speed: Math.max(0, Math.min(100, Math.round(command.speed))),
       steering: Math.max(-30, Math.min(30, Math.round(command.steering))),
     }),
   });

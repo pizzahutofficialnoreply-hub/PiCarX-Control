@@ -13,10 +13,13 @@ import asyncio
 import csv
 import io
 import json
+import math
 import os
 import re
+import shutil
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -25,6 +28,8 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from . import impact_analysis as ia
+from . import model_fit as mf
+from .line_follow import LineSettings, LineTracker
 from .mpu6050 import mpu6050_service
 from .services.event_log import record_event
 
@@ -61,6 +66,13 @@ class ExperimentSettings(BaseModel):
     rest_s: float = Field(default=1.5, ge=0.3, le=10)
     heading_hold: bool = True
     heading_gain: float = Field(default=1.2, ge=0, le=5, description="조향 보정 각도 = 배율 × 방향 오차")
+    steering_source: Literal["gyro", "line", "none"] = Field(default="gyro", description="측정 직진 중 조향 방식")
+    kick_ms: int = Field(default=0, ge=0, le=400, description="출발 순간 최대 출력으로 밀어 주는 시간(정지마찰 극복)")
+    model_id: str = Field(default="auto", max_length=20, description="관계식 모델(auto = 교차검증 오차 최소)")
+    plan_added_masses: list[float] = Field(default_factory=lambda: [0.0, 150.0, 300.0])
+    plan_outputs: list[float] = Field(default_factory=lambda: [40.0, 55.0, 70.0, 85.0, 100.0])
+    plan_repeats: int = Field(default=5, ge=1, le=20)
+    line: LineSettings = Field(default_factory=LineSettings)
     bumps: list[BumpProfile] = Field(default_factory=lambda: [
         BumpProfile(id="A", name="A형 (완만)", height_mm=10, width_mm=60),
         BumpProfile(id="B", name="B형 (급함)", height_mm=10, width_mm=30),
@@ -75,6 +87,7 @@ class ExperimentCondition(BaseModel):
     output_mode: Literal["pwm", "duty"] = "pwm"
     output_value: float = Field(ge=0, le=100)
     video_speed_mps: float | None = Field(default=None, ge=0, le=10, description="영상으로 잰 속도(교차 검증용)")
+    purpose: Literal["main", "validation", "pilot"] = Field(default="main", description="main: 식 도출, validation: 식 검증(회귀에서 제외), pilot: 예비")
     note: str = Field(default="", max_length=200)
 
 
@@ -89,15 +102,40 @@ class AutoRunRequest(BaseModel):
     return_scale: float | None = Field(default=None, ge=0.3, le=3)
     rest_s: float | None = Field(default=None, ge=0.3, le=10)
     heading_hold: bool | None = None
+    steering_source: Literal["gyro", "line", "none"] | None = None
+    kick_ms: int | None = Field(default=None, ge=0, le=400)
 
 
 class SaveRecordingRequest(BaseModel):
     condition: ExperimentCondition
 
 
+class PeakOverride(BaseModel):
+    front_t_s: float = Field(ge=0)
+    rear_t_s: float = Field(ge=0)
+
+
 class RunUpdate(BaseModel):
     excluded: bool | None = None
     note: str | None = Field(default=None, max_length=200)
+    purpose: Literal["main", "validation", "pilot"] | None = None
+    peak_override: PeakOverride | None = None
+    clear_peak_override: bool = False
+
+
+class BulkDelete(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=2000)
+
+
+class ResetRequest(BaseModel):
+    scope: Literal["current", "all"] = "current"
+    confirm: str
+
+
+class SymmetryRequest(BaseModel):
+    output_mode: Literal["pwm", "duty"] = "pwm"
+    output_value: float = Field(default=60, gt=0, le=100)
+    seconds: float = Field(default=1.0, ge=0.3, le=3)
 
 
 # --------------------------------------------------------------------------- 저장소
@@ -187,6 +225,53 @@ class ExperimentStore:
             except FileNotFoundError:
                 pass
 
+    @property
+    def trash_dir(self) -> Path:
+        return self.root / "experiments_trash"
+
+    def move_to_trash(self, run_ids: list[str], label: str) -> str:
+        """초기화는 바로 지우지 않고 휴지통 폴더로 옮겨 되돌릴 수 있게 합니다."""
+        batch = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + re.sub(r"[^A-Za-z0-9_-]", "", label)[:20]
+        dest = self.trash_dir / batch
+        dest.mkdir(parents=True, exist_ok=True)
+        for run_id in run_ids:
+            for path in (self._json_path(run_id), self.csv_path(run_id)):
+                if path.exists():
+                    shutil.move(str(path), str(dest / path.name))
+        return batch
+
+    def trash_batches(self) -> list[dict[str, Any]]:
+        if not self.trash_dir.is_dir():
+            return []
+        out = []
+        for d in sorted(self.trash_dir.iterdir(), reverse=True):
+            if d.is_dir():
+                out.append({"batch": d.name, "runs": len(list(d.glob("*.json")))})
+        return out
+
+    def _batch_dir(self, batch: str) -> Path:
+        if not re.match(r"^[A-Za-z0-9_-]{6,60}$", batch):
+            raise HTTPException(404, "휴지통 묶음을 찾을 수 없습니다.")
+        d = self.trash_dir / batch
+        if not d.is_dir():
+            raise HTTPException(404, "휴지통 묶음을 찾을 수 없습니다.")
+        return d
+
+    def restore_batch(self, batch: str) -> int:
+        d = self._batch_dir(batch)
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for path in list(d.iterdir()):
+            target = self.runs_dir / path.name
+            if not target.exists():
+                shutil.move(str(path), str(target))
+                count += path.suffix == ".json"
+        shutil.rmtree(d, ignore_errors=True)
+        return count
+
+    def purge_batch(self, batch: str) -> None:
+        shutil.rmtree(self._batch_dir(batch), ignore_errors=True)
+
 
 store = ExperimentStore(DATA_DIR)
 
@@ -220,6 +305,7 @@ def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings:
         min_gap_s=settings.min_gap_s,
         jump_g=settings.jump_g,
         window=window,
+        override=run.get("peak_override"),
     )
 
 
@@ -254,19 +340,21 @@ def finalize_run(run: dict[str, Any], columns: dict[str, list[float]], meta: dic
 
 def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return {k: run.get(k) for k in ("id", "created_at", "simulated", "source", "aborted", "excluded", "condition", "bump", "analysis", "recording",
-                                    "heading_hold", "heading_max_deg", "heading_end_deg")}
+                                    "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
+                                    "peak_override", "data_source", "line_lost", "kick_ms")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
     return [r for r in store.list_runs() if bool(r.get("simulated")) == simulated]
 
 
-def criterion_for(bump_id: str, groups: list[dict[str, Any]], fit: dict[str, Any], settings: ExperimentSettings) -> dict[str, Any]:
-    """허용 최대 수직 가속도 기준과 질량별 최대 통과 속도(v_max)."""
+def criterion_for(bump_id: str, groups: list[dict[str, Any]], model: dict[str, Any] | None, settings: ExperimentSettings) -> dict[str, Any]:
+    """허용 최대 수직 가속도 기준과 질량별 최대 통과 속도(v_max, 선택한 관계식으로 계산)."""
     bump = bump_snapshot(settings, bump_id)
     r_eff = ia.effective_radius_m(bump.get("radius_mm"), settings.wheel_radius_mm)
     out: dict[str, Any] = {"mode": settings.a_limit_mode, "a_limit_g": None, "source": "", "vmax_by_mass": [],
-                           "critical_speed_mps": round(ia.critical_speed_mps(r_eff), 4) if r_eff else None}
+                           "critical_speed_mps": round(ia.critical_speed_mps(r_eff), 4) if r_eff else None,
+                           "model_id": model["id"] if model else None}
     mine = [g for g in groups if g["bump_id"] == bump_id]
     if settings.a_limit_mode == "manual":
         out["a_limit_g"] = settings.a_limit_g
@@ -282,16 +370,78 @@ def criterion_for(bump_id: str, groups: list[dict[str, Any]], fit: dict[str, Any
             out["source"] = "아직 점프한 조건이 없어 기준을 정할 수 없습니다(직접 입력으로 바꾸거나 더 빠른 조건을 측정)."
     if out["a_limit_g"]:
         for mass in sorted({g["total_mass_g"] for g in mine}):
-            out["vmax_by_mass"].append({"mass_g": mass, "vmax_mps": ia.predict_vmax(fit, out["a_limit_g"], mass)})
+            out["vmax_by_mass"].append({"mass_g": mass, "vmax_mps": mf.solve_speed(model, out["a_limit_g"] - 1.0, mass / 1000.0)})
     return out
 
 
+def _points(groups: list[dict[str, Any]], bump_id: str) -> list[tuple[float, float, float]]:
+    return [(g["mean_speed_mps"], g["total_mass_g"] / 1000.0, g["mean_peak_delta_g"]) for g in groups
+            if g["bump_id"] == bump_id and g.get("mean_speed_mps") and g.get("mean_peak_delta_g") and g["mean_peak_delta_g"] > 0]
+
+
+def purpose_of(run: dict[str, Any]) -> str:
+    return (run.get("condition") or {}).get("purpose") or "main"
+
+
+def validation_rows(runs: list[dict[str, Any]], models: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """검증용 시행: 회귀에 쓰지 않은 데이터로 식의 예측과 실측을 비교합니다."""
+    rows = []
+    for r in runs:
+        if purpose_of(r) != "validation" or r.get("excluded"):
+            continue
+        a, c = r.get("analysis") or {}, r["condition"]
+        model = models.get(c.get("bump_id"))
+        v, d = a.get("speed_mps"), a.get("peak_delta_g")
+        pred = mf.predict(model, v, c["total_mass_g"] / 1000.0) if model and v and d is not None else None
+        err = (d - pred) / pred * 100 if pred and d is not None else None
+        rows.append({"run_id": r["id"], "created_at": r["created_at"], "bump_id": c.get("bump_id"), "total_mass_g": c["total_mass_g"],
+                     "output_mode": c.get("output_mode"), "output_value": c.get("output_value"), "trial": c.get("trial"),
+                     "speed_mps": v, "measured_delta_g": d, "predicted_delta_g": pred, "error_pct": err,
+                     "abs_error_g": None if pred is None or d is None else d - pred, "model_id": model["id"] if model else None})
+    errs = [abs(x["error_pct"]) for x in rows if x["error_pct"] is not None]
+    signed = [x["error_pct"] for x in rows if x["error_pct"] is not None]
+    summary = {"count": len(rows), "evaluated": len(errs),
+               "mape": sum(errs) / len(errs) if errs else None,
+               "bias_pct": sum(signed) / len(signed) if signed else None,
+               "within_10pct": sum(1 for e in errs if e <= 10), "within_20pct": sum(1 for e in errs if e <= 20)}
+    return {"rows": sorted(rows, key=lambda x: x["created_at"], reverse=True), "summary": summary}
+
+
+def plan_progress(runs: list[dict[str, Any]], settings: ExperimentSettings) -> dict[str, Any]:
+    """실험 계획(방지턱 × 추가 질량 × 출력) 대비 완료 횟수."""
+    done: dict[tuple, int] = {}
+    for r in runs:
+        if r.get("excluded") or purpose_of(r) != "main":
+            continue
+        c = r["condition"]
+        key = (c.get("bump_id"), round(float(c.get("added_mass_g") or 0)), c.get("output_mode"), round(float(c.get("output_value") or 0)))
+        done[key] = done.get(key, 0) + 1
+    cells = []
+    for b in settings.bumps:
+        for mass in settings.plan_added_masses:
+            for out in settings.plan_outputs:
+                n = sum(v for (bid, m, _mode, o), v in done.items() if bid == b.id and m == round(mass) and o == round(out))
+                cells.append({"bump_id": b.id, "added_mass_g": mass, "output_value": out, "done": n, "need": settings.plan_repeats})
+    total_need = len(cells) * settings.plan_repeats
+    total_done = sum(min(c["done"], c["need"]) for c in cells)
+    nxt = next((c for c in cells if c["done"] < c["need"]), None)
+    return {"cells": cells, "done": total_done, "need": total_need, "next": nxt}
+
+
 def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) -> dict[str, Any]:
-    groups = ia.aggregate(runs)
+    main_runs = [r for r in runs if purpose_of(r) == "main"]
+    groups = ia.aggregate(main_runs)
     bump_ids = sorted({g["bump_id"] for g in groups})
     fits = {bump_id: ia.fit_power_law(groups, bump_id) for bump_id in bump_ids}
-    criteria = {bump_id: criterion_for(bump_id, groups, fits[bump_id], settings) for bump_id in bump_ids}
-    return {"groups": groups, "fits": fits, "criteria": criteria}
+    comparisons = {bump_id: mf.compare_models(_points(groups, bump_id)) for bump_id in bump_ids}
+    chosen = {bump_id: mf.choose(comparisons[bump_id], settings.model_id) for bump_id in bump_ids}
+    criteria = {bump_id: criterion_for(bump_id, groups, chosen[bump_id], settings) for bump_id in bump_ids}
+    interpretation = {bump_id: mf.interpret(bump_id, groups, comparisons[bump_id], chosen[bump_id], criteria[bump_id]) for bump_id in bump_ids}
+    return {"groups": groups, "fits": fits, "models": comparisons,
+            "chosen_models": {k: (v["id"] if v else None) for k, v in chosen.items()},
+            "criteria": criteria, "interpretation": interpretation,
+            "speed_maps": mf.speed_maps(groups), "validation": validation_rows(runs, chosen),
+            "progress": plan_progress(runs, settings)}
 
 
 # --------------------------------------------------------------------------- 자동 측정 주행
@@ -359,13 +509,20 @@ async def _wait(ctl, seconds: float, generation: int) -> None:
 
 
 async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: str, generation: int,
-                     heading_hold: bool, gain: float, track: bool | None = None) -> dict[str, Any]:
-    """정해진 시간 동안 직진/후진. 자이로 방향 오차로 조향을 보정해 반듯하게 갑니다."""
+                     heading_hold: bool, gain: float, track: bool | None = None,
+                     line: LineTracker | None = None, kick_ms: int = 0) -> dict[str, Any]:
+    """정해진 시간 동안 직진/후진.
+
+    조향: 라인 추종(테이프) > 자이로 방향 유지 > 조향 없음 순서로 사용합니다.
+    ``kick_ms`` 동안은 최대 출력으로 밀어 정지마찰을 넘긴 뒤 설정 출력으로 바꿉니다.
+    """
     loop = asyncio.get_running_loop()
-    end = loop.time() + seconds
+    start = loop.time()
+    end = start + seconds
     sign = 1.0 if direction == "forward" else -1.0
     worst = 0.0
     last = None
+    line_lost = False
     while loop.time() < end:
         if ctl.stop_generation != generation:
             raise Aborted()
@@ -374,14 +531,22 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
         if heading is not None:
             last = heading
             worst = max(worst, abs(heading))
-            if heading_hold:
+            if heading_hold and line is None:
                 # 왼쪽으로 돈 상태(+)에서 전진이면 오른쪽(+) 조향, 후진이면 왼쪽(−) 조향
                 steer = max(-MAX_HEADING_CORRECTION_DEG, min(MAX_HEADING_CORRECTION_DEG, gain * heading * sign))
-        if not await ctl.experiment_drive(mode, value, generation, direction, steer):
+        if line is not None:
+            raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+            steer, ok = line.update(raw, direction)
+            if not ok:
+                line_lost = True
+                break
+        out = 100.0 if kick_ms and (loop.time() - start) * 1000 < kick_ms else value
+        if not await ctl.experiment_drive(mode, out, generation, direction, steer):
             raise Aborted()
         await asyncio.sleep(0.05)
     return {"heading_max_deg": round(worst, 2) if last is not None else None,
-            "heading_end_deg": round(last, 2) if last is not None else None}
+            "heading_end_deg": round(last, 2) if last is not None else None,
+            "line_lost": line_lost if line is not None else None}
 
 
 async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSettings, opts: dict[str, Any],
@@ -389,6 +554,9 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     """한 번의 측정: 정지 기록 → 직진(기록) → 정지 후 기록 → 분석·저장."""
     run = new_run(cond, settings, simulated=simulated, source="auto", pre_roll_s=opts["pre_roll"], run_seconds=opts["run_seconds"])
     auto_runner.run_id = run["id"]
+    run["battery_v"] = await asyncio.to_thread(ctl.adapter.read_battery) if ctl.adapter.connected else None
+    run["steering_source"] = opts["steering_source"]
+    run["kick_ms"] = opts["kick_ms"]
     if not simulated:
         status = await asyncio.to_thread(mpu6050_service.start_recording)
         if status.get("error") or not status.get("recording"):
@@ -401,11 +569,15 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         await _wait(ctl, opts["pre_roll"], gen)
         # 방향은 항상 측정해 직진도를 기록하고, 보정은 설정이 켜져 있을 때만 적용합니다.
         track = not simulated and mpu6050_service.heading_reset()
-        hold = bool(opts["heading_hold"] and track)
+        hold = bool(opts["steering_source"] == "gyro" and track)
+        line = LineTracker(settings.line) if opts["steering_source"] == "line" and settings.line.floor and settings.line.line else None
+        if opts["steering_source"] == "line" and line is None:
+            raise RuntimeError("라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 하세요.")
         run["heading_hold"] = hold
         auto_runner._phase("driving", opts["run_seconds"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · 직진 측정 중 · {cond.output_mode.upper()} {cond.output_value:g}{' · 직진 보정' if hold else ''}")
         try:
-            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], "forward", gen, hold, settings.heading_gain, track)
+            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], "forward", gen, hold,
+                                          settings.heading_gain, track, line, opts["kick_ms"])
         finally:
             await ctl.stop(reason="experiment_auto_run_end")
         gen = ctl.stop_generation
@@ -430,7 +602,11 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         if not columns["t_s"]:
             raise RuntimeError("센서 표본이 없어 저장하지 않았습니다.")
     run.update(drive_info)
+    run["data_source"] = "synthetic" if simulated else "mpu6050"
     run = await asyncio.to_thread(finalize_run, run, columns, meta, settings)
+    if drive_info.get("line_lost"):
+        run["analysis"].setdefault("flags", []).append("측정 중 테이프를 놓쳐 일찍 멈췄습니다.")
+        store.put(run)
     summary = run_summary(run)
     auto_runner.last_result = summary
     auto_runner.completed.append(run["id"])
@@ -454,7 +630,11 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
         "return_scale": pick(request.return_scale, settings.return_scale),
         "rest": pick(request.rest_s, settings.rest_s),
         "heading_hold": pick(request.heading_hold, settings.heading_hold),
+        "kick_ms": pick(request.kick_ms, settings.kick_ms),
     }
+    source = request.steering_source or (settings.steering_source if request.heading_hold is None else ("gyro" if request.heading_hold else "none"))
+    opts["steering_source"] = source
+    opts["heading_hold"] = source == "gyro"
     auto_runner.cycles = opts["repeats"]
     auto_runner.completed = []
     try:
@@ -469,7 +649,8 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                                    f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선으로 후진 복귀 중")
                 await _wait(ctl, 0.3, gen)
                 try:
-                    hold = bool(opts["heading_hold"] and not simulated and mpu6050_service.heading_deg() is not None)
+                    # 복귀(후진)는 테이프 센서가 앞쪽에 있어 라인 대신 자이로로 방향을 유지합니다.
+                    hold = bool(opts["steering_source"] in ("gyro", "line") and not simulated and mpu6050_service.heading_deg() is not None)
                     await _drive_for(ctl, cond.output_mode, opts["return_output"], opts["run_seconds"] * opts["return_scale"],
                                      "backward", gen, hold, settings.heading_gain)
                 finally:
@@ -560,6 +741,14 @@ async def update_run(run_id: str, update: RunUpdate):
         run["excluded"] = update.excluded
     if update.note is not None:
         run["condition"]["note"] = update.note
+    if update.purpose is not None:
+        run["condition"]["purpose"] = update.purpose
+    if update.peak_override is not None or update.clear_peak_override:
+        if update.peak_override is not None and update.peak_override.rear_t_s <= update.peak_override.front_t_s:
+            raise HTTPException(422, "뒷바퀴 피크는 앞바퀴 피크보다 늦어야 합니다.")
+        run["peak_override"] = update.peak_override.model_dump() if update.peak_override else None
+        cols = await asyncio.to_thread(store.read_columns, run_id)
+        run["analysis"] = run_analysis(run, cols, store.load_settings())
     store.put(run)
     return run_summary(run)
 
@@ -569,6 +758,106 @@ async def delete_run(run_id: str):
     store.get(run_id)
     store.delete(run_id)
     return {"deleted": run_id}
+
+
+@router.post("/runs/delete")
+async def delete_runs(body: BulkDelete):
+    if auto_runner.busy:
+        raise HTTPException(409, "측정 중에는 삭제할 수 없습니다.")
+    deleted = []
+    for run_id in body.ids:
+        try:
+            store.get(run_id)
+        except HTTPException:
+            continue
+        store.delete(run_id)
+        deleted.append(run_id)
+    return {"deleted": deleted}
+
+
+@router.post("/reset")
+async def reset(body: ResetRequest):
+    """실험 기록 초기화. 지우지 않고 휴지통으로 옮기므로 되돌릴 수 있습니다."""
+    if body.confirm.strip() != "초기화":
+        raise HTTPException(422, "확인 문구 '초기화'를 입력하세요.")
+    if auto_runner.busy:
+        raise HTTPException(409, "측정 중에는 초기화할 수 없습니다.")
+    ctl = control()
+    runs = store.list_runs() if body.scope == "all" else runs_for_mode(ctl.adapter.mode != "hardware")
+    batch = store.move_to_trash([r["id"] for r in runs], "all" if body.scope == "all" else ("sim" if ctl.adapter.mode != "hardware" else "real"))
+    record_event("experiment", "Runs reset to trash", details={"batch": batch, "count": len(runs)})
+    return {"moved": len(runs), "batch": batch}
+
+
+@router.get("/trash")
+async def trash():
+    return {"batches": store.trash_batches()}
+
+
+@router.post("/trash/{batch}/restore")
+async def trash_restore(batch: str):
+    return {"restored": store.restore_batch(batch)}
+
+
+@router.delete("/trash/{batch}")
+async def trash_purge(batch: str):
+    store.purge_batch(batch)
+    return {"purged": batch}
+
+
+@router.get("/backup.zip")
+async def backup_zip():
+    """실험 기록 전체(원자료·설정 포함) 백업."""
+    def build() -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            if store.settings_path.exists():
+                z.write(store.settings_path, "experiment_settings.json")
+            if store.runs_dir.is_dir():
+                for path in sorted(store.runs_dir.iterdir()):
+                    if path.suffix in (".json", ".csv"):
+                        z.write(path, f"experiments/{path.name}")
+        return buf.getvalue()
+    data = await asyncio.to_thread(build)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="picarx_experiment_backup_{stamp}.zip"'})
+
+
+@router.get("/data-check")
+async def data_check():
+    """실제 측정 데이터가 제대로 들어오는지 점검합니다."""
+    ctl = control()
+    all_runs = store.list_runs()
+    real = [r for r in all_runs if not r.get("simulated")]
+    sim = [r for r in all_runs if r.get("simulated")]
+    last = real[0] if real else None
+    rates = [r.get("analysis", {}).get("sample_rate_hz") for r in real if r.get("analysis", {}).get("sample_rate_hz")]
+    sensor = await asyncio.to_thread(mpu6050_service.status) if ctl.adapter.mode == "hardware" else None
+    checks = []
+    if ctl.adapter.mode != "hardware":
+        checks.append({"ok": False, "text": "서버가 모의 모드입니다. 지금 저장되는 기록은 합성 데이터이며 실제 측정 목록에 섞이지 않습니다."})
+    else:
+        checks.append({"ok": bool(ctl.adapter.connected), "text": "PiCar-X 하드웨어 연결" + ("됨" if ctl.adapter.connected else " 안 됨")})
+        checks.append({"ok": bool(sensor and sensor.get("available")), "text": "MPU-6050 응답" + (" 있음" if sensor and sensor.get("available") else " 없음")})
+        checks.append({"ok": bool(sensor and sensor.get("calibrated")), "text": "정지 상태 보정" + (" 완료" if sensor and sensor.get("calibrated") else " 필요")})
+        rate = sensor.get("actual_sample_rate_hz") if sensor else None
+        checks.append({"ok": bool(rate and rate >= 500), "text": f"실시간 표본 속도 {rate or '—'} Hz (500 Hz 이상 권장)"})
+    if last:
+        rec = last.get("recording") or {}
+        checks.append({"ok": (rec.get("count") or 0) > 100, "text": f"마지막 실제 시행 표본 {rec.get('count') or 0}개, {rec.get('sample_rate_hz') or '—'} Hz, 수직축 {rec.get('vertical_axis') or '—'}"})
+        span = None
+        try:
+            cols = await asyncio.to_thread(store.read_columns, last["id"])
+            vg = cols["vertical_g"]
+            span = (min(vg), max(vg)) if vg else None
+        except HTTPException:
+            pass
+        if span:
+            checks.append({"ok": span[1] - span[0] > 0.05, "text": f"마지막 실제 시행 수직 가속도 범위 {span[0]:.2f} ~ {span[1]:.2f} g (변화가 없으면 센서·배선 확인)"})
+    return {"mode": ctl.adapter.mode, "real_runs": len(real), "simulated_runs": len(sim),
+            "last_real_run": run_summary(last) if last else None,
+            "mean_sample_rate_hz": sum(rates) / len(rates) if rates else None, "checks": checks}
 
 
 @router.post("/reanalyze")
@@ -609,8 +898,9 @@ async def save_recording(request: SaveRecordingRequest):
 @router.post("/auto-run")
 async def start_auto_run(request: AutoRunRequest):
     ctl = control()
-    if auto_runner.busy:
-        raise HTTPException(409, "이미 자동 측정 주행이 진행 중입니다.")
+    from .line_follow import line_runner
+    if auto_runner.busy or line_runner.busy or symmetry_runner.busy:
+        raise HTTPException(409, "이미 자동 측정 주행(또는 라인 추종·점검)이 진행 중입니다.")
     if not ctl.adapter.connected:
         raise HTTPException(409, ctl.adapter.connection_error or "PiCar-X가 연결되어 있지 않습니다.")
     if request.condition.output_value > EXPERIMENT_MAX_OUTPUT:
@@ -647,7 +937,8 @@ async def export_runs():
     head = ["run_id", "created_at", "simulated", "source", "excluded", "aborted", "trial", "bump_id", "bump_h_mm", "bump_w_mm",
             "bump_R_mm", "base_mass_g", "added_mass_g", "total_mass_g", "output_mode", "output_value",
             "sample_rate_hz", "peak_g", "peak_delta_g", "front_t_s", "rear_t_s", "axle_dt_s", "speed_mps",
-            "video_speed_mps", "min_g", "jump", "peak_force_n", "dynamic_force_n", "pi", "critical_speed_mps", "flags", "note"]
+            "video_speed_mps", "min_g", "jump", "airborne_s", "landing_g", "peak_force_n", "dynamic_force_n", "pi", "critical_speed_mps",
+            "purpose", "pair_source", "battery_v", "steering_source", "heading_max_deg", "data_source", "flags", "note"]
     rows: list[list[Any]] = [head]
     for r in sorted(runs, key=lambda r: r.get("created_at", "")):
         c, a, b = r["condition"], r.get("analysis") or {}, r.get("bump") or {}
@@ -656,7 +947,9 @@ async def export_runs():
                      c.get("base_mass_g"), c.get("added_mass_g"), c.get("total_mass_g"), c.get("output_mode"), c.get("output_value"),
                      a.get("sample_rate_hz"), a.get("peak_g"), a.get("peak_delta_g"), a.get("front_t_s"), a.get("rear_t_s"),
                      a.get("axle_dt_s"), a.get("speed_mps"), c.get("video_speed_mps"), a.get("min_g"), a.get("jump"),
-                     a.get("peak_force_n"), a.get("dynamic_force_n"), a.get("pi"), a.get("critical_speed_mps"),
+                     a.get("airborne_s"), a.get("landing_g"), a.get("peak_force_n"), a.get("dynamic_force_n"), a.get("pi"),
+                     a.get("critical_speed_mps"), c.get("purpose") or "main", a.get("pair_source"), r.get("battery_v"),
+                     r.get("steering_source"), r.get("heading_max_deg"), r.get("data_source") or ("synthetic" if r.get("simulated") else "mpu6050"),
                      " / ".join(a.get("flags") or []), c.get("note")])
     return _csv_response(rows, "picarx_runs.csv")
 
@@ -673,10 +966,242 @@ async def export_conditions():
     for g in bundle["groups"]:
         rows.append([g.get(k) if k != "dropped_delta_g" else " / ".join(str(x) for x in g[k]) for k in head])
     rows.append([])
-    rows.append(["# 회귀식 (조건 평균, 로그 선형회귀)"])
-    for bump_id, fit in bundle["fits"].items():
-        rows.append([f"방지턱 {bump_id}", fit.get("formula") or fit.get("note") or ""])
-        if fit.get("overall"):
-            o = fit["overall"]
-            rows.append(["k0", o["k0"], "n", o["n"], "p", o["p"], "R2", o["r2"]])
+    rows.append(["# 관계식 후보 비교 (조건 평균 사용)"])
+    for bump_id, cmp in bundle["models"].items():
+        chosen = bundle["chosen_models"].get(bump_id)
+        rows.append([f"방지턱 {bump_id}", f"선택: {chosen}", f"순위 기준: {cmp.get('rank_by') or '-'}", cmp.get("note") or ""])
+        rows.append(["model_id", "name", "formula", "R2", "RMSE_g", "LOOCV_RMSE_g", "AIC", "parameters (value ± 95% CI)"])
+        for m in cmp.get("models", []):
+            params = "; ".join(f"{p['name']}={p['value']:.4g}" + (f" [{p['ci95'][0]:.4g}, {p['ci95'][1]:.4g}]" if p.get("ci95") else "") for p in m["params"])
+            rows.append([m["id"], m["name"], m["formula"], round(m["r2"], 4), round(m["rmse"], 4),
+                         None if m["loocv_rmse"] is None else round(m["loocv_rmse"], 4), None if m["aic"] is None else round(m["aic"], 3), params])
+        crit = bundle["criteria"].get(bump_id) or {}
+        if crit.get("a_limit_g"):
+            rows.append(["허용 기준 a_lim(g)", crit["a_limit_g"], crit.get("source")])
+            for v in crit.get("vmax_by_mass", []):
+                rows.append(["v_max", f"{v['mass_g']} g", v["vmax_mps"]])
+        rows.append(["# 자동 해석"])
+        for line in bundle["interpretation"].get(bump_id, []):
+            rows.append([line])
+        rows.append([])
     return _csv_response(rows, "picarx_conditions.csv")
+
+
+@router.get("/export/validation.csv")
+async def export_validation():
+    ctl = control()
+    bundle = analysis_bundle(runs_for_mode(ctl.adapter.mode != "hardware"), store.load_settings())
+    head = ["run_id", "created_at", "bump_id", "total_mass_g", "output_mode", "output_value", "trial", "speed_mps",
+            "measured_delta_g", "predicted_delta_g", "abs_error_g", "error_pct", "model_id"]
+    rows: list[list[Any]] = [head] + [[r.get(k) for k in head] for r in bundle["validation"]["rows"]]
+    sm = bundle["validation"]["summary"]
+    rows += [[], ["평가 수", sm["evaluated"], "평균 절대 오차율(%)", sm["mape"], "평균 오차(%)", sm["bias_pct"], "±10% 이내", sm["within_10pct"]]]
+    return _csv_response(rows, "picarx_validation.csv")
+
+
+# --------------------------------------------------------------------------- 라인 추종 (테이프)
+@router.get("/line/status")
+async def line_status():
+    from .line_follow import line_runner, position, weights
+    ctl = control()
+    settings = store.load_settings().line
+    raw = None
+    error = None
+    try:
+        raw = await asyncio.to_thread(ctl.adapter.read_grayscale) if ctl.adapter.connected else None
+    except Exception as exc:
+        error = str(exc)
+    w = weights(raw or [], settings)
+    return {"raw": raw, "weights": w, "position": position(w, settings), "settings": settings.model_dump(),
+            "calibrated": bool(settings.floor and settings.line), "error": error, "runner": line_runner.snapshot()}
+
+
+class LineCalibrate(BaseModel):
+    target: Literal["floor", "line"]
+
+
+@router.post("/line/calibrate")
+async def line_calibrate(body: LineCalibrate):
+    ctl = control()
+    samples = []
+    for _ in range(10):
+        raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+        if raw:
+            samples.append(raw)
+        await asyncio.sleep(0.02)
+    if not samples:
+        raise HTTPException(503, "그레이스케일 센서값을 읽지 못했습니다.")
+    mean = [round(sum(s[i] for s in samples) / len(samples), 1) for i in range(3)]
+    settings = store.load_settings()
+    setattr(settings.line, body.target, mean)
+    store.save_settings(settings)
+    return {"target": body.target, "values": mean, "settings": settings.line.model_dump()}
+
+
+@router.put("/line/settings")
+async def line_settings(body: LineSettings):
+    settings = store.load_settings()
+    settings.line = body
+    store.save_settings(settings)
+    return settings.line.model_dump()
+
+
+class LineRunRequest(BaseModel):
+    output_mode: Literal["pwm", "duty"] = "pwm"
+    output_value: float = Field(default=40, gt=0, le=100)
+    seconds: float = Field(default=5, ge=0.5, le=30)
+
+
+@router.post("/line/start")
+async def line_start(body: LineRunRequest):
+    from .line_follow import line_runner
+    ctl = control()
+    if auto_runner.busy or line_runner.busy:
+        raise HTTPException(409, "다른 주행이 진행 중입니다.")
+    settings = store.load_settings().line
+    if not (settings.floor and settings.line):
+        raise HTTPException(409, "바닥과 테이프 위에서 센서 보정을 먼저 하세요.")
+    line_runner.task = asyncio.create_task(line_runner.run(ctl, ctl.adapter.read_grayscale, settings, body.output_mode, body.output_value, body.seconds))
+    await asyncio.sleep(0)
+    return line_runner.snapshot()
+
+
+@router.post("/line/stop")
+async def line_stop():
+    await control().stop(reason="line_follow_stop")
+    return {"stopped": True}
+
+
+# --------------------------------------------------------------------------- 전·후진 대칭 점검
+class SymmetryRunner:
+    def __init__(self) -> None:
+        self.state = "idle"
+        self.message = ""
+        self.result: dict[str, Any] | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self.state == "running"
+
+
+symmetry_runner = SymmetryRunner()
+
+
+def _integrate_speed(t: list[float], a: list[float], t0: float, t1: float) -> tuple[float | None, list[tuple[float, float]]]:
+    """t0~t1 구간 가속도(m/s²)를 적분한 속도. 끝에서 정지(0)라고 보고 선형 드리프트를 뺍니다."""
+    idx = [i for i in range(len(t)) if t0 <= t[i] <= t1]
+    if len(idx) < 10:
+        return None, []
+    vel = [0.0]
+    for j in range(1, len(idx)):
+        i0, i1 = idx[j - 1], idx[j]
+        vel.append(vel[-1] + 0.5 * (a[i0] + a[i1]) * (t[i1] - t[i0]))
+    drift = vel[-1]
+    span = t[idx[-1]] - t[idx[0]] or 1.0
+    vel = [v - drift * (t[i] - t[idx[0]]) / span for v, i in zip(vel, idx)]
+    peak = max(vel, key=abs)
+    step = max(1, len(idx) // 150)
+    return abs(peak), [(round(t[i], 3), round(v, 4)) for v, i in list(zip(vel, idx))[::step]]
+
+
+def symmetry_analysis(cols: dict[str, list[float]], bias: list[float] | None, vertical_axis: str, phases: dict[str, tuple[float, float]]) -> dict[str, Any]:
+    vi = "xyz".index(vertical_axis or "z")
+    axes = [i for i in range(3) if i != vi]
+    keys = ["ax_g", "ay_g", "az_g"]
+    t = cols["t_s"]
+    b = bias or [0.0, 0.0, 0.0]
+    f0, f1 = phases["forward"]
+    best = None
+    for i in axes:
+        seg = [cols[keys[i]][k] - b[i] for k in range(len(t)) if f0 <= t[k] <= f1]
+        var = sum(x * x for x in seg) / len(seg) if seg else 0
+        if best is None or var > best[1]:
+            best = (i, var)
+    axis = best[0] if best else axes[0]
+    acc = [(cols[keys[axis]][k] - b[axis]) * 9.80665 for k in range(len(t))]
+    out: dict[str, Any] = {"axis": "xyz"[axis]}
+    for name, (p0, p1) in phases.items():
+        peak, series = _integrate_speed(t, acc, p0, p1 + 0.6)
+        out[name] = {"peak_speed_mps": None if peak is None else round(peak, 4), "series": series}
+    f, r = out["forward"]["peak_speed_mps"], out["backward"]["peak_speed_mps"]
+    out["ratio_backward_to_forward"] = round(r / f, 3) if f and r else None
+    return out
+
+
+async def _symmetry(body: SymmetryRequest) -> None:
+    ctl = control()
+    simulated = ctl.adapter.mode != "hardware"
+    gen = ctl.stop_generation
+    commands: dict[str, Any] = {}
+    try:
+        if not simulated:
+            st = await asyncio.to_thread(mpu6050_service.start_recording)
+            if st.get("error") or not st.get("recording"):
+                raise RuntimeError(st.get("error") or "MPU-6050 기록을 시작하지 못했습니다.")
+        symmetry_runner.message = "정지 기록"
+        await _wait(ctl, 0.6, gen)
+        t_start = time.monotonic()
+        phases: dict[str, tuple[float, float]] = {}
+        for direction in ("forward", "backward"):
+            symmetry_runner.message = "전진" if direction == "forward" else "후진"
+            p0 = time.monotonic() - t_start + 0.6
+            try:
+                await _drive_for(ctl, body.output_mode, body.output_value, body.seconds, direction, gen, False, 0.0)
+                commands[direction] = getattr(ctl.adapter, "last_command", None)
+            finally:
+                await ctl.stop(reason="symmetry_test")
+            gen = ctl.stop_generation
+            phases[direction] = (p0, time.monotonic() - t_start + 0.6)
+            symmetry_runner.message = "정지 대기"
+            await _wait(ctl, 1.0, gen)
+        if simulated:
+            result = {"axis": "x", "forward": {"peak_speed_mps": None, "series": []}, "backward": {"peak_speed_mps": None, "series": []},
+                      "ratio_backward_to_forward": None, "note": "모의 모드에서는 가속도 적분 결과가 없습니다. 실제 차량에서 실행하세요."}
+        else:
+            await asyncio.to_thread(mpu6050_service.stop_recording)
+            meta = await asyncio.to_thread(mpu6050_service.recording_columns)
+            result = symmetry_analysis(meta["columns"], meta.get("bias_g"), meta.get("vertical_axis") or "z", phases)
+        result["commands"] = commands
+        result["request"] = body.model_dump()
+        result["drive_settings"] = getattr(ctl, "drive_settings", None)
+        ratio = result.get("ratio_backward_to_forward")
+        if ratio:
+            trims = (ctl.drive_settings or {}) if hasattr(ctl, "drive_settings") else {}
+            if ratio > 1.05:
+                result["suggestion"] = {"trim_backward": round(max(0.5, trims.get("trim_backward", 1.0) / ratio), 3),
+                                        "text": f"후진이 전진보다 약 {ratio:.2f}배 빠릅니다. 후진 출력 배율을 낮추세요(적용 후 다시 점검해 0.95~1.05가 될 때까지 2~3번 반복)."}
+            elif ratio < 0.95:
+                result["suggestion"] = {"trim_forward": round(max(0.5, trims.get("trim_forward", 1.0) * ratio), 3),
+                                        "text": f"전진이 후진보다 약 {1 / ratio:.2f}배 빠릅니다. 전진 출력 배율을 낮추세요(적용 후 다시 점검해 0.95~1.05가 될 때까지 2~3번 반복)."}
+            else:
+                result["suggestion"] = {"text": "전진과 후진 속도 차이가 5% 이내입니다."}
+        symmetry_runner.result = result
+        symmetry_runner.state, symmetry_runner.message = "done", "점검 완료"
+    except Aborted:
+        symmetry_runner.state, symmetry_runner.message = "aborted", "정지 명령으로 중단했습니다."
+    except Exception as exc:
+        symmetry_runner.state, symmetry_runner.message = "error", f"점검 실패: {exc}"
+    finally:
+        if not simulated:
+            await asyncio.to_thread(mpu6050_service.stop_recording)
+
+
+@router.post("/tools/symmetry")
+async def symmetry_start(body: SymmetryRequest):
+    ctl = control()
+    if auto_runner.busy or symmetry_runner.busy:
+        raise HTTPException(409, "다른 주행이 진행 중입니다.")
+    if not ctl.adapter.connected:
+        raise HTTPException(409, ctl.adapter.connection_error or "PiCar-X가 연결되어 있지 않습니다.")
+    if ctl.adapter.mode == "hardware":
+        st = await asyncio.to_thread(mpu6050_service.status)
+        if not st.get("calibrated"):
+            raise HTTPException(409, "센서 화면에서 MPU-6050 정지 상태 보정을 먼저 하세요.")
+    symmetry_runner.state, symmetry_runner.message, symmetry_runner.result = "running", "시작", None
+    asyncio.create_task(_symmetry(body))
+    return {"state": symmetry_runner.state, "message": symmetry_runner.message}
+
+
+@router.get("/tools/symmetry")
+async def symmetry_status():
+    return {"state": symmetry_runner.state, "message": symmetry_runner.message, "result": symmetry_runner.result}

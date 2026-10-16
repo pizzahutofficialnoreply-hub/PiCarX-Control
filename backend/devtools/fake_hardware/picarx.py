@@ -5,21 +5,46 @@ __version__ = "fake-2.0"
 
 
 class _Pin:
-    def pulse_width_percent(self, value):
+    def __init__(self):
+        self._value = 0.0
+
+    def pulse_width_percent(self, value=None):
+        if value is None:
+            return self._value
+        self._value = float(value)
         fs.update()
         with fs.LOCK:
             fs.state["duty"] = float(value)
 
 
+class _DirPin:
+    def __init__(self):
+        self._v = 0
+
+    def value(self, v=None):
+        if v is None:
+            return self._v
+        self._v = int(v)
+
+
 class Picarx:
     def __init__(self):
         self.motor_speed_pins = [_Pin(), _Pin()]
+        self.motor_direction_pins = [_DirPin(), _DirPin()]
+        self.cali_speed_value = [0, 0]
+        self.cali_dir_value = [1, -1]
 
     def _drive(self, motion, speed):
         fs.update()
+        duty = (int(abs(speed) / 2) + 50) if speed else 0.0
+        for pin in self.motor_speed_pins:
+            pin._value = duty
+        sign = 1 if motion == "forward" else -1
+        for pin, cali in zip(self.motor_direction_pins, (1, -1)):
+            pin._v = 1 if sign * cali < 0 else 0
         with fs.LOCK:
             fs.state["motion"] = motion if speed else "stopped"
-            fs.state["duty"] = (int(abs(speed) / 2) + 50) if speed else 0.0
+            fs.state["duty"] = duty
 
     def forward(self, speed):
         self._drive("forward", speed)
@@ -48,7 +73,8 @@ class Picarx:
         return round(80 - fs.state["x"] * 100, 1)
 
     def get_grayscale_data(self):
-        return [320, 340, 315]
+        fs.update()
+        return [round(x) for x in fs.grayscale()]
 
     def get_cliff_status(self, grayscale):
         return False

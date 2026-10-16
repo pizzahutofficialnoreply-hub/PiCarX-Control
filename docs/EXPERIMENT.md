@@ -2,6 +2,36 @@
 
 창의력산출물 탐구 "질량과 속도에 따른 관성의 영향 분석 – 자동차가 방지턱 통과 시 충격을 최소화하는 속도"를 위한 기능입니다. 앱의 **실험 관리** 화면에서 조건 입력 → 자동 측정 주행 → 시행 그래프 확인 → 조건별 집계 → 관계식 도출까지 진행합니다.
 
+## 화면 구성
+
+**실험 관리** 화면은 하위 탭 다섯 개로 나뉩니다.
+
+| 탭 | 하는 일 |
+|---|---|
+| 측정·분석 | 조건 입력, 자동·반복 측정, 실험 진행표, 시행 그래프와 앞·뒤 바퀴 피크 확인·직접 지정, 선택 삭제, 조건별 평균, 관계식 후보 비교, 자동 해석 문장 |
+| 식 검증 | 본 실험으로 만든 관계식으로 새 조건(실험하지 않은 질량 등)의 충격을 예측하고, 그 조건에서 측정해 오차율 확인 |
+| 라인 추종 | 바닥 테이프를 그레이스케일 센서로 따라가기(보정, 시험 주행, 측정 직진에 사용) |
+| 점검·데이터 | 실제 데이터 입력 확인, 배터리, 전진·후진 출력 대칭 점검과 방향별 출력 배율, 백업 ZIP, 초기화·휴지통, 측정 전 점검표 |
+| 해석 가이드 | 그래프·CSV 읽는 법, 앞·뒤 바퀴 구분 규칙, 관계식 다루는 법, 선행 연구(사람 허용 가속도), 실제 도로 환산 |
+
+## 주행 조작 (PC 키보드)
+
+주행 화면에서 마우스·키보드가 있는 PC일 때만 켜집니다(휴대폰·태블릿은 기존 버튼·조이스틱). 한글 입력 상태에서도 동작합니다.
+
+| 키 | 동작 |
+|---|---|
+| W / S | 누르는 동안 전진 / 후진 (떼면 정지) |
+| A / D | 누르는 동안 왼쪽 / 오른쪽 조향 |
+| Space | 즉시 정지 |
+| Q / E | 출력 −5 / +5 |
+| ← → ↑ ↓ | 카메라를 3°씩 좌우·상하로 (Shift를 누르면 6°). 주행을 멈추지 않으며 보정값은 바뀌지 않음 |
+| C | 카메라 가운데로 |
+
+- 출력 상한은 **100**입니다(이전 60).
+- 출발할 때 0부터 0.1초마다 1씩 올리던 방식을 없애고 **설정 출력으로 바로** 보냅니다.
+- 주행 화면 왼쪽 아래에 마지막 모터 명령(방향, 핀 듀티)이 보입니다.
+- 전진과 후진은 이제 **같은 코드 경로**로 출력을 적용합니다. 그래도 속도가 다르면 *점검·데이터 → 전진·후진 출력 대칭 점검*에서 원인(앱이 보낸 듀티가 같은지, 기계 차이인지)을 확인하고 방향별 배율로 맞춥니다.
+
 ## 측정 원리
 
 | 항목 | 방법 |
@@ -52,6 +82,47 @@ MPU-6050의 수직축 자이로를 적분해 차의 방향(yaw)을 추적하고,
 
 기준이 정해지면 측정한 질량마다 v_max를 표로 보여 주고, 다른 질량의 예측값도 계산합니다. 원운동 모델의 이론 점프 속도 v_c = √(g·R_eff)도 함께 표시합니다.
 
+## 앞바퀴·뒷바퀴 구분
+
+차는 앞으로 가므로 **먼저 나온 피크가 앞바퀴, 나중 피크가 뒷바퀴**입니다. 피크가 3개 이상이면 ① 공중 구간 직후 30 ms 안의 착지 피크를 빼고 ② 두 피크 간격으로 계산한 속도가 0.03~4 m/s인 쌍 중 ③ 높이 합이 가장 큰 쌍을 고릅니다. 같은 조건 평균보다 속도가 20% 넘게 다르면 경고가 뜨고, *앞·뒤 바퀴 피크 확인·직접 지정*에서 후보를 골라 그 시행만 다시 계산할 수 있습니다(`pair_source = manual`로 기록).
+
+## 관계식 후보 비교
+
+조건 평균(본 실험만)에 다음 식을 모두 맞춥니다: 거듭제곱(속도·질량), 거듭제곱(속도만), n = 1 고정(충돌 모델), n = 2 고정(원운동 모델), 일차식, 이차식. 각 식의 R², RMSE, **교차검증 RMSE**(한 조건씩 빼고 맞춘 식이 그 조건을 예측한 오차), AIC, 매개변수의 **95% 신뢰구간**을 보여 주고, 기본으로 교차검증 오차가 가장 작은 식을 씁니다(직접 고를 수도 있음). v_max, 그래프 1의 곡선, 식 검증, 자동 해석은 모두 선택한 식으로 계산합니다.
+
+## 식 검증
+
+측정 목적을 *식 검증*으로 저장한 시행은 관계식 계산에서 빠지고, 그 시행의 실측 속도를 식에 넣은 예측 Δa와 실측 Δa를 비교합니다. 식 검증 탭에서 질량과 목표 속도(v_max 또는 직접 입력)를 고르면 '출력 → 속도' 자료로 필요한 출력을 추천하고, 그 조건으로 자동 측정합니다. 평균 절대 오차율 10% 이내면 식이 새 조건을 잘 예측한 것입니다. *예비* 시행은 어디에도 쓰지 않습니다.
+
+## 라인 추종 (바닥 테이프)
+
+밝은 바닥에 검은 테이프(폭 15~20 mm)를 붙이고, 바닥 위·테이프 위에서 한 번씩 보정합니다. 센서 3개의 '테이프에 가까운 정도'로 위치(−1 왼쪽 ~ +1 오른쪽)를 구하고, 조향 = (배율 × 위치 + 감쇠 × 위치 변화율) × 최대 조향각으로 따라갑니다. 감쇠가 없으면 좌우로 점점 크게 흔들려 테이프를 놓칠 수 있습니다(가짜 차 모의에서 감쇠 0.15 s로 2 mm 이내 유지). 테이프를 놓치면 0.6초 뒤 멈춥니다. 측정·분석 탭의 *측정 중 조향*을 '바닥 테이프 따라가기'로 바꾸면 측정 직진에도 쓰고, 후진 복귀는 자이로로 방향을 유지합니다.
+
+## 점검·데이터
+
+- **실제 데이터 입력 확인**: 서버 모드, 센서 응답, 보정, 실시간 표본 속도, 마지막 실제 시행의 표본 수와 가속도 범위를 점검합니다. 시행 결과에는 *실제 측정(MPU-6050)* 또는 *합성 데이터* 배지가 붙고, 시행 CSV에 `data_source`로 남습니다.
+- **배터리**: robot_hat이 있으면 전압을 보여 주고 각 시행 시작 전압(`battery_v`)을 저장합니다.
+- **전진·후진 대칭 점검**: 전진 → 정지 → 후진을 같은 출력으로 하며 앱이 보낸 듀티·핀 값과, 가속도 적분 속도를 비교합니다. 줄자로 잰 거리로도 비율을 구할 수 있고, 제안 배율을 적용합니다. 라이브러리 PWM은 출력과 속도가 비례하지 않으므로 0.95~1.05가 될 때까지 2~3번 반복하세요.
+- **삭제·초기화**: 시행 목록에서 체크해 여러 개를 지울 수 있습니다(되돌릴 수 없음). *초기화*는 확인 문구 '초기화'를 입력해야 하며, 기록을 휴지통 폴더(`experiments_trash/`)로 옮기므로 *되돌리기*로 복구할 수 있습니다. *백업 ZIP*은 원자료와 설정을 모두 담습니다.
+- **실험 진행표**: 방지턱 × 추가 질량 × 출력 계획 대비 완료 횟수를 보여 주고, 칸을 누르면 그 조건이 입력됩니다.
+
+## 선행 연구 (사람이 받아들이는 수직 가속도)
+
+해석 가이드 탭에 요약과 링크가 있습니다. 측정 방식(최대값/RMS, 위치)이 달라 숫자를 섞지 마세요.
+
+| 연구 | 핵심 |
+|---|---|
+| [Watts (1973), TRRL LR597](https://www.trl.co.uk/uploads/trl/documents/LR597.pdf) | 원호형 혹 15종, 6명 주관 평가. 불편 점수 ∝ 최대 가속도(r ≈ 0.83), 약 0.9 g 초과 시 '불편' |
+| [Kennedy 외 (2004), TRL 614](https://trl.co.uk/uploads/trl/documents/TRL614(1).pdf) | 차량 5종·더미 측정. 불편 점수와 최대 가속도 R² = 0.82, 약 0.7 g 이상은 받아들이지 않음 |
+| [Kyrollos 외 (2020), CDSR](https://avestia.com/CDSR2020_Proceedings/files/paper/CDSR_156.pdf) | 구급차. Kjemtrup 기준 0.2 g 약간 불편, 0.4 g 상당히 불편 |
+| [ISO 2631-1 (Asua 외 2022 인용)](https://arxiv.org/pdf/2501.17664) | RMS 진동 승차감 표(0.315 m/s² 미만 ~ 2 m/s² 초과) – 충격 최대값과 직접 비교 불가 |
+| [Aslan 외 (2005), Am J Emerg Med](https://ajemjournal.com/article/S0735-6757(05)00119-1/pdf) | 버스 승객 5명 척추 골절 |
+| [Speed hump spine fractures (2011), J Spinal Disord Tech](https://read.qxmd.com/read/21150664/speed-hump-spine-fractures-injury-mechanism-and-case-series) | 46명, 버스 맨 뒷줄 42명 |
+| [심재수 외 (2011), 한국도로학회논문집](https://db.koreascholar.com/Article/Detail/249899) | 수직 가속도는 방지턱 폭·높이 비에 좌우 |
+| [임창식·최양원 (2016), 대한토목학회논문집](https://www.koreascience.or.kr/article/JAKO201608259723580.pdf) | 국내 회전교차로 고원식 횡단보도 높이 제안, Watts 인용 |
+
+Π = v²/(g·R)가 같으면 크기가 달라도 원운동 가속도(g 단위)가 같으므로, 해석 가이드의 *실제 도로로 옮겨 보기*에서 사람 기준에 닿는 Π를 실제 방지턱 반경으로 환산합니다(서스펜션이 없는 모형이라 보수적인 추정).
+
 ## 출력 방식
 
 - **라이브러리 PWM**: `picarx.forward(speed)`에 0~100을 그대로 전달합니다. 라이브러리가 내부에서 `speed/2 + 50`으로 바꾸므로 실제 듀티비는 약 50~100%이고, 출력 차이에 비해 속도 차이가 작습니다.
@@ -82,15 +153,27 @@ MPU-6050의 수직축 자이로를 적분해 차의 방향(yaw)을 추적하고,
 
 | Method | Path | 설명 |
 |---|---|---|
-| GET/PUT | `/api/experiment/settings` | 축간거리, 바퀴 반지름, 검출 기준, 허용 가속도, 방지턱 형상 등 |
-| POST | `/api/experiment/auto-run` | `{condition, run_seconds?, pre_roll_s?, tail_s?, repeats?, return_enabled?, return_output?, return_scale?, rest_s?, heading_hold?}` 자동·반복 측정 시작 |
+| GET/PUT | `/api/experiment/settings` | 축간거리, 바퀴 반지름, 검출 기준, 허용 가속도, 방지턱 형상, 조향 방식, 모델 선택, 실험 계획, 라인 설정 등 |
+| POST | `/api/experiment/auto-run` | `{condition, run_seconds?, pre_roll_s?, tail_s?, repeats?, return_enabled?, return_output?, return_scale?, rest_s?, steering_source?, kick_ms?}` 자동·반복 측정 시작 (`condition.purpose`: main/validation/pilot) |
 | GET | `/api/experiment/auto-run` | 진행 상태(`pre_roll`, `driving`, `tail`, `analyzing`, `returning`, `rest`, `done`, `aborted`, `error`), 회차, 완료된 시행 ID, 현재 방향(°) |
 | GET | `/api/impact/recording.csv` | 센서 화면에서 기록한 원자료 전체(축소 없음) |
 | POST | `/api/experiment/save-recording` | 센서 화면에서 수동으로 기록한 데이터를 조건과 함께 저장 |
-| GET | `/api/experiment/runs` | 시행 목록, 조건별 집계, 방지턱별 회귀식, 허용 기준과 질량별 v_max |
+| GET | `/api/experiment/runs` | 시행 목록, 조건별 집계, 관계식 후보 비교(`models`, `chosen_models`), 허용 기준·v_max, 자동 해석, 출력→속도 지도, 식 검증, 진행표 |
 | GET | `/api/experiment/runs/{id}` | 시행 상세 + 그래프용 시계열(피크 보존 다운샘플) |
 | GET | `/api/experiment/runs/{id}/raw.csv` | 원자료 CSV |
-| PATCH/DELETE | `/api/experiment/runs/{id}` | 제외 표시·메모 수정 / 삭제 |
+| PATCH/DELETE | `/api/experiment/runs/{id}` | 제외·메모·목적 수정, `peak_override {front_t_s, rear_t_s}` / `clear_peak_override` / 삭제 |
+| POST | `/api/experiment/runs/delete` | `{ids: [...]}` 여러 시행 삭제 |
+| POST | `/api/experiment/reset` | `{scope: current/all, confirm: "초기화"}` 휴지통으로 이동 |
+| GET / POST / DELETE | `/api/experiment/trash`, `/trash/{batch}/restore`, `/trash/{batch}` | 휴지통 목록 / 되돌리기 / 완전 삭제 |
+| GET | `/api/experiment/backup.zip` | 원자료·설정 전체 백업 |
+| GET | `/api/experiment/data-check` | 실제 데이터 입력 점검 |
+| GET | `/api/experiment/export/validation.csv` | 식 검증 표 |
+| GET / POST | `/api/experiment/tools/symmetry` | 전진·후진 대칭 점검 상태 / 시작 `{output_mode, output_value, seconds}` |
+| GET / POST / PUT | `/api/experiment/line/status`, `/line/calibrate {target}`, `/line/settings` | 라인 센서 상태 / 바닥·테이프 보정 / 설정 |
+| POST | `/api/experiment/line/start`, `/line/stop` | 테이프 따라 주행 시작 `{output_mode, output_value, seconds}` / 정지 |
+| GET / PUT | `/api/settings/drive` | 출력 방식(library/duty), 방향별 배율 `trim_forward`, `trim_backward` |
+| POST | `/api/camera/view` | `{pan, tilt}` 또는 `{pan_delta, tilt_delta}` 주행 중 카메라 시야(저장 안 함) |
+| GET | `/api/battery` | 배터리 전압 |
 | POST | `/api/experiment/reanalyze` | 현재 설정으로 전체 재분석 |
 | GET | `/api/experiment/export/runs.csv` | 시행별 표 |
 | GET | `/api/experiment/export/conditions.csv` | 조건별 절사평균 표 + 회귀식 |

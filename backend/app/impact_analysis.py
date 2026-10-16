@@ -107,6 +107,20 @@ def airborne_segments(t: Sequence[float], v: Sequence[float], jump_g: float, min
     return segments
 
 
+def _manual_pair(t: Sequence[float], v: Sequence[float], front: float, rear: float, window_s: float = 0.015) -> tuple[Peak, Peak] | None:
+    """지정한 시각 ±15 ms 안의 최댓값을 피크로 씁니다."""
+    def near(target: float) -> Peak | None:
+        idx = [i for i in range(len(t)) if abs(t[i] - target) <= window_s]
+        if not idx:
+            return None
+        i = max(idx, key=lambda j: v[j])
+        return Peak(i, t[i], v[i])
+    a, b = near(front), near(rear)
+    if a is None or b is None or b.t_s <= a.t_s:
+        return None
+    return a, b
+
+
 # --------------------------------------------------------------------------- 시행 분석
 def analyze_run(
     columns: dict[str, Sequence[float]],
@@ -119,7 +133,15 @@ def analyze_run(
     min_gap_s: float = 0.03,
     jump_g: float = 0.2,
     window: tuple[float | None, float | None] = (None, None),
+    override: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    """한 시행 분석.
+
+    앞·뒤 바퀴 구분 규칙: 차는 앞으로 가므로 **앞바퀴가 먼저** 방지턱에 닿습니다.
+    그래서 짝으로 고른 두 피크 중 시간이 이른 쪽이 앞바퀴, 늦은 쪽이 뒷바퀴입니다.
+    짝은 (1) 착지 피크를 빼고 (2) 축간거리로 계산한 속도가 0.03~4 m/s인 쌍 중
+    (3) 두 피크 높이의 합이 가장 큰 쌍으로 고릅니다. ``override``로 사람이 직접 지정할 수 있습니다.
+    """
     t_all = list(columns.get("t_s") or [])
     v_all = list(columns.get("vertical_g") or [])
     dyn_all = list(columns.get("dynamic_g") or [])
@@ -140,7 +162,7 @@ def analyze_run(
         "min_g": None, "jump": None, "airborne_s": None, "landing_t_s": None, "landing_g": None,
         "peak_force_n": None, "dynamic_force_n": None,
         "pi": None, "r_eff_m": None, "critical_speed_mps": None,
-        "peak_count": 0, "flags": flags,
+        "peak_count": 0, "flags": flags, "candidates": [], "pair_source": None,
         "params": {"threshold_delta_g": threshold_delta_g, "min_gap_s": min_gap_s, "jump_g": jump_g,
                    "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius},
     }
@@ -166,7 +188,18 @@ def analyze_run(
         result.update(landing_t_s=round(hardest.t_s, 4), landing_g=round(hardest.value_g, 4))
     if segments:
         result["airborne_s"] = round(sum(end - start for start, end, _ in segments), 4)
+    result["candidates"] = [
+        {"t_s": round(p.t_s, 4), "g": round(p.value_g, 4), "landing": p in landing}
+        for p in sorted(sorted(peaks, key=lambda p: p.value_g, reverse=True)[:12], key=lambda p: p.t_s)
+    ]
     pair = pick_axle_pair([p for p in peaks if p not in landing], wheelbase_mm)
+    result["pair_source"] = "auto" if pair else None
+    if override and override.get("front_t_s") is not None and override.get("rear_t_s") is not None:
+        manual = _manual_pair(t, v, float(override["front_t_s"]), float(override["rear_t_s"]))
+        if manual:
+            pair = manual
+            result["pair_source"] = "manual"
+            flags.append("앞·뒤 바퀴 피크를 사람이 직접 지정했습니다.")
     if pair is None and landing:
         # 착지와 뒷바퀴 접지가 겹친 경우: 착지 피크를 포함해 다시 짝을 찾되 표시해 둡니다.
         pair = pick_axle_pair(peaks, wheelbase_mm)

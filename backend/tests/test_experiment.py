@@ -97,7 +97,7 @@ class DutyModeTests(unittest.TestCase):
         adapter.drive_experiment("duty", 35)
         car.forward.assert_called_once_with(1)
         for pin in pins:
-            pin.pulse_width_percent.assert_called_once_with(35)
+            pin.pulse_width_percent.assert_any_call(35)
         car.reset_mock()
         adapter.drive_experiment("pwm", 80)
         car.forward.assert_called_once_with(80)
@@ -105,6 +105,11 @@ class DutyModeTests(unittest.TestCase):
         adapter.drive_experiment("pwm", 40, "backward", 5.4)
         car.backward.assert_called_once_with(40)
         car.set_dir_servo_angle.assert_called_with(5)
+        # 전진과 후진은 같은 출력 경로: 같은 값이면 예상 듀티도 같아야 합니다.
+        adapter.drive("forward", 100, 0); fwd = adapter.last_command["expected_duty_percent"]
+        adapter.drive("backward", 100, 0); back = adapter.last_command["expected_duty_percent"]
+        self.assertEqual(fwd, back)
+        self.assertEqual(fwd, 100)
 
 
 class ExperimentApiTests(unittest.TestCase):
@@ -221,7 +226,7 @@ class ExperimentApiTests(unittest.TestCase):
             {"bump_id": "A", "total_mass_g": 1000, "output_mode": "pwm", "output_value": 70, "jump_count": 1, "mean_speed_mps": 0.8, "mean_peak_g": 3.0},
         ]
         settings = experiment.ExperimentSettings(a_limit_mode="first_jump", wheel_radius_mm=33)
-        crit = experiment.criterion_for("A", groups, {"overall": None}, settings)
+        crit = experiment.criterion_for("A", groups, None, settings)
         self.assertEqual(crit["a_limit_g"], 3.0)
         self.assertAlmostEqual(crit["critical_speed_mps"], math.sqrt(9.80665 * 0.083), places=3)
 

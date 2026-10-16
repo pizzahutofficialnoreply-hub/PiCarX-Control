@@ -9,4 +9,7 @@ PYTHONPATH=devtools/fake_hardware PICARX_MODE=hardware uvicorn app.main:app --po
 
 - 차가 움직이면 위치를 적분하고, 앞·뒤 축이 x = 0.6 m의 방지턱을 지날 때 피크를 만듭니다.
 - 직진 중 약 +4 °/s로 왼쪽으로 휘는 성질이 있어 자이로 직진 보정의 효과를 확인할 수 있습니다.
+- 모터 속도가 시간상수 0.15 s로 따라가며 진행 방향 가속도를 냅니다(대칭 점검 시험). `FAKE_BACKWARD_FACTOR=1.3`이면 후진이 1.3배 빠른 차가 됩니다.
+- 그레이스케일 센서는 y = 0을 따라 붙은 검은 테이프를 봅니다(라인 추종 시험). 서버를 다시 켜면 차가 테이프 정중앙에서 시작합니다.
+- `robot_hat.utils.get_battery_voltage`도 흉내 냅니다(8.2 V에서 천천히 감소).
 - 실제 측정값이 아니므로 연구 데이터로 쓰지 마세요. 저장 위치를 분리하려면 `PICARX_DATA_DIR`를 지정하세요.
