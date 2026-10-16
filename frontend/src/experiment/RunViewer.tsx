@@ -13,7 +13,7 @@ type Props = {
   toggleExcluded: (id: string, excluded: boolean) => Promise<void>;
   deleteRun: (id: string) => Promise<void>;
 };
-type Series = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; rear_t_s: number | null; peak_g: number | null; speed_mps: number | null; bump_detected: boolean | null };
+type Series = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; rear_t_s: number | null; peak_g: number | null; speed_mps: number | null; bump_detected: boolean | null; aligned_on?: 'front' | 'peak' };
 
 const sameCondition = (a: RunSummary, b: RunSummary) => a.condition.bump_id === b.condition.bump_id && a.condition.total_mass_g === b.condition.total_mass_g
   && a.condition.output_mode === b.condition.output_mode && a.condition.output_value === b.condition.output_value && (a.condition.purpose ?? 'main') === (b.condition.purpose ?? 'main');
@@ -89,6 +89,10 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
     points: s.t.map((t, k) => ({ x: t, y: s.g[k] })),
   }));
 
+  const noBump = overlay.filter(s => s.aligned_on !== 'front' || s.bump_detected === false).length;
+  const allNoBump = overlay.length > 0 && noBump === overlay.length;
+  const zeroLabel = allNoBump ? '가장 큰 봉우리' : noBump ? '앞바퀴(일부는 가장 큰 봉우리)' : '앞바퀴';
+
   return <article className="card experiment-run">
     <div className="exp-viewer-bar">
       <div className="segmented"><button type="button" className={mode === 'single' ? 'selected' : ''} onClick={() => setMode('single')}><Square size={13} /> 한 회씩</button><button type="button" className={mode === 'overlay' ? 'selected' : ''} onClick={() => setMode('overlay')}><Layers size={13} /> 겹쳐 보기</button></div>
@@ -98,12 +102,13 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
 
     {mode === 'overlay' ? <>
       <h3>{scope === 'condition' ? `${condLabel(selected)} · ${overlay.length}회 겹쳐 보기` : `전체 시행 ${overlay.length}회 겹쳐 보기${scoped.length > 40 ? ' (최근 40회)' : ''}`}</h3>
-      <p className="exp-hint">모든 회차를 <b>앞바퀴가 방지턱에 닿은 순간(0초)</b>에 맞춰 겹쳤습니다. 선들이 잘 겹치면 측정이 고르게 반복된 것이고, 하나만 튀면 그 회차를 확인해 보세요.{scope === 'all' ? ' 색은 출력, 선 모양은 질량(실선 → 점선 순으로 무거움)입니다.' : ''} 굵은 선은 지금 고른 시행입니다.</p>
+      {noBump > 0 && <p className="exp-hint exp-warnline"><AlertTriangle size={13} /> {allNoBump ? '이 회차들은 모두 방지턱을 찾지 못했습니다(평지처럼 주행 진동만 있음).' : `${noBump}개 회차는 방지턱을 찾지 못했습니다.`} 그런 회차는 앞바퀴 대신 <b>가장 큰 봉우리</b>를 0초로 맞췄고, 계산(관계식·평균)에서는 자동으로 빠집니다.</p>}
+      <p className="exp-hint">모든 회차를 <b>{allNoBump ? '가장 큰 봉우리' : '앞바퀴가 방지턱에 닿은 순간'}(0초)</b>에 맞춰 겹쳤습니다. 방지턱 충격은 모든 회차에서 같은 자리에 솟아야 하고, 그 사이의 지그재그는 바퀴·기어에서 오는 주행 진동이라 회차마다 모양이 달라도 정상입니다. 선들이 잘 겹치면 측정이 고르게 반복된 것이고, 하나만 튀면 그 회차를 확인해 보세요.{scope === 'all' ? ' 색은 출력, 선 모양은 질량(실선 → 점선 순으로 무거움)입니다.' : ''} 굵은 선은 지금 고른 시행입니다.</p>
       {loadingOverlay ? <div className="empty-chart">불러오는 중…</div> : overlay.length === 0 ? <div className="empty-chart">겹칠 시행이 없습니다(방지턱 통과가 확인된 시행만 맞춰 그릴 수 있습니다).</div> :
-        <XYChart name={`overlay_${scope}_${selected.condition.bump_id}`} title={scope === 'condition' ? `회차별 충격 비교 – ${condLabel(selected)}` : '전체 시행 충격 비교'} xLabel="앞바퀴가 닿은 뒤 시간 (s)" yLabel="위아래 가속도 (g, 정지 = 1)"
+        <XYChart name={`overlay_${scope}_${selected.condition.bump_id}`} title={scope === 'condition' ? `회차별 충격 비교 – ${condLabel(selected)}` : '전체 시행 충격 비교'} xLabel={`${zeroLabel} 기준 시간 (s)`} yLabel="위아래 가속도 (g, 정지 = 1)"
           series={overlaySeries} legendMax={scope === 'condition' ? 12 : 8}
           hLines={[{ y: 1, label: '정지 1 g', color: '#9aa3ad' }, ...(aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : [])]}
-          vLines={[{ x: 0, label: '앞바퀴', color: '#d0782a' }]} />}
+          vLines={[{ x: 0, label: allNoBump ? '가장 큰 봉우리' : '앞바퀴', color: '#d0782a' }]} />}
       <div className="experiment-table-wrap"><table className="experiment-table exp-clickable"><thead><tr><th>회차</th><th>조건</th><th>통과 속도 (m/s)</th><th>가장 큰 충격 (g)</th><th>허용 기준</th></tr></thead>
         <tbody>{overlay.map(s => { const lim = limitFor(runs.find(r => r.id === s.id), data, settings); const o = lim != null && s.peak_g != null && s.peak_g > lim;
           return <tr key={s.id} className={(s.id === selected?.id ? 'selected ' : '') + (o ? 'over' : '')} onClick={() => { setSelectedId(s.id); setMode('single'); }}><td>{s.condition.trial}</td><td>{condLabel(s)}</td><td>{s.bump_detected === false ? <span className="exp-badge warn">방지턱 못 찾음 · 계산 제외</span> : fmt(s.speed_mps, 3)}</td><td>{fmt(s.peak_g, 2)}</td><td>{lim == null ? '—' : o ? <span className="exp-over">초과</span> : '이내'}</td></tr>; })}</tbody></table></div>
@@ -122,7 +127,7 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
         <div><small>바퀴가 떴나?</small><b>{a.jump == null ? '판단 불가' : a.jump ? '떴음' : '안 뜸'}</b><span>{a.jump ? `공중 ${a.airborne_s ? (a.airborne_s * 1000).toFixed(0) + ' ms' : '—'}${a.landing_g ? ` · 착지 충격 ${a.landing_g.toFixed(2)} g` : ''}` : `가장 낮은 값 ${fmt(a.min_g, 2, 'g')} (0.2 g 아래면 뜬 것)`}</span></div>
         <div><small>충격력 (질량 × 가속도)</small><b>{fmt(a.peak_force_n, 1, 'N')}</b><span>정지 무게 대비 {fmt(a.dynamic_force_n, 1, 'N')} 더</span></div>
         <div><small>속도·곡률 지수 Π</small><b>{fmt(a.pi, 2)}</b><span>1을 넘으면 이론상 뜸 · 뜨기 시작하는 속도 {fmt(a.critical_speed_mps, 2, 'm/s')}</span></div>
-        <div><small>주행 진동 크기</small><b>{fmt(a.noise_sigma_g, 3, 'g')}</b><span>피크로 인정한 기준 {fmt(a.threshold_used_g, 2, 'g')} 이상{a.standout_ratio ? ` · 바퀴 피크가 진동의 ${a.standout_ratio}배` : ''}</span></div>
+        <div><small>주행 진동 크기</small><b>{fmt(a.noise_sigma_g, 3, 'g')}</b><span>피크로 인정한 기준 {fmt(a.threshold_used_g, 2, 'g')} 이상{a.standout_ratio ? ` · 바퀴 피크가 진동의 ${a.standout_ratio}배` : ''}{(a.noise_sigma_g ?? 0) > 0.12 ? ' · 진동이 큰 편: 센서 고정·바퀴 상태를 확인하세요' : ''}</span></div>
       </div>
       {log.length > 0 && <p className="exp-hint exp-drivelog">모터 출력: {outputs.length === 1 ? `처음부터 끝까지 ${outputLabel(selected.condition.output_mode, outputs[0])}로 고정` : `${outputs.join(' → ')} (출발 밀어주기 후 고정)`} · 조향 {Math.min(...steers).toFixed(1)}° ~ {Math.max(...steers).toFixed(1)}°{selected.heading_max_deg != null ? ` · 차 방향이 가장 많이 틀어진 각도 ${selected.heading_max_deg.toFixed(1)}°` : ''}</p>}
       {a.flags.length > 0 && <ul className="exp-flags">{a.flags.map(f => <li key={f}><AlertTriangle size={13} />{f}</li>)}</ul>}

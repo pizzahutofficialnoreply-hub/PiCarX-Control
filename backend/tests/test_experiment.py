@@ -311,3 +311,21 @@ class ExperimentApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReturnTapeStopTests(unittest.TestCase):
+    def test_return_stops_when_start_tape_seen(self):
+        import asyncio, time as _t
+        from types import SimpleNamespace
+        from app import experiment as ex
+        from app.line_follow import LineSettings
+        t0 = _t.monotonic()
+        async def drive(*a, **k): return True
+        adapter = SimpleNamespace(read_grayscale=lambda: [300, 300, 300] if _t.monotonic() - t0 > 0.35 else [900, 900, 900])
+        ctl = SimpleNamespace(stop_generation=1, experiment_drive=drive, adapter=adapter)
+        settings = SimpleNamespace(line=LineSettings(floor=[900, 900, 900], line=[300, 300, 300]))
+        seen = ex._tape_detector(settings)
+        out = asyncio.run(ex._drive_for(ctl, "pwm", 50, 2.0, "backward", 1, False, 0.0, stop_when=seen, min_s=0.1))
+        self.assertTrue(out["stopped_on_mark"])
+        self.assertLess(out["elapsed_s"], 1.0)
+        self.assertIsNone(ex._tape_detector(SimpleNamespace(line=LineSettings())))

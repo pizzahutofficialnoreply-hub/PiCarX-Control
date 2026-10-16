@@ -81,6 +81,7 @@ class ExperimentSettings(BaseModel):
     tail_s: float = Field(default=0.6, ge=0.1, le=3)
     repeats: int = Field(default=5, ge=1, le=20)
     return_enabled: bool = True
+    return_stop_on_tape: bool = Field(default=False, description="후진 복귀 때 바닥의 출발선 테이프를 그레이스케일 센서가 보면 멈춤(라인 보정 필요)")
     return_output: float | None = Field(default=None, ge=1, le=100, description="복귀 후진 출력(없으면 측정 출력과 같음)")
     return_scale: float = Field(default=1.0, ge=0.3, le=3, description="복귀 후진 시간 = 주행 시간 × 배율")
     rest_s: float = Field(default=1.5, ge=0.3, le=10)
@@ -122,6 +123,7 @@ class AutoRunRequest(BaseModel):
     tail_s: float | None = Field(default=None, ge=0.1, le=3)
     repeats: int | None = Field(default=None, ge=1, le=20)
     return_enabled: bool | None = None
+    return_stop_on_tape: bool | None = None
     return_output: float | None = Field(default=None, ge=1, le=100)
     return_scale: float | None = Field(default=None, ge=0.3, le=3)
     rest_s: float | None = Field(default=None, ge=0.3, le=10)
@@ -558,7 +560,8 @@ class HeadingController:
 async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: str, generation: int,
                      heading_hold: bool, gain: float, track: bool | None = None,
                      line: LineTracker | None = None, kick_ms: int = 0,
-                     ki: float = 0.0, ff: float = 0.0) -> dict[str, Any]:
+                     ki: float = 0.0, ff: float = 0.0,
+                     stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0) -> dict[str, Any]:
     """정해진 시간 동안 일정한 출력으로 직진/후진.
 
     출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
@@ -575,6 +578,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     controller = HeadingController(gain, ki, ff) if heading_hold and line is None else None
     log: list[list[float]] = []
     prev_t = start
+    stopped_on_mark = False
     while loop.time() < end:
         if ctl.stop_generation != generation:
             raise Aborted()
@@ -592,6 +596,11 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             if not ok:
                 line_lost = True
                 break
+        if stop_when is not None and now - start >= min_s:
+            raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+            if stop_when(raw):
+                stopped_on_mark = True
+                break
         prev_t = now
         out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else value
         if not await ctl.experiment_drive(mode, out, generation, direction, steer):
@@ -602,8 +611,20 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     return {"heading_max_deg": round(worst, 2) if last is not None else None,
             "heading_end_deg": round(last, 2) if last is not None else None,
             "line_lost": line_lost if line is not None else None,
-            "drive_log": log[:400],
+            "drive_log": log[:400], "stopped_on_mark": stopped_on_mark, "elapsed_s": round(loop.time() - start, 3),
             "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None}
+
+
+def _tape_detector(settings: "ExperimentSettings") -> Callable[[Any], bool] | None:
+    """출발선 테이프 감지 함수(그레이스케일 3개 중 하나라도 테이프 쪽으로 60% 이상). 라인 보정이 없으면 None."""
+    from .line_follow import weights
+    if not settings.line.floor or not settings.line.line:
+        return None
+
+    def seen(raw: Any) -> bool:
+        w = weights(list(raw or []), settings.line)
+        return bool(w) and max(w) >= 0.6
+    return seen
 
 
 def _learn_heading(direction: str, steer_mean: float | None) -> float | None:
@@ -702,6 +723,7 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
         "return_enabled": pick(request.return_enabled, settings.return_enabled),
         "return_output": pick(request.return_output, settings.return_output) or cond.output_value,
         "return_scale": pick(request.return_scale, settings.return_scale),
+        "return_stop_on_tape": pick(request.return_stop_on_tape, settings.return_stop_on_tape),
         "rest": pick(request.rest_s, settings.rest_s),
         "heading_hold": pick(request.heading_hold, settings.heading_hold),
         "kick_ms": pick(request.kick_ms, settings.kick_ms),
@@ -725,9 +747,16 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                 try:
                     # 복귀(후진)는 테이프 센서가 앞쪽에 있어 라인 대신 자이로로 방향을 유지합니다.
                     hold = bool(opts["steering_source"] in ("gyro", "line") and not simulated and mpu6050_service.heading_deg() is not None)
-                    back = await _drive_for(ctl, cond.output_mode, opts["return_output"], opts["run_seconds"] * opts["return_scale"],
+                    planned = opts["run_seconds"] * opts["return_scale"]
+                    tape = _tape_detector(settings) if opts["return_stop_on_tape"] and not simulated else None
+                    back = await _drive_for(ctl, cond.output_mode, opts["return_output"], planned * (1.6 if tape else 1.0),
                                             "backward", gen, hold, settings.heading_gain,
-                                            ki=settings.heading_ki, ff=store.load_settings().heading_ff_backward if hold else 0.0)
+                                            ki=settings.heading_ki, ff=store.load_settings().heading_ff_backward if hold else 0.0,
+                                            stop_when=tape, min_s=planned * 0.4)
+                    if tape is not None:
+                        auto_runner.message = (f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선 테이프에서 정지 ({back['elapsed_s']:.2f} s)"
+                                               if back.get("stopped_on_mark") else
+                                               f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선 테이프를 못 찾아 최대 시간에서 정지")
                     if hold:
                         _learn_heading("backward", back.get("steer_mean_late"))
                 finally:
@@ -794,6 +823,15 @@ async def list_runs():
     simulated = ctl.adapter.mode != "hardware"
     settings = store.load_settings()
     runs = runs_for_mode(simulated)
+    # 평지 오검출 판정(bump_detected)이 생기기 전에 분석된 시행은 저장된 원자료로 한 번 다시 분석합니다.
+    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {})]
+    for run in stale:
+        try:
+            cols = await asyncio.to_thread(store.read_columns, run["id"])
+        except HTTPException:
+            continue
+        run["analysis"] = run_analysis(run, cols, settings)
+        store.put(run)
     return {"simulated": simulated, "runs": [run_summary(r) for r in runs], **analysis_bundle(runs, settings)}
 
 

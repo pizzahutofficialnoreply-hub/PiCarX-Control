@@ -159,7 +159,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       const body = {
         condition: { ...condition, ...(override ?? {}), total_mass_g: undefined },
         repeats: runOpts.repeats, return_enabled: runOpts.return_enabled, return_output: runOpts.return_output || null,
-        return_scale: runOpts.return_scale, rest_s: runOpts.rest_s, steering_source: runOpts.steering_source ?? 'gyro', kick_ms: runOpts.kick_ms ?? 0,
+        return_scale: runOpts.return_scale, return_stop_on_tape: !!runOpts.return_stop_on_tape, rest_s: runOpts.rest_s, steering_source: runOpts.steering_source ?? 'gyro', kick_ms: runOpts.kick_ms ?? 0,
         ...(extra ?? {}),
       };
       seenRuns.current = 0;
@@ -293,9 +293,10 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
             <label>측정 중 조향<select value={runOpts.steering_source ?? 'gyro'} onChange={e => setRunOpts({ steering_source: e.target.value as ExperimentSettings['steering_source'], heading_hold: e.target.value === 'gyro' })}><option value="gyro">자이로 직진 보정 (반듯하게)</option><option value="line">바닥 테이프 따라가기</option><option value="none">조향 없음</option></select></label>
             <label>출발 밀어주기 (ms, 0 = 끔)<input type="number" min={0} max={400} step={20} value={runOpts.kick_ms ?? 0} onChange={e => setRunOpts({ kick_ms: Math.max(0, Math.min(400, Math.round(Number(e.target.value) || 0))) })} /></label>
             {runOpts.return_enabled && <><label>복귀 출력 (빈칸 = 측정과 같음)<input type="number" min={1} max={maxOutput} value={runOpts.return_output ?? ''} placeholder={String(condition.output_value)} onChange={e => setRunOpts({ return_output: e.target.value === '' ? null : Math.max(1, Math.min(maxOutput, Number(e.target.value))) })} /></label>
-            <label>복귀 시간 배율<input type="number" min={0.3} max={3} step={0.05} value={runOpts.return_scale} onChange={e => setRunOpts({ return_scale: Math.max(0.3, Math.min(3, Number(e.target.value) || 1)) })} /></label></>}
+            <label>복귀 시간 배율{runOpts.return_stop_on_tape ? ' (테이프 못 찾을 때 최대 ×1.6)' : ''}<input type="number" min={0.3} max={3} step={0.05} value={runOpts.return_scale} onChange={e => setRunOpts({ return_scale: Math.max(0.3, Math.min(3, Number(e.target.value) || 1)) })} /></label>
+            <label className="exp-check"><input type="checkbox" checked={!!runOpts.return_stop_on_tape} disabled={!settings?.line?.floor || !settings?.line?.line} onChange={e => setRunOpts({ return_stop_on_tape: e.target.checked })} /> 출발선 테이프에서 멈추기{!settings?.line?.floor || !settings?.line?.line ? ' (테이프 인식 탭에서 바닥·테이프 보정 먼저)' : ''}</label></>}
           </div>
-          <small className="exp-hint">한 회 약 {(runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s).toFixed(1)}초 · 전체 약 {((runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s) * runOpts.repeats).toFixed(0)}초. 후진은 측정과 같은 시간만큼 하므로, 출발선보다 덜 오면 배율을 늘리고 더 가면 줄이세요. 이 값들은 '설정 저장'을 누르면 기본값으로 남습니다.</small>
+          <small className="exp-hint">한 회 약 {(runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s).toFixed(1)}초 · 전체 약 {((runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s) * runOpts.repeats).toFixed(0)}초. 후진은 측정과 같은 시간만큼 하므로, 출발선보다 덜 오면 배율을 늘리고 더 가면 줄이세요. 매번 같은 자리로 돌아오게 하려면 출발선에 테이프를 붙이고 '출발선 테이프에서 멈추기'를 켜세요(차 앞쪽 센서가 테이프를 보면 멈춤). 이 값들은 '설정 저장'을 누르면 기본값으로 남습니다.</small>
         </div>
         {!simulated && !sensorReady && <div className="warning">센서 화면에서 MPU-6050 정지 상태 보정을 먼저 하세요. {impact?.recording ? '수동 측정이 진행 중입니다.' : ''} <button className="text-button" onClick={onOpenSensors}>센서 화면으로</button></div>}
         {conditionError && <p className="diagnostic-error">{conditionError}</p>}
