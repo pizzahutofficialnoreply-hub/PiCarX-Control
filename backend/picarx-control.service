@@ -9,9 +9,11 @@ User=pi
 WorkingDirectory=/home/pi/PiCarX-Control/backend
 # 실제 주행·측정에는 hardware로 바꾸세요.
 Environment=PICARX_MODE=mock
-ExecStart=/home/pi/PiCarX-Control/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+ExecStart=/home/pi/PiCarX-Control/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 3
 Restart=on-failure
 RestartSec=3
+# 카메라 스트림이 열려 있으면 정상 종료가 끝나지 않으므로 최대 8초 뒤 강제 종료
+TimeoutStopSec=8
 
 [Install]
 WantedBy=multi-user.target

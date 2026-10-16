@@ -6,7 +6,7 @@
   D.  바닥에 내려놓고 전진 (무게·마찰 부하)
 매 단계 배터리 전압의 최저값을 함께 보여 줍니다(전압이 뚝 떨어지면 전원 문제).
 
-실행: 앱 서버를 끄고  →  cd ~/PiCarX-Control/backend && sudo python3 devtools/motor_test2.py
+실행: 앱 서버를 끄고  →  cd ~/PiCarX-Control/backend && python3 devtools/motor_test2.py   (sudo 금지)
 """
 import sys
 import threading

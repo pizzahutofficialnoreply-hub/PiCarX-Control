@@ -3,7 +3,7 @@
 사용법 (라즈베리파이에서):
     1) 앱 서버를 먼저 끕니다:  sudo systemctl stop picarx-control   (또는 uvicorn 창에서 Ctrl+C)
     2) 차를 상자 위에 올려 바퀴가 바닥에 닿지 않게 합니다.
-    3) cd ~/PiCarX-Control/backend && sudo python3 devtools/motor_test.py
+    3) cd ~/PiCarX-Control/backend && python3 devtools/motor_test.py   (sudo로 실행하면 설정 파일 권한이 바뀌니 금지)
 
 단계마다 바퀴를 보고 Enter를 누르세요. 마지막에 결과를 요약합니다.
   A. 공식 picarx 라이브러리로 왼쪽/오른쪽 바퀴를 하나씩 전진·후진 (출력 30, 60, 100)

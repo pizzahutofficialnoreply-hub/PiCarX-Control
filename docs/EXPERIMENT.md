@@ -230,6 +230,16 @@ cd frontend && npm install && npm run build      # frontend/dist 생성 → Fast
 cd ../backend && sudo systemctl restart picarx-control   # 또는 uvicorn을 다시 실행
 ```
 
+`sudo systemctl stop picarx-control`이 멈춘 것처럼 오래 걸리면, 열려 있는 카메라 영상 연결이 끝나기를 서버가 기다리는 것입니다. 한 번만 아래를 실행해 두면 최대 8초 안에 꺼집니다.
+
+```bash
+sudo mkdir -p /etc/systemd/system/picarx-control.service.d
+printf '[Service]\nTimeoutStopSec=8\n' | sudo tee /etc/systemd/system/picarx-control.service.d/stop.conf
+sudo systemctl daemon-reload
+```
+
+모터 점검 스크립트(`devtools/motor_test.py`, `motor_test2.py`)는 서버를 끈 뒤 `sudo` 없이 실행하세요. `sudo`로 실행하면 `/opt/picar-x/picar-x.conf`가 관리자 소유로 바뀌어 서버가 차량을 열지 못합니다(`Permission denied`). 그렇게 됐다면 `sudo chown -R $USER:$USER /opt/picar-x` 후 서버를 다시 켜세요.
+
 실험 관리 화면에 *백엔드가 이전 버전* 안내가 보이면 Pi의 서버가 아직 예전 코드로 돌고 있는 것입니다(콘솔에 `/api/experiment/settings 404`). 위 명령으로 업데이트하고 재시작하세요. systemd 예시 파일은 `PICARX_MODE=mock`이므로 실제 주행에는 `hardware`로 바꿔야 합니다.
 
 ## 차량 없이 하드웨어 경로 시험
