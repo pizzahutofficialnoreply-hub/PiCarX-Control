@@ -93,6 +93,7 @@ class ExperimentSettings(BaseModel):
     heading_learn: bool = Field(default=True, description="측정할 때마다 차가 한쪽으로 쏠리는 정도를 학습해 다음 출발부터 미리 보정")
     heading_ff_forward: float = Field(default=0.0, ge=-12, le=12, description="학습된 전진 기본 조향(°)")
     heading_ff_backward: float = Field(default=0.0, ge=-12, le=12, description="학습된 후진 기본 조향(°)")
+    heading_sign: Literal[1, -1] = Field(default=1, description="자이로 보정 조향 방향(센서 장착 방향에 따라 반대일 수 있어 주행 중 자동 판정)")
     steering_source: Literal["gyro", "line", "none"] = Field(default="gyro", description="측정 직진 중 조향 방식")
     kick_ms: int = Field(default=0, ge=0, le=400, description="출발 순간 최대 출력으로 밀어 주는 시간(정지마찰 극복)")
     model_id: str = Field(default="auto", max_length=20, description="관계식 모델(auto = 교차검증 오차 최소)")
@@ -372,7 +373,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return {k: run.get(k) for k in ("id", "created_at", "simulated", "source", "aborted", "excluded", "condition", "bump", "analysis", "recording",
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
-                                    "heading_ff_learned")}
+                                    "heading_ff_learned", "heading_flipped", "steer_saturated")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -545,27 +546,56 @@ class HeadingController:
     """자이로 방향 유지(비례 + 적분 + 학습된 기본 조향).
 
     - 비례: 지금 틀어진 만큼 반대로 조향
-    - 적분: 계속 한쪽으로 틀어져 있으면 조향을 점점 더해 오차를 0으로(바퀴 정렬 불량 보정)
-    - 기본 조향(ff): 지난 측정에서 배운 '직진하려면 필요한 조향'으로 출발부터 보정
+    - 적분: 계속 한쪽으로 틀어져 있으면 조향을 조금씩 더함. 조향이 한계에 붙어 있거나 오차 부호가 바뀌면
+      적분을 쌓지 않거나 줄여서(와인드업 방지) 한쪽으로 계속 꺾인 채 남지 않게 합니다.
+    - 기본 조향(ff): 지난 측정에서 배운 '직진하려면 필요한 조향'(최대 ±5°)
+    - 방향 자동 판정: 조향을 한쪽으로 크게 주는데도 오차가 계속 커지면(센서 장착 방향 때문에 보정이
+      거꾸로 걸린 것) 조향 방향을 뒤집습니다. ``flipped``가 True가 됩니다.
     """
 
-    def __init__(self, kp: float, ki: float, ff: float, limit: float = MAX_HEADING_CORRECTION_DEG) -> None:
-        self.kp, self.ki, self.ff, self.limit = kp, ki, ff, limit
+    def __init__(self, kp: float, ki: float, ff: float, limit: float = MAX_HEADING_CORRECTION_DEG, polarity: int = 1) -> None:
+        self.kp, self.ki, self.limit = kp, ki, limit
+        self.ff = max(-5.0, min(5.0, ff))
+        self.polarity = polarity
         self.integral = 0.0
+        self.prev_err: float | None = None
+        self.wrong_since: float | None = None
+        self.wrong_start_err = 0.0
+        self.elapsed = 0.0
+        self.flipped = False
 
     def update(self, heading: float, dt: float, sign: float) -> float:
-        err = heading * sign  # 왼쪽으로 돈 상태(+)에서 전진이면 오른쪽(+) 조향, 후진이면 왼쪽(−)
-        if self.ki > 0:
+        self.elapsed += max(0.0, dt)
+        err = heading * sign * self.polarity  # 왼쪽으로 돈 상태(+)에서 전진이면 오른쪽(+) 조향, 후진이면 왼쪽(−)
+        if self.prev_err is not None and err * self.prev_err < 0:
+            self.integral *= 0.3  # 목표를 지나쳤으면 쌓인 보정을 크게 덜어 냄
+        raw = self.ff + self.kp * err + self.ki * self.integral
+        saturated = abs(raw) >= self.limit
+        if self.ki > 0 and not (saturated and raw * err > 0):
             self.integral = max(-self.limit / self.ki, min(self.limit / self.ki, self.integral + err * dt))
-        steer = self.ff + self.kp * err + self.ki * self.integral
-        return max(-self.limit, min(self.limit, steer))
+        steer = max(-self.limit, min(self.limit, self.ff + self.kp * err + self.ki * self.integral))
+        # 보정 방향 점검: 오차를 줄이는 쪽으로 6° 이상 꺾고 있는데 0.6초 동안 오차가 3° 넘게 더 커지면 거꾸로 걸린 것
+        if abs(steer) >= 6 and steer * err > 0 and abs(err) > 3:
+            if self.wrong_since is None:
+                self.wrong_since, self.wrong_start_err = self.elapsed, abs(err)
+            elif self.elapsed - self.wrong_since >= 0.6 and abs(err) - self.wrong_start_err > 3:
+                self.polarity *= -1
+                self.flipped = True
+                self.integral = 0.0
+                self.wrong_since = None
+                err = -err
+                steer = max(-self.limit, min(self.limit, self.ff + self.kp * err))
+        else:
+            self.wrong_since = None
+        self.prev_err = err
+        return steer
 
 
 async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: str, generation: int,
                      heading_hold: bool, gain: float, track: bool | None = None,
                      line: LineTracker | None = None, kick_ms: int = 0,
                      ki: float = 0.0, ff: float = 0.0,
-                     stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0) -> dict[str, Any]:
+                     stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0, polarity: int = 1) -> dict[str, Any]:
     """정해진 시간 동안 일정한 출력으로 직진/후진.
 
     출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
@@ -579,7 +609,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     worst = 0.0
     last = None
     line_lost = False
-    controller = HeadingController(gain, ki, ff) if heading_hold and line is None else None
+    controller = HeadingController(gain, ki, ff, polarity=polarity) if heading_hold and line is None else None
     log: list[list[float]] = []
     prev_t = start
     stopped_on_mark = False
@@ -616,7 +646,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "heading_end_deg": round(last, 2) if last is not None else None,
             "line_lost": line_lost if line is not None else None,
             "drive_log": log[:400], "stopped_on_mark": stopped_on_mark, "elapsed_s": round(loop.time() - start, 3),
-            "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None}
+            "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None,
+            "heading_flipped": bool(controller and controller.flipped),
+            "steer_saturated": bool(controller and sum(1 for row in log if abs(row[2]) >= MAX_HEADING_CORRECTION_DEG - 0.01) > len(log) * 0.3)}
 
 
 def _tape_detector(settings: "ExperimentSettings") -> Callable[[Any], bool] | None:
@@ -631,15 +663,22 @@ def _tape_detector(settings: "ExperimentSettings") -> Callable[[Any], bool] | No
     return seen
 
 
-def _learn_heading(direction: str, steer_mean: float | None) -> float | None:
-    """측정이 끝나면 후반부 평균 조향을 '직진에 필요한 기본 조향'으로 반쯤 반영합니다."""
-    if steer_mean is None:
-        return None
+def _learn_heading(direction: str, steer_mean: float | None, info: dict[str, Any] | None = None) -> float | None:
+    """측정이 끝나면 후반부 평균 조향을 '직진에 필요한 기본 조향'으로 반쯤 반영합니다(최대 ±5°).
+
+    조향이 한계에 오래 붙어 있었거나 방향을 뒤집은 회차는 정상 직진이 아니었으므로 배우지 않습니다.
+    방향을 뒤집었으면 저장된 방향(heading_sign)을 바꾸고 학습값을 0으로 되돌립니다.
+    """
     settings = store.load_settings()
-    if not settings.heading_learn:
+    if info and info.get("heading_flipped"):
+        settings.heading_sign = -settings.heading_sign  # type: ignore[assignment]
+        settings.heading_ff_forward = settings.heading_ff_backward = 0.0
+        store.save_settings(settings)
+        return 0.0
+    if steer_mean is None or not settings.heading_learn or (info and info.get("steer_saturated")):
         return None
     key = "heading_ff_forward" if direction == "forward" else "heading_ff_backward"
-    new = max(-12.0, min(12.0, 0.5 * getattr(settings, key) + 0.5 * steer_mean))
+    new = max(-5.0, min(5.0, 0.5 * getattr(settings, key) + 0.5 * steer_mean))
     setattr(settings, key, round(new, 3))
     store.save_settings(settings)
     return new
@@ -674,9 +713,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         try:
             drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], "forward", gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
-                                          ki=settings.heading_ki, ff=store.load_settings().heading_ff_forward if hold else 0.0)
+                                          ki=settings.heading_ki, ff=store.load_settings().heading_ff_forward if hold else 0.0,
+                                          polarity=store.load_settings().heading_sign)
             if hold and not drive_info.get("line_lost"):
-                drive_info["heading_ff_learned"] = _learn_heading("forward", drive_info.get("steer_mean_late"))
+                drive_info["heading_ff_learned"] = _learn_heading("forward", drive_info.get("steer_mean_late"), drive_info)
         finally:
             await ctl.stop(reason="experiment_auto_run_end")
         gen = ctl.stop_generation
@@ -756,13 +796,14 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                     back = await _drive_for(ctl, cond.output_mode, opts["return_output"], planned * (1.6 if tape else 1.0),
                                             "backward", gen, hold, settings.heading_gain,
                                             ki=settings.heading_ki, ff=store.load_settings().heading_ff_backward if hold else 0.0,
+                                            polarity=store.load_settings().heading_sign,
                                             stop_when=tape, min_s=planned * 0.4)
                     if tape is not None:
                         auto_runner.message = (f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선 테이프에서 정지 ({back['elapsed_s']:.2f} s)"
                                                if back.get("stopped_on_mark") else
                                                f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선 테이프를 못 찾아 최대 시간에서 정지")
                     if hold:
-                        _learn_heading("backward", back.get("steer_mean_late"))
+                        _learn_heading("backward", back.get("steer_mean_late"), back)
                 finally:
                     await ctl.stop(reason="experiment_return_end")
             if not last_cycle:

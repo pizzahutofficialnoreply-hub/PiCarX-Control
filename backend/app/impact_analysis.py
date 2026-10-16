@@ -281,11 +281,14 @@ def analyze_run(
         others = [p.value_g - 1.0 for p in small if not near(p) and p not in landing
                   and not any(abs(p.t_s - q.t_s) < 1e-9 for q in landing)]
         weakest = min(pair[0].value_g, pair[1].value_g) - 1.0
+        strongest = max(pair[0].value_g, pair[1].value_g) - 1.0
         if others:
-            ratio = weakest / max(others) if max(others) > 0 else None
+            # 방지턱 충격은 보통 앞바퀴(또는 뒷바퀴) 하나가 뚜렷하게 큽니다. 둘 중 '뚜렷한 쪽'이 진동보다 크면 인정하고,
+            # 약한 쪽은 후보 기준(k·σ)만 넘으면 됩니다(짝 간격은 같은 조건 회차끼리 다시 맞춤).
+            ratio = strongest / max(others) if max(others) > 0 else None
             result["standout_ratio"] = None if ratio is None else round(ratio, 2)
             if ratio is not None and ratio < standout_min:
-                flags.append(f"방지턱 통과가 확인되지 않았습니다: 고른 두 피크({weakest:.2f} g)가 다른 진동({max(others):.2f} g)보다 뚜렷하지 않습니다. "
+                flags.append(f"방지턱 통과가 확인되지 않았습니다: 가장 큰 바퀴 피크(+{strongest:.2f} g)가 다른 진동(+{max(others):.2f} g)보다 뚜렷하지 않습니다. "
                              "평지 주행이었거나 충격이 너무 작으면 이렇게 됩니다. 이 시행은 집계에서 빠집니다.")
                 pair = None
                 result["bump_detected"] = False

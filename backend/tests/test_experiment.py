@@ -387,3 +387,26 @@ class HarmonizeTests(unittest.TestCase):
         self.assertAlmostEqual(fixed["speed_mps"], 0.095 / 0.37, places=3)
         self.assertEqual(runs[3]["analysis"]["axle_dt_s"], 0.95)   # 원본은 그대로
         self.assertEqual(out["r1"]["analysis"]["pair_source"], "auto")
+
+
+class HeadingControllerTests(unittest.TestCase):
+    def _sim(self, true_sign, step_at=None):
+        from app.experiment import HeadingController
+        c = HeadingController(1.2, 0.8, 0.0, polarity=1)
+        h, dt = 0.0, 0.05
+        for i in range(int(2.5 / dt)):
+            st = c.update(h, dt, 1.0)
+            h += (-true_sign * st * 2.0 + 4.0) * dt   # 오른쪽 조향 → 시계 방향, 바퀴 정렬 불량으로 +4°/s
+            if step_at is not None and i == step_at:
+                h += 6.0                               # 방지턱 충격으로 방향이 갑자기 틀어짐
+        return h, c
+
+    def test_correct_sign_holds_and_is_not_flipped(self):
+        h, c = self._sim(1, step_at=20)
+        self.assertFalse(c.flipped)
+        self.assertLess(abs(h), 2.0)
+
+    def test_wrong_sign_is_detected_and_recovered(self):
+        h, c = self._sim(-1)
+        self.assertTrue(c.flipped)
+        self.assertLess(abs(h), 3.0)
