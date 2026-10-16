@@ -439,3 +439,51 @@ class FourImpactPatternTests(unittest.TestCase):
         r = ia.analyze_run(cols, wheelbase_mm=95, mass_g=600, bump_width_mm=250, detect_level="sensitive")
         self.assertAlmostEqual(r["speed_mps"], 0.4, delta=0.03)
         self.assertAlmostEqual(r["rear_t_s"], times[2], delta=0.01)
+
+
+class PitchTimingTests(unittest.TestCase):
+    def _cols(self, wide: bool, v=0.24, L=0.095, w=0.15, seed=4):
+        import math, random
+        rng = random.Random(seed)
+        tf = 1.5
+        tr = tf + L / v
+        fd = tf + w / v          # 앞바퀴 내려옴
+        rd = fd + L / v          # 뒷바퀴 내려옴
+        def pitch(x):            # 앞만 위 +6°, 뒤만 위 −6°, 둘 다 위/아래 0°
+            front_on = tf <= x < fd
+            rear_on = tr <= x < rd
+            return 6.0 * (front_on - rear_on)
+        t, g, gy, pv = [], [], [], 0.0
+        prev = 0.0
+        for i in range(3500):
+            x = i / 1000
+            p = sum(pitch(x - k * 0.002) for k in range(25)) / 25   # 50 ms에 걸쳐 부드럽게 기울어짐
+            gy.append((p - prev) * 1000 + rng.gauss(0, 0.3)); prev = p
+            y = 1 + rng.gauss(0, 0.05)
+            for c, a in ((tf, 1.2), (fd, 1.0), (tr, 0.9), (rd, 0.8)):
+                y += a * math.exp(-((x - c) / 0.006) ** 2)
+            y += 0.15 * math.sin(2 * math.pi * 30 * x) * (x > 1.0)
+            t.append(x); g.append(y)
+        n = len(t)
+        cols = {"t_s": t, "vertical_g": g, "dynamic_g": [0.0] * n, "ax_g": [0.0] * n, "ay_g": [0.0] * n, "az_g": [1.0] * n,
+                "gx_dps": [rng.gauss(0, 0.3) for _ in t], "gy_dps": gy, "gz_dps": [rng.gauss(0, 0.3) for _ in t]}
+        return cols, tf, tr
+
+    def test_wide_bump_speed_from_pitch(self):
+        cols, tf, tr = self._cols(wide=True, w=0.15)
+        r = ia.analyze_run(cols, wheelbase_mm=95, mass_g=600, bump_width_mm=150)
+        self.assertEqual(r["pair_source"], "pitch")
+        self.assertAlmostEqual(r["speed_mps"], 0.24, delta=0.03)
+
+    def test_narrow_bump_speed_from_pitch(self):
+        cols, tf, tr = self._cols(wide=False, w=0.03)
+        r = ia.analyze_run(cols, wheelbase_mm=95, mass_g=600, bump_width_mm=30)
+        self.assertEqual(r["pair_source"], "pitch")
+        self.assertAlmostEqual(r["speed_mps"], 0.24, delta=0.03)
+
+    def test_summary_export(self):
+        from app.main import app
+        with TestClient(app) as client:
+            r = client.get("/api/experiment/export/summary.csv")
+            self.assertEqual(r.status_code, 200)
+            self.assertIn("통과 속도", r.text)

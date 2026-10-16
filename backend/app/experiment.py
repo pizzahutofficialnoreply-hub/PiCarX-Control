@@ -1166,6 +1166,74 @@ async def export_runs():
     return _csv_response(rows, "picarx_runs.csv")
 
 
+PAIR_LABEL = {"pitch": "기울기로 찾음", "pattern": "충격 4개 규칙", "consistency": "같은 조건에 맞춰 다시 고름",
+              "manual": "직접 지정", "auto": "가장 큰 두 충격"}
+
+
+@router.get("/export/summary.csv")
+async def export_summary():
+    """보고서용 핵심 요약: 조건(PWM)별로 정렬한 회차 표 + 조건 평균. 열 이름은 쉬운 말."""
+    ctl = control()
+    settings = store.load_settings()
+    runs = ia.harmonize_pairs(runs_for_mode(ctl.adapter.mode != "hardware"))
+    bundle = analysis_bundle(runs, settings)
+    crit = bundle.get("criteria") or {}
+    head = ["방지턱", "총질량(g)", "출력", "회차", "계산에 포함", "통과 속도(m/s)", "앞·뒤 바퀴 간격(ms)", "가장 큰 충격(g)",
+            "평소보다 더(Δa, g)", "허용 기준 초과", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)", "확인할 점"]
+    rows: list[list[Any]] = [head]
+    key = lambda r: (r["condition"].get("bump_id") or "", r["condition"].get("total_mass_g") or 0,
+                     r["condition"].get("output_value") or 0, r["condition"].get("trial") or 0)
+    for r in sorted(runs, key=key):
+        c, a = r["condition"], r.get("analysis") or {}
+        lim = (crit.get(c.get("bump_id")) or {}).get("a_limit_g")
+        used = not r.get("excluded") and not r.get("aborted") and a.get("bump_detected") is not False and (c.get("purpose") or "main") == "main"
+        rows.append([c.get("bump_id"), c.get("total_mass_g"), f"{(c.get('output_mode') or 'pwm').upper()} {c.get('output_value')}", c.get("trial"),
+                     "예" if used else "아니오", a.get("speed_mps"), None if a.get("axle_dt_s") is None else round(a["axle_dt_s"] * 1000),
+                     a.get("peak_g"), a.get("peak_delta_g"),
+                     "" if lim is None or a.get("peak_g") is None else ("초과" if a["peak_g"] > lim else "이내"),
+                     "" if a.get("jump") is None else ("예" if a["jump"] else "아니오"),
+                     "방지턱 못 찾음" if a.get("bump_detected") is False else PAIR_LABEL.get(a.get("pair_source") or "", ""),
+                     a.get("sample_rate_hz"), " / ".join(a.get("flags") or [])])
+    rows.append([])
+    rows.append(["# 조건별 평균 (가장 큰 값·작은 값 1개씩 뺀 평균)"])
+    rows.append(["방지턱", "총질량(g)", "출력", "회차 수(계산에 쓴 수)", "평균 속도(m/s)", "속도 범위(m/s)", "평균 최대 충격(g)",
+                 "평균 Δa(g)", "Δa 범위(g)", "바퀴 뜬 회차"])
+    for g in bundle["groups"]:
+        rows.append([g["bump_id"], g["total_mass_g"], f"{g['output_mode'].upper()} {g['output_value']}", f"{g['n_runs']} ({g['n_used']})",
+                     g.get("mean_speed_mps"), f"{g.get('speed_min_mps')}–{g.get('speed_max_mps')}", g.get("mean_peak_g"),
+                     g.get("mean_peak_delta_g"), f"{g.get('kept_min_delta_g')}–{g.get('kept_max_delta_g')}", f"{g['jump_count']}/{g['n_runs']}"])
+    for bump_id, lines in (bundle.get("interpretation") or {}).items():
+        rows.append([])
+        rows.append([f"# 자동 해석 (방지턱 {bump_id})"])
+        rows.extend([[line] for line in lines])
+    rows = [[int(x) if isinstance(x, float) and x.is_integer() else x for x in row] for row in rows]
+    return _csv_response(rows, "picarx_summary.csv")
+
+
+@router.get("/export/raw.zip")
+async def export_raw_zip(ids: str = ""):
+    """여러 회차의 원자료 CSV를 한 ZIP으로(ids 없으면 현재 모드의 전체). 파일 이름에 방지턱·질량·출력·회차가 들어갑니다."""
+    ctl = control()
+    runs = runs_for_mode(ctl.adapter.mode != "hardware")
+    want = {x for x in ids.split(",") if x}
+    if want:
+        runs = [r for r in runs if r["id"] in want]
+    if not runs:
+        raise HTTPException(404, "내보낼 회차가 없습니다.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for r in runs:
+            path = store.csv_path(r["id"])
+            if not path.is_file():
+                continue
+            c = r["condition"]
+            name = (f"{c.get('bump_id')}_m{int(c.get('total_mass_g') or 0)}_{c.get('output_mode')}{int(c.get('output_value') or 0)}"
+                    f"_t{c.get('trial')}_{r['id']}.csv")
+            z.writestr(name, "\ufeff" + path.read_text(encoding="utf-8"))
+    return Response(content=buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="picarx_raw_runs.zip"'})
+
+
 @router.get("/export/conditions.csv")
 async def export_conditions():
     ctl = control()

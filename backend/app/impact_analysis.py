@@ -128,6 +128,69 @@ def _mean_between(t: Sequence[float], y: Sequence[float], lo: float, hi: float) 
     return sum(vals) / len(vals) if vals else None
 
 
+def pitch_axle_times(t: Sequence[float], pitch: Sequence[float] | None, wheelbase_mm: float | None,
+                     bump_width_mm: float | None, around: tuple[float, float] | None = None) -> tuple[float, float, float] | None:
+    """앞뒤 기울기(피치)로 앞바퀴·뒷바퀴가 턱에 오른 시각을 찾습니다. 반환: (앞 오름, 뒤 오름, 최대 기울기°)
+
+    앞바퀴가 턱에 오르면 앞이 들리고(+θ), 뒷바퀴가 오르면
+      · 방지턱이 축간거리보다 넓을 때: 두 바퀴가 다 위에 있어 다시 수평(0)이 되고
+      · 좁을 때: 앞바퀴는 이미 내려왔으므로 뒤가 들림(−θ)
+    오름 시각은 기울기가 최대치의 25%를 넘는(또는 내려가는) 순간으로 잡습니다. 기울기 변화가 뚜렷하지 않으면 None.
+    """
+    if pitch is None or not wheelbase_mm or len(t) < 20:
+        return None
+    rng = [i for i in range(len(pitch)) if around is None or around[0] <= t[i] <= around[1]]
+    if not rng:
+        return None
+    big = max(abs(pitch[i]) for i in rng)
+    if big < 2.5:
+        return None
+    # 먼저 나타난 큰 기울기가 앞바퀴(뒷바퀴 기울기는 반대 부호로 나중에 나옴)
+    first = next(i for i in rng if abs(pitch[i]) >= 0.5 * big)
+    sgn = 1.0 if pitch[first] > 0 else -1.0
+    p = [sgn * x for x in pitch]
+    k = first
+    while k + 1 < len(p) and p[k + 1] >= p[k] - 0.05 * big:
+        k += 1
+        if p[k] < 0.5 * big:
+            break
+    k = max(range(first, k + 1), key=lambda i: p[i])
+    theta = pitch[k]
+    lvl = 0.25 * abs(theta)
+    # 최대 기울기 직전, 기울기가 lvl을 처음 넘은 순간 = 첫 번째 바퀴(앞바퀴)가 오르는 중
+    i0 = k
+    while i0 > 0 and p[i0 - 1] >= lvl:
+        i0 -= 1
+    if i0 == 0:
+        return None
+    t_front = t[i0]
+    # 최대 이후 lvl 아래로 내려간 순간
+    i1 = k
+    while i1 < len(p) - 1 and p[i1] >= lvl:
+        i1 += 1
+    if i1 >= len(p) - 1:
+        return None
+    wide = bump_width_mm is not None and bump_width_mm >= wheelbase_mm
+    if bump_width_mm is None:
+        # 폭을 모르면: 내려온 뒤 50 ms 이상 수평에 머물면 넓은 방지턱(두 바퀴가 다 위)으로 봄
+        j = i1
+        while j < len(p) - 1 and abs(p[j]) < lvl and t[j] - t[i1] < 0.05:
+            j += 1
+        wide = t[j] - t[i1] >= 0.05
+    if wide:
+        t_rear = t[i1]
+    else:
+        j = i1
+        while j < len(p) - 1 and p[j] > -lvl and t[j] - t[i1] < 1.0:
+            j += 1
+        if p[j] > -lvl:
+            return None
+        t_rear = t[j]
+    if t_rear <= t_front:
+        return None
+    return t_front, t_rear, abs(theta)
+
+
 def pick_axle_pattern(peaks: list[Peak], wheelbase_mm: float | None, bump_width_mm: float | None,
                       t: Sequence[float] | None = None, pitch: Sequence[float] | None = None,
                       bump_height_mm: float | None = None, all_out: list | None = None) -> tuple[Peak, Peak, Peak, Peak, float] | None:
@@ -369,8 +432,30 @@ def analyze_run(
     # 1순위: 바퀴마다 오름·내림 두 충격(총 4개)이 규칙적으로 나타나는 묶음. 내림 충격은 착지처럼 보여도 포함합니다.
     pitch_all = pitch_series(columns)
     pitch = [pitch_all[i] for i in idx] if pitch_all is not None else None
+    # 0순위: 기울기(피치)로 앞·뒤 바퀴가 턱에 오른 시각을 찾고, 그 근처(±80 ms)의 가장 큰 충격 피크에 맞춥니다.
+    # 충격이 있었던 구간 근처에서만 찾습니다(주행 끝에 벽·완충재에 올라타 기운 것을 방지턱으로 착각하지 않게).
+    span = (peaks[0].t_s - 0.4, peaks[-1].t_s + 0.2) if peaks else None
+    by_pitch = pitch_axle_times(t, pitch, wheelbase_mm, bump_width_mm, span) if span else None
+    if by_pitch is not None:
+        tf, tr, th = by_pitch
+        def near(target: float) -> Peak | None:
+            close = [p for p in find_peaks(t, v, max(0.05, 2.0 * sigma), min_gap_s) if abs(p.t_s - target) <= 0.08]
+            return max(close, key=lambda p: p.value_g) if close else None
+        pf, pr = near(tf), near(tr)
+        result["pitch"] = {"front_up_t_s": round(tf, 4), "rear_up_t_s": round(tr, 4), "max_deg": round(th, 2)}
+        if pf is not None and pr is not None and pr.t_s > pf.t_s and abs((pr.t_s - pf.t_s) / (tr - tf) - 1) <= 0.25:
+            pitch_pair = (pf, pr)
+        else:
+            # 충격 피크가 애매하면 기울기 시각을 그대로 씁니다(높이는 그 시각 근처 최댓값).
+            def at(target: float) -> Peak:
+                idxs = [i for i in range(len(t)) if abs(t[i] - target) <= 0.03] or [min(range(len(t)), key=lambda i: abs(t[i] - target))]
+                i = max(idxs, key=lambda i: v[i])
+                return Peak(i, target, v[i])
+            pitch_pair = (at(tf), at(tr))
+    else:
+        pitch_pair = None
     scored: list = []
-    pattern = pick_axle_pattern(peaks, wheelbase_mm, bump_width_mm, t, pitch, bump_height_mm, scored)
+    pattern = None if pitch_pair is not None else pick_axle_pattern(peaks, wheelbase_mm, bump_width_mm, t, pitch, bump_height_mm, scored)
     if pattern is not None and scored:
         # 점수가 거의 같은데 속도가 20% 넘게 다른 다른 해석이 있으면 어느 쪽인지 확신할 수 없습니다.
         top_score = max(sc for sc, _ in scored)
@@ -385,7 +470,10 @@ def analyze_run(
                          + " / ".join(f"{x:.2f}" for x in rivals) + " m/s입니다. 영상으로 한 번 속도를 재서 확인하거나, "
                          "폭이 아주 좁은(둥근 막대) 또는 아주 넓은(25 cm 이상) 방지턱을 쓰면 구분이 확실해집니다.")
             pattern = None
-    if pattern is not None:
+    if pitch_pair is not None:
+        pair = pitch_pair
+        result["pair_source"] = "pitch"
+    elif pattern is not None:
         pa, pb, pc, pd, pv = pattern
         pair = (pa, pc)
         result["pair_source"] = "pattern"
@@ -409,7 +497,7 @@ def analyze_run(
         pair = pick_axle_pair(peaks, wheelbase_mm)
         if pair is not None:
             flags.append("착지 피크가 바퀴 피크와 겹쳐 짝에 포함했습니다 – 속도 오차 가능(영상 실측과 비교 권장).")
-    if pair is not None and result["pair_source"] != "manual":
+    if pair is not None and result["pair_source"] not in ("manual", "pitch"):
         # 방지턱이 정말 있었는지: 고른 두 피크가 나머지 진동 피크보다 뚜렷이(민감도에 따라 1.15~1.5배 이상) 커야 합니다.
         small = find_peaks(t, v, max(0.08, min(3.0, noise_k * 0.66) * sigma), min_gap_s)
         near = lambda p: any(0 <= p.t_s - q.t_s <= 0.04 or abs(p.t_s - q.t_s) < 1e-9 for q in pair)  # noqa: E731
@@ -502,7 +590,7 @@ def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[
     groups: dict[tuple, list[dict[str, Any]]] = {}
     for run in runs:
         a = run.get("analysis") or {}
-        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") in ("manual", "pattern") or not a.get("axle_dt_s"):
+        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") in ("manual", "pattern", "pitch") or not a.get("axle_dt_s"):
             continue
         groups.setdefault(group_key(run), []).append(run)
     fixed: dict[str, dict[str, Any]] = {}
