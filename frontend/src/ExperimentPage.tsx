@@ -357,6 +357,19 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       {bumpIds.length === 0 ? <div className="card empty-chart">집계할 시행이 없습니다.</div> : <>
         <div className="card experiment-card"><div className="card-head"><div><h2>방지턱 {bump} 결과</h2><p>{bumpInfo ? `h ${bumpInfo.height_mm} mm · w ${bumpInfo.width_mm} mm · R ${fmt(bumpInfo.radius_mm, 1)} mm` : ''}{rEff ? ` · R_eff ${(rEff * 1000).toFixed(1)} mm · 이론 점프 속도 v_c = ${Math.sqrt(G * rEff).toFixed(3)} m/s` : ''}</p></div>
           <div className="button-row">{bumpIds.length > 1 && <div className="segmented">{bumpIds.map(id => <button key={id} type="button" className={id === bump ? 'selected' : ''} onClick={() => setAnalysisBump(id)}>방지턱 {id}</button>)}</div>}<button className="secondary" onClick={() => download('/api/experiment/export/conditions.csv', 'picarx_conditions.csv')}><Download size={14} /> 조건별 CSV</button></div></div>
+          {!chosenModel && (() => {
+            const main = bumpRuns.filter(r => (r.condition.purpose ?? 'main') === 'main');
+            const crossed = main.filter(r => r.analysis.speed_mps != null);
+            const speeds = new Set(bumpGroups.filter(g => g.mean_speed_mps != null).map(g => `${g.output_mode}${g.output_value}·${g.total_mass_g}`));
+            const items: [boolean, string, string][] = [
+              [!!settings?.wheelbase_mm, '축간거리 입력', settings?.wheelbase_mm ? `${settings.wheelbase_mm} mm` : '차량·분석 설정에 앞·뒤 바퀴 중심 사이 거리를 자로 재서 넣으세요. 없으면 속도를 못 구합니다.'],
+              [crossed.length > 0, '방지턱을 넘은 회차', crossed.length ? `${crossed.length}회 (전체 ${main.length}회 중)` : `0회 (전체 ${main.length}회 중) – 방지턱이 있는 주행로에서 측정해야 합니다. 평지 주행은 '방지턱 못 찾음'으로 빠집니다.`],
+              [speeds.size >= 2, '서로 다른 속도 조건 2개 이상', `${speeds.size}개 – PWM을 2단계 이상(좋기로는 4단계: 예 40·55·70·85) 바꿔 측정하세요.`],
+            ];
+            return <div className="exp-why"><b>그래프와 관계식(n)이 아직 비어 있는 이유</b>
+              <ul>{items.map(([ok, name, text]) => <li key={name} className={ok ? 'ok' : 'no'}><span>{ok ? '✔' : '✘'}</span><b>{name}</b> {text}</li>)}</ul>
+              <small>속도(m/s)는 "1초에 몇 m 가는 빠르기"입니다. 앞바퀴와 뒷바퀴가 방지턱에 차례로 부딪힌 시간 차이로 계산하므로, 방지턱을 넘어야만 생깁니다.</small></div>;
+          })()}
           <SpeedImpactChart runs={bumpRuns.filter(r => (r.condition.purpose ?? 'main') === 'main')} groups={bumpGroups} fit={fit} model={chosenModel} aLimit={aLimit} title={`그래프 1. 통과 속도와 최대 수직 가속도 (방지턱 ${bump})`} name={`graph1_speed_impact_${bump}`} />
           <div className="exp-fit">
             <div><small>선택한 관계식{settings?.model_id && settings.model_id !== 'auto' ? ' (직접 선택)' : ' (자동: 교차검증 오차 최소)'}</small><b>{chosenModel ? `${chosenModel.name}: ${chosenModel.formula}` : '—'}</b>

@@ -326,3 +326,8 @@ button:focus-visible,input:focus-visible{outline:2px solid #727873;outline-offse
 .exp-preset select{font-size:11px;max-width:100%;padding:5px 7px}
 .exp-warnline{display:flex;gap:6px;align-items:flex-start;color:#9a6f1e}
 .exp-steps{margin:6px 0 10px;padding-left:20px;display:grid;gap:7px;font-size:12px;line-height:1.6}.exp-steps i{font-style:normal;font-weight:600}
+.exp-why{margin:10px 0;padding:12px 14px;border:1px solid #b88b3688;border-radius:9px;background:#b88b3612;font-size:12px}
+.exp-why ul{list-style:none;margin:8px 0;padding:0;display:grid;gap:5px}
+.exp-why li{display:flex;gap:6px;line-height:1.5}.exp-why li span{width:16px;flex:none;font-weight:700}
+.exp-why li.ok span{color:#2d7a4a}.exp-why li.no span{color:#c62828}
+.exp-why small{color:var(--muted)}
