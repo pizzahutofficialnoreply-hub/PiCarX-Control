@@ -88,7 +88,7 @@ export function Figure({ name, caption, tools, children }: { name: string; capti
 
 /* ------------------------------------------------------------------ 시행 원자료 */
 export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, name, showCandidates = false, aLimit = null }: {
-  series: { t_s: number[]; vertical_g: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string;
+  series: { t_s: number[]; vertical_g: number[]; filtered_g?: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string;
   showCandidates?: boolean; aLimit?: number | null;
 }) {
   const hasPair = analysis.front_t_s != null && analysis.rear_t_s != null;
@@ -99,11 +99,15 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
     const idx = series.t_s.map((t, i) => i).filter(i => series.t_s[i] >= lo && series.t_s[i] <= hi);
     return { lo, hi, idx };
   }, [series, zoom, hasPair, analysis.front_t_s, analysis.rear_t_s]);
-  const values = view.idx.map(i => series.vertical_g[i]);
+  const main = series.filtered_g && series.filtered_g.length === series.t_s.length ? series.filtered_g : series.vertical_g;
+  const filtered = main !== series.vertical_g;
+  const values = view.idx.map(i => main[i]);
   const y = niceRange([...values, 0, 1 + thresholdDelta, 2, ...(aLimit ? [aLimit] : [])], 0.06, true);
   const x: [number, number] = [view.lo, view.hi];
   const { sx, sy } = scales(x, y);
-  const path = view.idx.map((i, n) => `${n ? 'L' : 'M'}${sx(series.t_s[i]).toFixed(1)},${sy(Math.max(y[0], Math.min(y[1], series.vertical_g[i]))).toFixed(1)}`).join('');
+  const toPath = (arr: number[]) => view.idx.map((i, n) => `${n ? 'L' : 'M'}${sx(series.t_s[i]).toFixed(1)},${sy(Math.max(y[0], Math.min(y[1], arr[i]))).toFixed(1)}`).join('');
+  const path = toPath(main);
+  const rawPath = filtered ? toPath(series.vertical_g) : '';
   const overColor = '#c62828';
   const marker = (t: number | null, g: number | null, label: string, color: string) => {
     if (t == null || g == null || t < x[0] || t > x[1]) return null;
@@ -115,7 +119,7 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
   };
   const cands = (analysis.candidates ?? []).map((c, i) => ({ ...c, n: i + 1 }));
   return <Figure name={name} tools={<div className="segmented"><button type="button" className={zoom === 'bump' ? 'selected' : ''} disabled={!hasPair} onClick={() => setZoom('bump')}>방지턱 부분 확대</button><button type="button" className={zoom === 'all' ? 'selected' : ''} onClick={() => setZoom('all')}>전체 기록</button></div>}
-    caption={<>파란 선 = 차체가 위아래로 받은 가속도(가만히 있으면 1 g). 주황 ● 앞바퀴, 초록 ● 뒷바퀴가 방지턱에 닿은 순간이고, 두 점 사이 시간으로 속도를 계산합니다.{aLimit ? ' 빨간 선 위로 올라가면 허용 기준을 넘은 충격입니다.' : ''}</>}>
+    caption={<>파란 선 = 차체가 위아래로 받은 가속도(가만히 있으면 1 g){filtered ? ', 진동을 거른 값 · 연한 회색 = 거르기 전 원래 기록' : ''}. 주황 ● 앞바퀴, 초록 ● 뒷바퀴가 방지턱에 닿은 순간이고, 두 점 사이 시간으로 속도를 계산합니다.{aLimit ? ' 빨간 선 위로 올라가면 허용 기준을 넘은 충격입니다.' : ''}</>}>
     {ref => <svg ref={ref} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title}>
       <Axes x={x} y={y} xLabel="시간 (초)" yLabel="위아래 가속도 (g)" title={title} />
       {aLimit != null && aLimit <= y[1] && <><rect x={M.l} y={M.t} width={PW} height={Math.max(0, sy(aLimit) - M.t)} fill={overColor} opacity={0.06} />
@@ -126,7 +130,8 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
       {showCandidates && <><line x1={M.l} x2={M.l + PW} y1={sy(1 + thresholdDelta)} y2={sy(1 + thresholdDelta)} stroke="#d0a12a" strokeDasharray="2 4" />
         <text x={M.l + PW - 4} y={sy(1 + thresholdDelta) + 13} fontSize={10} textAnchor="end" fill="#a77f12" fontFamily={FONT} {...HALO}>이 선 위의 봉우리만 후보 ({(1 + thresholdDelta).toFixed(2)} g)</text></>}
       {y[0] <= jumpG && <><line x1={M.l} x2={M.l + PW} y1={sy(jumpG)} y2={sy(jumpG)} stroke="#8a939c" strokeDasharray="2 4" /><text x={M.l + PW - 4} y={sy(jumpG) + 13} fontSize={10} textAnchor="end" fill={MUTED} fontFamily={FONT} {...HALO}>이 아래면 바퀴가 뜬 것 ({jumpG} g)</text></>}
-      <path d={path} fill="none" stroke="#2f6fb0" strokeWidth={1.4} strokeLinejoin="round" />
+      {filtered && <path d={rawPath} fill="none" stroke="#9aa3ad" strokeWidth={0.8} opacity={0.55} />}
+      <path d={path} fill="none" stroke="#2f6fb0" strokeWidth={filtered ? 1.8 : 1.4} strokeLinejoin="round" />
       {showCandidates && cands.map(c => c.t_s < x[0] || c.t_s > x[1] ? null :
         <g key={'cand' + c.n} fontFamily={FONT}><line x1={sx(c.t_s)} x2={sx(c.t_s)} y1={M.t + 18} y2={M.t + PH} stroke="#6a737d" strokeDasharray="1 3" />
           <rect x={sx(c.t_s) - 22} y={M.t + 2} width={44} height={15} rx={4} fill="#fff" stroke="#6a737d" /><text x={sx(c.t_s)} y={M.t + 13} fontSize={10} textAnchor="middle" fill={INK} fontWeight={600}>후보 {c.n}</text></g>)}

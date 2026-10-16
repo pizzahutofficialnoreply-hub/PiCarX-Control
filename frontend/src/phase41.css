@@ -331,3 +331,14 @@ button:focus-visible,input:focus-visible{outline:2px solid #727873;outline-offse
 .exp-why li{display:flex;gap:6px;line-height:1.5}.exp-why li span{width:16px;flex:none;font-weight:700}
 .exp-why li.ok span{color:#2d7a4a}.exp-why li.no span{color:#c62828}
 .exp-why small{color:var(--muted)}
+.exp-options{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:flex-end;padding:12px 14px;margin-bottom:10px}
+.exp-options label{display:grid;gap:5px;font-size:10px;color:var(--muted)}
+.exp-options select{font-size:11px;padding:6px 8px;max-width:100%}
+.exp-options .exp-hint{flex-basis:100%;margin:0}
+.exp-explain h3{margin:0 0 6px;font-size:15px}.exp-explain h4{margin:14px 0 6px;font-size:13px}
+.exp-explain .exp-formula{font-size:12px;margin:0 0 4px}
+.exp-explain dl{display:grid;gap:7px;margin:8px 0}
+.exp-explain dl>div{display:grid;grid-template-columns:minmax(150px,200px) minmax(0,1fr);gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface2)}
+.exp-explain dt{display:grid;gap:3px;font-size:11px;color:var(--muted)}.exp-explain dt b{font-size:16px;color:var(--text);font-variant-numeric:tabular-nums}
+.exp-explain dd{margin:0;font-size:12px;line-height:1.6}
+@media(max-width:650px){.exp-explain dl>div{grid-template-columns:1fr}}

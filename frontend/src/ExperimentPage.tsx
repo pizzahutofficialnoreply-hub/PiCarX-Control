@@ -8,6 +8,7 @@ import {
 } from './services/experiment';
 import { PiChart, SpeedImpactChart, XYChart } from './components/ExperimentCharts';
 import RunViewer, { limitFor } from './experiment/RunViewer';
+import ModelExplain from './experiment/ModelExplain';
 import ValidationTab from './experiment/ValidationTab';
 import LineTab from './experiment/LineTab';
 import ToolsTab from './experiment/ToolsTab';
@@ -183,6 +184,17 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       await loadRuns();
     } catch (e) { fail(e); }
   }
+  const [reanalyzing, setReanalyzing] = useState(false);
+  /** 진동 거르기·감지 민감도를 바꾸면 저장된 원자료로 모든 시행을 바로 다시 분석합니다. */
+  async function applyAnalysisOption(patch: Partial<ExperimentSettings>) {
+    setReanalyzing(true); setError('');
+    try {
+      await patchSettings(patch);
+      const r = await request('/api/experiment/reanalyze', { method: 'POST', timeoutMs: 120000 });
+      await loadRuns();
+      setMessage(`분석 옵션을 바꾸고 ${r.reanalyzed}개 시행을 다시 분석했습니다.`);
+    } catch (e) { fail(e); } finally { setReanalyzing(false); }
+  }
   async function saveManualRecording() {
     setError('');
     try {
@@ -345,6 +357,13 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     </section>}
 
     <section className="experiment-runs"><div className="section-subhead"><h2>시행 결과</h2><p>한 번 넘을 때마다 1회차가 기록됩니다. ◀ ▶(키보드 ← →)로 한 회씩 넘겨 보거나 '모두 겹쳐 보기'로 여러 회차를 한 그래프에서 비교하세요. 빨간색은 허용 기준을 넘은 충격입니다.</p></div>
+      <div className="card exp-options">
+        <label>진동 거르기<select value={settings?.filter_hz ?? 0} disabled={reanalyzing || busy} onChange={e => void applyAnalysisOption({ filter_hz: Number(e.target.value) })}>
+          <option value={0}>끔 (원래 기록 그대로)</option><option value={30}>약하게 (30 Hz)</option><option value={20}>보통 (20 Hz, 추천)</option><option value={15}>강하게 (15 Hz)</option><option value={10}>아주 강하게 (10 Hz)</option></select></label>
+        <label>방지턱 감지 민감도<select value={settings?.detect_level ?? 'normal'} disabled={reanalyzing || busy} onChange={e => void applyAnalysisOption({ detect_level: e.target.value as ExperimentSettings['detect_level'] })}>
+          <option value="strict">엄격 – 확실한 충격만 (평지 오검출 거의 없음)</option><option value="normal">보통 (기본)</option><option value="sensitive">민감 – 작은 방지턱·느린 속도도 잡기</option></select></label>
+        <p className="exp-hint">{reanalyzing ? '모든 시행을 다시 분석하는 중…' : <>바꾸면 저장된 기록 전체를 바로 다시 분석합니다(측정을 다시 할 필요 없음). <b>진동 거르기</b>는 차체가 빠르게 출렁이는 떨림을 지워 방지턱 충격을 잘 보이게 하지만 최대값도 조금 작아지므로, 보고서에는 같은 설정으로 분석한 값끼리 비교하세요. <b>민감</b>으로 하면 작은 충격도 잡지만, 평지에서 진동을 방지턱으로 착각할 수 있으니 겹쳐 보기로 확인하세요.</>}</p>
+      </div>
       <RunViewer runs={runs} selectedId={selectedId} setSelectedId={setSelectedId} detail={detail} settings={settings ?? DEFAULT_SETTINGS} data={data} request={request} download={download} patchRun={patchRun} toggleExcluded={toggleExcluded} deleteRun={deleteRun} />
 
       <article className="card experiment-card"><div className="card-head"><div><h2>시행 목록 ({runs.length})</h2><p>최신 순. 회색 줄은 계산에서 뺀 회차, 빨간 줄은 허용 기준을 넘은 회차입니다. '방지턱 못 찾음'은 평지처럼 뚜렷한 충격이 없어 자동으로 계산에서 빠진 회차입니다.</p></div><div className="button-row"><button className="secondary" disabled={!checked.size || busy} onClick={() => void deleteChecked()}><Trash2 size={14} /> 선택 삭제 ({checked.size})</button><button className="secondary" disabled={!runs.length} onClick={() => download('/api/experiment/export/runs.csv', 'picarx_runs.csv')}><Download size={14} /> 시행 CSV</button></div></div>
@@ -391,6 +410,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
           <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>총질량</th><th>출력</th><th>시행 (계산에 쓴 수)</th><th>평균 속도 (m/s)</th><th>평균 최대 충격 (g)</th><th>평균 '평소보다 더' (g)</th><th>쓴 값 범위</th><th>뺀 값(최대·최소)</th><th>충격력 (N)</th><th>Π</th><th>바퀴 뜸</th></tr></thead>
             <tbody>{bumpGroups.map(g => <tr key={`${g.total_mass_g}-${g.output_mode}-${g.output_value}`} className={aLimit != null && g.mean_peak_g != null && g.mean_peak_g > aLimit ? 'over' : ''}><td>{g.total_mass_g} g</td><td>{outputLabel(g.output_mode, g.output_value)}</td><td>{g.n_runs} ({g.n_used})</td><td>{fmt(g.mean_speed_mps, 3)}</td><td>{fmt(g.mean_peak_g, 3)}{aLimit != null && g.mean_peak_g != null && g.mean_peak_g > aLimit && <span className="exp-over">초과</span>}</td><td>{fmt(g.mean_peak_delta_g, 3)}</td><td>{g.kept_min_delta_g.toFixed(2)}–{g.kept_max_delta_g.toFixed(2)}</td><td>{g.dropped_delta_g.map(v => v.toFixed(2)).join(', ') || '—'}</td><td>{fmt(g.mean_force_n, 2)}</td><td>{fmt(g.mean_pi, 2)}</td><td>{g.jump_count}/{g.n_runs}</td></tr>)}</tbody></table></div>
         </div>
+        {chosenModel && comparison && <div className="card experiment-card"><ModelExplain model={chosenModel} comparison={comparison} aLimit={aLimit} vmax={vmaxChosen} /></div>}
         {comparison && comparison.models.length > 0 && <div className="card experiment-card"><div className="card-head"><div><h2>관계식 후보 비교</h2><p>식은 하나로 정해져 있지 않습니다. 같은 조건 평균 {comparison.points}개에 여러 식을 맞춰 비교합니다. <b>교차검증 RMSE</b>(한 점씩 빼고 맞춘 식이 그 점을 얼마나 틀리는지)가 작을수록 새 데이터를 잘 맞히는 식입니다. R²는 매개변수가 많을수록 커지므로 그것만으로 고르지 마세요.</p></div>
           <div className="segmented"><button type="button" className={(settings?.model_id ?? 'auto') === 'auto' ? 'selected' : ''} onClick={() => void patchSettings({ model_id: 'auto' })}>자동 선택</button></div></div>
           <div className="experiment-table-wrap"><table className="experiment-table exp-models"><thead><tr><th>사용</th><th>식</th><th>매개변수 (95% 신뢰구간)</th><th>R²</th><th>RMSE (g)</th><th>교차검증 RMSE (g)</th><th>AIC</th></tr></thead>

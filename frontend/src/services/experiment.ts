@@ -12,6 +12,8 @@ export type ExperimentSettings = {
   threshold_delta_g: number;
   min_gap_s: number;
   jump_g: number;
+  filter_hz?: number;
+  detect_level?: 'strict' | 'normal' | 'sensitive';
   a_limit_mode: 'manual' | 'first_jump';
   a_limit_g: number | null;
   a_limit_preset?: string;
@@ -45,7 +47,7 @@ export type ExperimentSettings = {
 
 /** 서버 설정을 받지 못했을 때(이전 버전 백엔드 등) 화면이 동작하도록 쓰는 기본값 */
 export const DEFAULT_SETTINGS: ExperimentSettings = {
-  wheelbase_mm: null, wheel_radius_mm: null, base_mass_g: null, threshold_delta_g: 0.3, min_gap_s: 0.03, jump_g: 0.2,
+  wheelbase_mm: null, wheel_radius_mm: null, base_mass_g: null, threshold_delta_g: 0.3, min_gap_s: 0.03, jump_g: 0.2, filter_hz: 0, detect_level: 'normal',
   a_limit_mode: 'manual', a_limit_g: 1.7, a_limit_preset: 'trl614', a_limit_effective_g: 1.7, pre_roll_s: 1.0, run_seconds: 2.5, tail_s: 0.6,
   repeats: 5, return_enabled: true, return_output: null, return_scale: 1.0, rest_s: 1.5, heading_hold: true, heading_gain: 1.2, heading_ki: 0.8, heading_learn: true, heading_ff_forward: 0, heading_ff_backward: 0,
   steering_source: 'gyro', kick_ms: 0, model_id: 'auto', plan_added_masses: [0, 150, 300], plan_outputs: [40, 55, 70, 85, 100], plan_repeats: 5,
@@ -94,7 +96,7 @@ export type RunSummary = {
   steer_mean_late?: number | null; heading_ff_learned?: number | null;
 };
 
-export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[] }; drive_log?: [number, number, number, number | null][] | null };
+export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[]; filtered_g?: number[] }; drive_log?: [number, number, number, number | null][] | null };
 
 export type ConditionGroup = {
   bump_id: string; total_mass_g: number; output_mode: OutputMode; output_value: number;

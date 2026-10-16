@@ -107,6 +107,50 @@ def airborne_segments(t: Sequence[float], v: Sequence[float], jump_g: float, min
     return segments
 
 
+DETECT_LEVELS: dict[str, tuple[float, float, float]] = {
+    # 이름: (진동 σ의 몇 배부터 피크로 보나, 바퀴 피크가 다른 진동보다 몇 배 커야 방지턱으로 인정하나,
+    #        '최소 충격' 설정값에 곱할 배율)
+    "strict": (6.0, 1.5, 1.0),
+    "normal": (4.5, 1.3, 1.0),
+    "sensitive": (3.5, 1.15, 0.6),
+}
+
+
+def lowpass(t: Sequence[float], v: Sequence[float], cutoff_hz: float) -> list[float]:
+    """2차 버터워스 저역 통과 필터를 앞뒤로 한 번씩 적용(위상 지연 없음).
+
+    차체·센서가 출렁이는 빠른 진동(수십 Hz)을 줄이고, 방지턱 충격처럼 수십 ms 동안 이어지는
+    변화는 남깁니다. 필터를 쓰면 피크 값이 조금 작아지므로 같은 설정으로 측정한 값끼리 비교하세요.
+    """
+    n = min(len(t), len(v))
+    if not cutoff_hz or n < 8 or t[n - 1] <= t[0]:
+        return list(v[:n])
+    fs = (n - 1) / (t[n - 1] - t[0])
+    if cutoff_hz >= fs / 2.2:
+        return list(v[:n])
+    import math as _m
+    k = _m.tan(_m.pi * cutoff_hz / fs)
+    q = _m.sqrt(2.0)
+    norm = 1.0 / (1.0 + q * k + k * k)
+    b0 = k * k * norm
+    b1, b2 = 2.0 * b0, b0
+    a1 = 2.0 * (k * k - 1.0) * norm
+    a2 = (1.0 - q * k + k * k) * norm
+
+    def run(x: list[float]) -> list[float]:
+        y = [0.0] * len(x)
+        x1 = x2 = x[0]
+        y1 = y2 = x[0]
+        for i, xi in enumerate(x):
+            yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2, x1, y2, y1 = x1, xi, y1, yi
+            y[i] = yi
+        return y
+
+    fwd = run(list(v[:n]))
+    return run(fwd[::-1])[::-1]
+
+
 def _robust_sigma(values: list[float]) -> float:
     """중앙값 절대편차(MAD)로 구한 표준편차. 큰 피크 몇 개에 흔들리지 않습니다."""
     if not values:
@@ -144,6 +188,8 @@ def analyze_run(
     jump_g: float = 0.2,
     window: tuple[float | None, float | None] = (None, None),
     override: dict[str, float] | None = None,
+    filter_hz: float = 0.0,
+    detect_level: str = "normal",
 ) -> dict[str, Any]:
     """한 시행 분석.
 
@@ -154,6 +200,9 @@ def analyze_run(
     """
     t_all = list(columns.get("t_s") or [])
     v_all = list(columns.get("vertical_g") or [])
+    if filter_hz:
+        v_all = lowpass(t_all, v_all, filter_hz)
+    noise_k, standout_min, floor_scale = DETECT_LEVELS.get(detect_level, DETECT_LEVELS["normal"])
     dyn_all = list(columns.get("dynamic_g") or [])
     n = min(len(t_all), len(v_all))
     lo, hi = window
@@ -175,7 +224,8 @@ def analyze_run(
         "peak_count": 0, "flags": flags, "candidates": [], "pair_source": None,
         "bump_detected": None, "noise_sigma_g": None, "threshold_used_g": None, "standout_ratio": None,
         "params": {"threshold_delta_g": threshold_delta_g, "min_gap_s": min_gap_s, "jump_g": jump_g,
-                   "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius},
+                   "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius,
+                   "filter_hz": filter_hz, "detect_level": detect_level},
     }
     if len(v) < 3:
         flags.append("표본이 너무 적습니다.")
@@ -188,10 +238,13 @@ def analyze_run(
     if v[k] >= 7.5:
         flags.append("±8 g 범위 포화 가능성이 있습니다.")
 
-    # 주행 진동의 크기(σ)를 중앙값 기반으로 재고, 피크 기준을 max(설정값, 6σ)로 올립니다.
+    # 주행 진동의 크기(σ)를 중앙값 기반으로 재고, 피크 기준을 max(설정값, k·σ)로 올립니다(k는 감지 민감도).
     # 바닥이 거칠거나 모터 진동이 큰 날에도 진동을 바퀴 피크로 착각하지 않게 하려는 것입니다.
     sigma = _robust_sigma([x - 1.0 for x in v])
-    threshold_used = max(threshold_delta_g, 6.0 * sigma)
+    # 진동을 거르면 충격 봉우리도 조금 낮아지므로 고정 최소값을 절반으로 낮춥니다(진동 기준 k·σ는 그대로 지켜 줌).
+    if filter_hz:
+        floor_scale *= 0.5
+    threshold_used = max(threshold_delta_g * floor_scale, noise_k * sigma)
     result.update(noise_sigma_g=round(sigma, 4), threshold_used_g=round(threshold_used, 4))
     peaks = find_peaks(t, v, threshold_used, min_gap_s)
     result["peak_count"] = len(peaks)
@@ -222,8 +275,8 @@ def analyze_run(
         if pair is not None:
             flags.append("착지 피크가 바퀴 피크와 겹쳐 짝에 포함했습니다 – 속도 오차 가능(영상 실측과 비교 권장).")
     if pair is not None and result["pair_source"] != "manual":
-        # 방지턱이 정말 있었는지: 고른 두 피크가 나머지 진동 피크보다 뚜렷이(1.5배 이상) 커야 합니다.
-        small = find_peaks(t, v, max(0.08, 3.0 * sigma), min_gap_s)
+        # 방지턱이 정말 있었는지: 고른 두 피크가 나머지 진동 피크보다 뚜렷이(민감도에 따라 1.15~1.5배 이상) 커야 합니다.
+        small = find_peaks(t, v, max(0.08, min(3.0, noise_k * 0.66) * sigma), min_gap_s)
         near = lambda p: any(0 <= p.t_s - q.t_s <= 0.04 or abs(p.t_s - q.t_s) < 1e-9 for q in pair)  # noqa: E731
         others = [p.value_g - 1.0 for p in small if not near(p) and p not in landing
                   and not any(abs(p.t_s - q.t_s) < 1e-9 for q in landing)]
@@ -231,7 +284,7 @@ def analyze_run(
         if others:
             ratio = weakest / max(others) if max(others) > 0 else None
             result["standout_ratio"] = None if ratio is None else round(ratio, 2)
-            if ratio is not None and ratio < 1.5:
+            if ratio is not None and ratio < standout_min:
                 flags.append(f"방지턱 통과가 확인되지 않았습니다: 고른 두 피크({weakest:.2f} g)가 다른 진동({max(others):.2f} g)보다 뚜렷하지 않습니다. "
                              "평지 주행이었거나 충격이 너무 작으면 이렇게 됩니다. 이 시행은 집계에서 빠집니다.")
                 pair = None

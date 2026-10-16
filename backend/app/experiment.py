@@ -72,6 +72,8 @@ class ExperimentSettings(BaseModel):
     threshold_delta_g: float = Field(default=0.3, ge=0.02, le=6)
     min_gap_s: float = Field(default=0.03, ge=0.005, le=1)
     jump_g: float = Field(default=0.2, ge=0, le=0.9)
+    filter_hz: float = Field(default=0, ge=0, le=100, description="진동 거르기(저역 통과) 기준 주파수 Hz, 0이면 끔")
+    detect_level: Literal["strict", "normal", "sensitive"] = Field(default="normal", description="방지턱 감지 민감도")
     a_limit_mode: Literal["manual", "first_jump"] = Field(default="manual", description="manual: 직접 입력, first_jump: 점프가 처음 나타난 조건의 평균 최대 가속도")
     a_limit_preset: Literal["trl614", "watts1973", "kjemtrup04", "kjemtrup02", "custom"] = Field(
         default="trl614", description="허용 기준 출처(선행 연구). custom이면 a_limit_g를 직접 씀")
@@ -332,6 +334,8 @@ def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings:
         jump_g=settings.jump_g,
         window=window,
         override=run.get("peak_override"),
+        filter_hz=settings.filter_hz,
+        detect_level=settings.detect_level,
     )
 
 
@@ -839,6 +843,7 @@ async def list_runs():
 async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points: int = 400):
     """여러 시행을 앞바퀴 피크(없으면 최대 피크) 시각에 맞춰 겹쳐 보기 위한 시계열."""
     out = []
+    hz = store.load_settings().filter_hz
     for run_id in [x for x in ids.split(",") if x][:60]:
         try:
             run = store.get(run_id)
@@ -849,8 +854,9 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
         t0 = a.get("front_t_s") if a.get("front_t_s") is not None else a.get("peak_t_s")
         if t0 is None:
             continue
+        g = ia.lowpass(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
         idx = [i for i, t in enumerate(cols["t_s"]) if t0 - before <= t <= t0 + after]
-        sub = {"t_s": [round(cols["t_s"][i] - t0, 4) for i in idx], "vertical_g": [cols["vertical_g"][i] for i in idx]}
+        sub = {"t_s": [round(cols["t_s"][i] - t0, 4) for i in idx], "vertical_g": [g[i] for i in idx]}
         sub = ia.decimate_columns(sub, max(100, min(1500, points)))
         out.append({"id": run_id, "condition": run["condition"], "aligned_on": "front" if a.get("front_t_s") is not None else "peak",
                     "rear_t_s": None if a.get("rear_t_s") is None or a.get("front_t_s") is None else round(a["rear_t_s"] - a["front_t_s"], 4),
@@ -863,7 +869,11 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
 async def get_run(run_id: str, points: int = 1500):
     run = store.get(run_id)
     cols = await asyncio.to_thread(store.read_columns, run_id)
-    series = ia.decimate_columns({k: cols[k] for k in ("t_s", "vertical_g", "dynamic_g")}, max(200, min(5000, points)))
+    base = {k: cols[k] for k in ("t_s", "vertical_g", "dynamic_g")}
+    hz = store.load_settings().filter_hz
+    if hz:
+        base["filtered_g"] = ia.lowpass(cols["t_s"], cols["vertical_g"], hz)
+    series = ia.decimate_columns(base, max(200, min(5000, points)))
     return {**run_summary(run), "series": series, "drive_log": run.get("drive_log")}
 
 

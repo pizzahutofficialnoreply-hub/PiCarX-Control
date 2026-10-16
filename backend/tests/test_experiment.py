@@ -44,6 +44,43 @@ class FlatGroundTests(unittest.TestCase):
         self.assertGreater(res["standout_ratio"] or 99, 1.5)
 
 
+def _vibrating(bump: bool, amp: float = 0.8, seed: int = 1):
+    """차체가 28 Hz로 ±0.3 g 출렁이는 주행(사용자 기록과 비슷) + 선택적으로 방지턱 두 피크(0.5 m/s)."""
+    import math, random
+    rng = random.Random(seed)
+    t, v = [], []
+    for i in range(2500):
+        x = i / 1000
+        g = 1 + 0.3 * math.sin(2 * math.pi * 28 * x + rng.random() * 0.3) + rng.gauss(0, 0.06)
+        if bump:
+            for c in (1.2, 1.2 + 0.095 / 0.5):
+                g += amp * math.exp(-((x - c) / 0.012) ** 2)
+        t.append(x); v.append(g)
+    return {"t_s": t, "vertical_g": v, "dynamic_g": [0.0] * len(v)}
+
+
+class FilterAndSensitivityTests(unittest.TestCase):
+    def test_filter_reduces_vibration_and_finds_bump(self):
+        raw = ia.analyze_run(_vibrating(True), wheelbase_mm=95, mass_g=650)
+        self.assertFalse(raw["bump_detected"])            # 진동에 묻힘
+        res = ia.analyze_run(_vibrating(True), wheelbase_mm=95, mass_g=650, filter_hz=20)
+        self.assertTrue(res["bump_detected"])
+        self.assertAlmostEqual(res["speed_mps"], 0.5, delta=0.05)
+        self.assertLess(res["noise_sigma_g"], raw["noise_sigma_g"] / 3)
+
+    def test_flat_stays_rejected_with_filter_and_sensitive(self):
+        for hz in (0, 15, 20, 30):
+            for level in ("strict", "normal", "sensitive"):
+                res = ia.analyze_run(_vibrating(False), wheelbase_mm=95, mass_g=650, filter_hz=hz, detect_level=level)
+                self.assertFalse(res["bump_detected"], (hz, level))
+
+    def test_sensitive_finds_smaller_bump(self):
+        normal = ia.analyze_run(_vibrating(True, amp=0.25), wheelbase_mm=95, mass_g=650, filter_hz=15, detect_level="normal")
+        sens = ia.analyze_run(_vibrating(True, amp=0.25), wheelbase_mm=95, mass_g=650, filter_hz=15, detect_level="sensitive")
+        self.assertFalse(normal["bump_detected"])
+        self.assertTrue(sens["bump_detected"])
+
+
 class AnalysisTests(unittest.TestCase):
     def test_bump_radius_formula(self):
         self.assertAlmostEqual(ia.bump_radius_mm(10, 60), 50.0)
