@@ -90,6 +90,109 @@ def pick_axle_pair(peaks: list[Peak], wheelbase_mm: float | None) -> tuple[Peak,
     return best[1] if best else None
 
 
+def pitch_series(columns: dict[str, Sequence[float]], still_s: float = 0.5) -> list[float] | None:
+    """자이로로 앞뒤 기울기(피치, °)를 적분합니다. 처음 정지 구간 평균을 영점으로 씁니다.
+
+    수직축은 정지 상태에서 가속도가 가장 큰 축, 피치축은 남은 두 축 중 주행 중 회전이 더 큰 축입니다.
+    부호(앞이 들릴 때 +인지 −인지)는 센서 장착 방향에 따라 다르므로 쓰는 쪽에서 맞춥니다.
+    """
+    t = list(columns.get("t_s") or [])
+    axes = ["gx_dps", "gy_dps", "gz_dps"]
+    if len(t) < 50 or not all(columns.get(k) for k in axes + ["ax_g", "ay_g", "az_g"]):
+        return None
+    still = [i for i, x in enumerate(t) if x - t[0] <= still_s]
+    if len(still) < 10:
+        return None
+    acc = [abs(sum(columns[k][i] for i in still) / len(still)) for k in ("ax_g", "ay_g", "az_g")]
+    vert = max(range(3), key=lambda i: acc[i])
+    def bias(k: str) -> float:
+        return sum(columns[k][i] for i in still) / len(still)
+    cands = [axes[i] for i in range(3) if i != vert]
+    def spread(k: str) -> float:
+        b = bias(k)
+        return sum((g - b) ** 2 for g in columns[k])
+    k = max(cands, key=spread)
+    b = bias(k)
+    g = columns[k]
+    out, p = [0.0], 0.0
+    for i in range(1, len(t)):
+        p += (g[i] - b) * (t[i] - t[i - 1])
+        out.append(p)
+    return out
+
+
+def _mean_between(t: Sequence[float], y: Sequence[float], lo: float, hi: float) -> float | None:
+    """구간 가운데 60%의 평균(충격 순간의 튐을 피함)."""
+    a, b = lo + 0.2 * (hi - lo), hi - 0.2 * (hi - lo)
+    vals = [y[i] for i in range(len(t)) if a <= t[i] <= b]
+    return sum(vals) / len(vals) if vals else None
+
+
+def pick_axle_pattern(peaks: list[Peak], wheelbase_mm: float | None, bump_width_mm: float | None,
+                      t: Sequence[float] | None = None, pitch: Sequence[float] | None = None,
+                      bump_height_mm: float | None = None, all_out: list | None = None) -> tuple[Peak, Peak, Peak, Peak, float] | None:
+    """방지턱 폭이 있으면 바퀴마다 '올라갈 때'와 '내려올 때' 두 번 충격이 납니다(총 4개).
+
+    앞바퀴 오름(a) → 앞바퀴 내림(b) → 뒷바퀴 오름(c) → 뒷바퀴 내림(d) (폭이 축간거리보다 크면 b와 c 순서가 바뀜)
+    두 바퀴는 같은 방지턱을 같은 속도로 지나므로
+      · 앞 오름→뒤 오름(c−a) ≈ 앞 내림→뒤 내림(d−b) = L / v
+      · 앞 오름→앞 내림(b−a) ≈ 뒤 오름→뒤 내림(d−c) = (방지턱을 지나는 거리) / v
+    이 규칙을 만족하는 4개 묶음 중 충격 합이 가장 큰 것을 고릅니다. 반환: (a, b, c, d, 속도)
+    """
+    if not wheelbase_mm or len(peaks) < 4:
+        return None
+    L = wheelbase_mm / 1000.0
+    top = sorted(sorted(peaks, key=lambda p: p.value_g, reverse=True)[:10], key=lambda p: p.t_s)
+    best: tuple[float, tuple[Peak, Peak, Peak, Peak, float]] | None = None
+    n = len(top)
+    for ia_ in range(n):
+        a = top[ia_]
+        for ic in range(ia_ + 1, n):
+            c = top[ic]
+            d1 = c.t_s - a.t_s
+            v = L / d1 if d1 > 0 else 0
+            if not (MIN_SPEED_MPS <= v <= MAX_SPEED_MPS):
+                continue
+            for ib in range(ia_ + 1, n):
+                if ib == ic:
+                    continue
+                b = top[ib]
+                # 방지턱 폭이 축간거리보다 좁으면 앞바퀴가 내려온 뒤 뒷바퀴가 올라가고(b < c), 넓으면 반대(c < b)입니다.
+                if bump_width_mm and wheelbase_mm and ((bump_width_mm < wheelbase_mm) != (b.t_s < c.t_s)):
+                    continue
+                s1 = b.t_s - a.t_s
+                for idd in range(max(ib, ic) + 1, n):
+                    d = top[idd]
+                    d2, s2 = d.t_s - b.t_s, d.t_s - c.t_s
+                    if s2 <= 0 or abs(d1 - d2) > 0.15 * max(d1, d2) or abs(s1 - s2) > 0.35 * max(s1, s2):
+                        continue
+                    span = (d1 + d2) / 2
+                    speed = L / span
+                    if bump_width_mm:
+                        w_est = speed * (s1 + s2) / 2 * 1000.0
+                        if not (0.4 * bump_width_mm <= w_est <= 2.5 * bump_width_mm):
+                            continue
+                    mismatch = abs(d1 - d2) / span + abs(s1 - s2) / max(s1, s2)
+                    score = a.value_g + b.value_g + c.value_g + d.value_g - 2.0 * mismatch
+                    if pitch is not None and t is not None and bump_height_mm:
+                        # 앞바퀴만 턱 위 → 앞이 들림(+θ), 뒷바퀴만 턱 위 → 뒤가 들림(−θ), 두 바퀴 다 평지 → 0
+                        theta = math.degrees(math.asin(min(1.0, bump_height_mm / wheelbase_mm)))
+                        p1 = _mean_between(t, pitch, a.t_s, b.t_s)
+                        p2 = _mean_between(t, pitch, c.t_s, d.t_s)
+                        if p1 is not None and p2 is not None:
+                            sgn = 1.0 if p1 >= 0 else -1.0
+                            err = abs(sgn * p1 - theta) + abs(sgn * p2 + theta)
+                            if b.t_s < c.t_s:
+                                p0 = _mean_between(t, pitch, b.t_s, c.t_s)
+                                err += abs(p0) if p0 is not None else 0.0
+                            score -= 0.3 * err
+                    if all_out is not None:
+                        all_out.append((score, speed))
+                    if best is None or score > best[0]:
+                        best = (score, (a, b, c, d, speed))
+    return best[1] if best else None
+
+
 def airborne_segments(t: Sequence[float], v: Sequence[float], jump_g: float, min_duration_s: float = 0.005) -> list[tuple[float, float, float]]:
     """수직 가속도가 jump_g 미만으로 유지된 구간(공중에 뜬 구간) 목록: (시작, 끝, 최솟값)."""
     segments: list[tuple[float, float, float]] = []
@@ -190,6 +293,8 @@ def analyze_run(
     override: dict[str, float] | None = None,
     filter_hz: float = 0.0,
     detect_level: str = "normal",
+    bump_width_mm: float | None = None,
+    bump_height_mm: float | None = None,
 ) -> dict[str, Any]:
     """한 시행 분석.
 
@@ -261,8 +366,38 @@ def analyze_run(
         {"t_s": round(p.t_s, 4), "g": round(p.value_g, 4), "landing": p in landing}
         for p in sorted(sorted(peaks, key=lambda p: p.value_g, reverse=True)[:12], key=lambda p: p.t_s)
     ]
-    pair = pick_axle_pair([p for p in peaks if p not in landing], wheelbase_mm)
-    result["pair_source"] = "auto" if pair else None
+    # 1순위: 바퀴마다 오름·내림 두 충격(총 4개)이 규칙적으로 나타나는 묶음. 내림 충격은 착지처럼 보여도 포함합니다.
+    pitch_all = pitch_series(columns)
+    pitch = [pitch_all[i] for i in idx] if pitch_all is not None else None
+    scored: list = []
+    pattern = pick_axle_pattern(peaks, wheelbase_mm, bump_width_mm, t, pitch, bump_height_mm, scored)
+    if pattern is not None and scored:
+        # 점수가 거의 같은데 속도가 20% 넘게 다른 다른 해석이 있으면 어느 쪽인지 확신할 수 없습니다.
+        top_score = max(sc for sc, _ in scored)
+        close = sorted(sp for sc, sp in scored if top_score - sc <= 0.6)
+        rivals: list[float] = []
+        for sp in close:  # 10% 안쪽으로 비슷한 속도는 하나로 묶음
+            if not rivals or sp > rivals[-1] * 1.1:
+                rivals.append(round(sp, 2))
+        if len(rivals) > 1:
+            result["speed_candidates_mps"] = rivals
+            flags.append("앞·뒤 바퀴 구분이 애매합니다: 충격 4개(바퀴마다 오름·내림)를 두 가지로 해석할 수 있어 속도 후보가 "
+                         + " / ".join(f"{x:.2f}" for x in rivals) + " m/s입니다. 영상으로 한 번 속도를 재서 확인하거나, "
+                         "폭이 아주 좁은(둥근 막대) 또는 아주 넓은(25 cm 이상) 방지턱을 쓰면 구분이 확실해집니다.")
+            pattern = None
+    if pattern is not None:
+        pa, pb, pc, pd, pv = pattern
+        pair = (pa, pc)
+        result["pair_source"] = "pattern"
+        result["pattern"] = {"front_up_t_s": round(pa.t_s, 4), "front_down_t_s": round(pb.t_s, 4),
+                             "rear_up_t_s": round(pc.t_s, 4), "rear_down_t_s": round(pd.t_s, 4),
+                             "speed_mps": round(pv, 4),
+                             "bump_pass_s": round(((pb.t_s - pa.t_s) + (pd.t_s - pc.t_s)) / 2, 4)}
+        landing = [p for p in landing if p not in (pa, pb, pc, pd)]
+        result["landing_t_s"] = result["landing_g"] = None
+    else:
+        pair = pick_axle_pair([p for p in peaks if p not in landing], wheelbase_mm)
+        result["pair_source"] = "auto" if pair else None
     if override and override.get("front_t_s") is not None and override.get("rear_t_s") is not None:
         manual = _manual_pair(t, v, float(override["front_t_s"]), float(override["rear_t_s"]))
         if manual:
@@ -306,7 +441,10 @@ def analyze_run(
         result.update(front_t_s=round(a.t_s, 4), front_g=round(a.value_g, 4),
                       rear_t_s=round(b.t_s, 4), rear_g=round(b.value_g, 4), axle_dt_s=round(dt, 4))
         if wheelbase_mm:
-            result["speed_mps"] = round((wheelbase_mm / 1000.0) / dt, 4)
+            if result["pair_source"] == "pattern" and result.get("pattern"):
+                result["speed_mps"] = result["pattern"]["speed_mps"]  # 앞·뒤 오름 간격과 내림 간격의 평균으로 계산
+            else:
+                result["speed_mps"] = round((wheelbase_mm / 1000.0) / dt, 4)
         else:
             flags.append("축간거리가 없어 속도를 계산하지 않았습니다(설정에서 입력).")
     # 지면 이탈 판정: 첫 피크 직전 ~ 마지막 피크 이후 구간의 최솟값과 공중 구간 유무
@@ -364,7 +502,7 @@ def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[
     groups: dict[tuple, list[dict[str, Any]]] = {}
     for run in runs:
         a = run.get("analysis") or {}
-        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") == "manual" or not a.get("axle_dt_s"):
+        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") in ("manual", "pattern") or not a.get("axle_dt_s"):
             continue
         groups.setdefault(group_key(run), []).append(run)
     fixed: dict[str, dict[str, Any]] = {}

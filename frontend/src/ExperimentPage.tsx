@@ -253,7 +253,11 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const comparison = data?.models?.[bump];
   const chosenId = data?.chosen_models?.[bump] ?? null;
   const chosenModel = comparison?.models.find(m => m.id === chosenId) ?? null;
-  const vmaxChosen = aLimit && chosenModel ? modelSolveSpeed(chosenModel, aLimit - 1, vmaxMass / 1000) : null;
+  const minSpeed = Math.min(...bumpGroups.map(g => g.mean_speed_mps ?? Infinity));
+  const vmaxRaw = aLimit && chosenModel ? modelSolveSpeed(chosenModel, aLimit - 1, vmaxMass / 1000) : null;
+  // 측정한 가장 느린 속도의 절반보다 낮으면 식을 범위 밖으로 늘린 값이라 보여 주지 않습니다.
+  const vmaxBelow = vmaxRaw != null && Number.isFinite(minSpeed) && vmaxRaw < 0.5 * minSpeed;
+  const vmaxChosen = vmaxBelow ? null : vmaxRaw;
   const interpretation = data?.interpretation?.[bump] ?? [];
   const progress = data?.progress;
   const ctx: ExperimentContext = {
@@ -403,8 +407,8 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
               {settings?.a_limit_mode !== 'first_jump' && settings?.a_limit_preset === 'custom' && <div className="exp-inline"><label>기준 (g, 가만히 있을 때 1 g 포함)<input type="number" min={1.05} max={8} step={0.1} value={draft?.a_limit_g ?? ''} placeholder="1.7" onChange={e => setDraft(d => ({ ...(d ?? DEFAULT_SETTINGS), a_limit_g: e.target.value === '' ? null : Number(e.target.value) }))} /></label><button type="button" className="secondary" onClick={() => void applyCriterion({ a_limit_mode: 'manual', a_limit_preset: 'custom', a_limit_g: draft?.a_limit_g ?? 1.7 })}>적용</button></div>}
               <b>{aLimit ? `${aLimit.toFixed(2)} g (평소보다 +${(aLimit - 1).toFixed(2)} g 더)` : '기준 없음'}</b>
               <span>{criterion?.source ?? '측정 후 계산됩니다.'}</span>
-              {criterion && criterion.vmax_by_mass.length > 0 && <table className="exp-mini"><thead><tr><th>질량</th><th>v_max</th></tr></thead><tbody>{criterion.vmax_by_mass.map(v => <tr key={v.mass_g}><td>{v.mass_g.toLocaleString()} g</td><td>{fmt(v.vmax_mps, 3, 'm/s')}</td></tr>)}</tbody></table>}
-              <div className="exp-inline"><label>다른 질량 (g)<input type="number" min={1} value={calcMass === '' ? vmaxMass : calcMass} onChange={e => setCalcMass(e.target.value === '' ? '' : Number(e.target.value))} /></label><b>{vmaxChosen == null ? '—' : `${vmaxChosen.toFixed(3)} m/s`}</b></div>
+              {criterion && criterion.vmax_by_mass.length > 0 && <table className="exp-mini"><thead><tr><th>질량</th><th>v_max</th></tr></thead><tbody>{criterion.vmax_by_mass.map(v => <tr key={v.mass_g}><td>{v.mass_g.toLocaleString()} g</td><td>{(v as { note?: string | null }).note ?? fmt(v.vmax_mps, 3, 'm/s')}</td></tr>)}</tbody></table>}
+              <div className="exp-inline"><label>다른 질량 (g)<input type="number" min={1} value={calcMass === '' ? vmaxMass : calcMass} onChange={e => setCalcMass(e.target.value === '' ? '' : Number(e.target.value))} /></label><b>{vmaxBelow ? '가장 느린 측정 속도에서도 이미 기준 초과' : vmaxChosen == null ? '—' : `${vmaxChosen.toFixed(3)} m/s`}</b></div>
               <span>v_max = 이 속도보다 빠르면 기준을 넘는다고 예측되는 속도(선택한 관계식으로 계산){criterion?.critical_speed_mps ? ` · 이론 점프 속도 v_c = ${criterion.critical_speed_mps.toFixed(3)} m/s` : ''}. 검증: 실험하지 않은 질량을 넣고 그 속도 근처에서 다시 측정해 오차율을 구하세요.</span></div>
           </div>
           <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>총질량</th><th>출력</th><th>시행 (계산에 쓴 수)</th><th>평균 속도 (m/s)</th><th>평균 최대 충격 (g)</th><th>평균 '평소보다 더' (g)</th><th>쓴 값 범위</th><th>뺀 값(최대·최소)</th><th>충격력 (N)</th><th>Π</th><th>바퀴 뜸</th></tr></thead>

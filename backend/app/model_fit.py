@@ -345,7 +345,7 @@ def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, 
         top = max(g["mean_speed_mps"] for g in mine)
         lines.append(f"측정한 최고 속도 {top:.3f} m/s까지 점프는 없었다(이론 임계 속도 v_c = {vc:.3f} m/s).")
     if criterion and criterion.get("a_limit_g"):
-        rows = [f"{v['mass_g']:g} g → {_f(v['vmax_mps'])} m/s" for v in criterion.get("vmax_by_mass", [])]
+        rows = [f"{v['mass_g']:g} g → " + (v["note"] if v.get("note") else f"{_f(v['vmax_mps'])} m/s") for v in criterion.get("vmax_by_mass", [])]
         if rows:
             lines.append(f"허용 최대 수직 가속도 {criterion['a_limit_g']:.2f} g를 넘지 않는 최대 통과 속도는 " + ", ".join(rows) + "이다.")
     if comparison.get("note"):

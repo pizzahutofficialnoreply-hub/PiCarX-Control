@@ -410,3 +410,32 @@ class HeadingControllerTests(unittest.TestCase):
         h, c = self._sim(-1)
         self.assertTrue(c.flipped)
         self.assertLess(abs(h), 3.0)
+
+
+class FourImpactPatternTests(unittest.TestCase):
+    def _run(self, v=0.3, L=0.095, w=0.06, amps=(1.5, 1.2, 1.3, 1.0), noise=0.03, seed=2):
+        import math, random
+        rng = random.Random(seed)
+        t0 = 1.2
+        times = [t0, t0 + w / v, t0 + L / v, t0 + (L + w) / v]
+        t, g = [], []
+        for i in range(3000):
+            x = i / 1000
+            y = 1 + rng.gauss(0, noise)
+            for c, a in zip(times, amps):
+                y += a * math.exp(-((x - c) / 0.006) ** 2)
+            t.append(x); g.append(y)
+        return {"t_s": t, "vertical_g": g, "dynamic_g": [0.0] * len(t)}, times
+
+    def test_narrow_bump_four_impacts_gives_true_speed(self):
+        cols, times = self._run(v=0.3, w=0.03)
+        r = ia.analyze_run(cols, wheelbase_mm=95, mass_g=600, bump_width_mm=30, detect_level="sensitive")
+        self.assertEqual(r["pair_source"], "pattern")
+        self.assertAlmostEqual(r["speed_mps"], 0.3, delta=0.02)
+        self.assertAlmostEqual(r["rear_t_s"], times[2], delta=0.01)
+
+    def test_wide_bump_rear_climbs_before_front_descends(self):
+        cols, times = self._run(v=0.4, w=0.25)
+        r = ia.analyze_run(cols, wheelbase_mm=95, mass_g=600, bump_width_mm=250, detect_level="sensitive")
+        self.assertAlmostEqual(r["speed_mps"], 0.4, delta=0.03)
+        self.assertAlmostEqual(r["rear_t_s"], times[2], delta=0.01)

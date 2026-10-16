@@ -15,6 +15,8 @@ class CameraService:
         self._started = False
         self._available: Optional[bool] = None
         self._error: Optional[str] = None
+        # 가속도 측정 중에는 영상 압축이 CPU를 차지해 센서 표본이 빠지므로 스트림을 잠시 멈춥니다.
+        self.paused = False
 
     def start(self) -> bool:
         """Start the camera if it is available."""
@@ -94,6 +96,9 @@ class CameraService:
     def stream(self) -> Generator[bytes, None, None]:
         """Generate an MJPEG stream."""
         while True:
+            if self.paused:
+                time.sleep(0.2)
+                continue
             frame = self.capture_jpeg()
 
             if frame is None:

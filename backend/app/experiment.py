@@ -329,6 +329,8 @@ def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings:
         wheelbase_mm=settings.wheelbase_mm,
         mass_g=run["condition"].get("total_mass_g"),
         bump_radius=bump.get("radius_mm"),
+        bump_width_mm=bump.get("width_mm"),
+        bump_height_mm=bump.get("height_mm"),
         wheel_radius_mm=settings.wheel_radius_mm,
         threshold_delta_g=settings.threshold_delta_g,
         min_gap_s=settings.min_gap_s,
@@ -403,8 +405,14 @@ def criterion_for(bump_id: str, groups: list[dict[str, Any]], model: dict[str, A
         else:
             out["source"] = "아직 점프한 조건이 없어 기준을 정할 수 없습니다(직접 입력으로 바꾸거나 더 빠른 조건을 측정)."
     if out["a_limit_g"]:
+        speeds = [g["mean_speed_mps"] for g in mine if g.get("mean_speed_mps")]
+        lo = min(speeds) if speeds else None
         for mass in sorted({g["total_mass_g"] for g in mine}):
-            out["vmax_by_mass"].append({"mass_g": mass, "vmax_mps": mf.solve_speed(model, out["a_limit_g"] - 1.0, mass / 1000.0)})
+            v = mf.solve_speed(model, out["a_limit_g"] - 1.0, mass / 1000.0)
+            # 측정한 가장 느린 속도의 절반보다 낮게 나오면 식을 측정 범위 밖으로 늘려 쓴 값이라 의미가 없습니다.
+            below = v is not None and lo is not None and v < 0.5 * lo
+            out["vmax_by_mass"].append({"mass_g": mass, "vmax_mps": None if below else v,
+                                        "note": f"측정한 가장 느린 속도({lo:.2f} m/s)에서도 이미 기준을 넘음" if below else None})
     return out
 
 
@@ -693,6 +701,8 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     run["steering_source"] = opts["steering_source"]
     run["kick_ms"] = opts["kick_ms"]
     if not simulated:
+        from .camera import camera_service
+        camera_service.paused = True
         status = await asyncio.to_thread(mpu6050_service.start_recording)
         if status.get("error") or not status.get("recording"):
             raise RuntimeError(status.get("error") or "MPU-6050 기록을 시작하지 못했습니다.")
@@ -736,6 +746,7 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                 "vertical_axis": "z", "vertical_sign": 1.0, "calibration_stability_g": None}
     else:
         await asyncio.to_thread(mpu6050_service.stop_recording)
+        camera_service.paused = False
         meta = await asyncio.to_thread(mpu6050_service.recording_columns)
         columns = meta.pop("columns")
         if not columns["t_s"]:
@@ -827,6 +838,8 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
         record_event("experiment", "Auto run failed", level="ERROR", details={"error": str(exc)})
     finally:
         mpu6050_service.heading_stop()
+        from .camera import camera_service
+        camera_service.paused = False
 
 
 # --------------------------------------------------------------------------- 라우터
