@@ -42,6 +42,7 @@ export type ExperimentSettings = {
   plan_added_masses?: number[];
   plan_outputs?: number[];
   plan_repeats?: number;
+  plan_bumps?: string[] | null;
   line?: LineSettings;
   bumps: BumpProfile[];
   max_output?: number;

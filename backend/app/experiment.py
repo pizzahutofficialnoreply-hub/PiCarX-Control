@@ -102,6 +102,7 @@ class ExperimentSettings(BaseModel):
     plan_added_masses: list[float] = Field(default_factory=lambda: [0.0, 150.0, 300.0])
     plan_outputs: list[float] = Field(default_factory=lambda: [40.0, 55.0, 70.0, 85.0, 100.0])
     plan_repeats: int = Field(default=5, ge=1, le=20)
+    plan_bumps: list[str] | None = Field(default=None, description="진행표에 넣을 방지턱 ID(비우면 전체)")
     line: LineSettings = Field(default_factory=LineSettings)
     bumps: list[BumpProfile] = Field(default_factory=lambda: [
         BumpProfile(id="A", name="A형 (완만)", height_mm=10, width_mm=60),
@@ -461,7 +462,8 @@ def plan_progress(runs: list[dict[str, Any]], settings: ExperimentSettings) -> d
         key = (c.get("bump_id"), round(float(c.get("added_mass_g") or 0)), c.get("output_mode"), round(float(c.get("output_value") or 0)))
         done[key] = done.get(key, 0) + 1
     cells = []
-    for b in settings.bumps:
+    chosen = [b for b in settings.bumps if not settings.plan_bumps or b.id in settings.plan_bumps] or list(settings.bumps)
+    for b in chosen:
         for mass in settings.plan_added_masses:
             for out in settings.plan_outputs:
                 n = sum(v for (bid, m, _mode, o), v in done.items() if bid == b.id and m == round(mass) and o == round(out))
