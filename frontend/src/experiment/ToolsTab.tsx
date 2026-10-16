@@ -1,5 +1,5 @@
 // 점검·데이터: 실제 데이터 입력 확인, 배터리, 전·후진 대칭 점검과 출력 보정, 백업·초기화·휴지통, 측정 전 점검표
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Battery, CheckCircle2, Download, Play, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 import { fmt, outputLabel, type OutputMode } from '../services/experiment';
 import { XYChart } from '../components/ExperimentCharts';
@@ -64,6 +64,33 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
   async function startSym() {
     try { setSym({ ...(await ctx.request('/api/experiment/tools/symmetry', { method: 'POST', body: JSON.stringify({ output_mode: symMode, output_value: symOut, seconds: symSec }) })), result: null }); } catch (e) { ctx.fail(e); }
   }
+  const [tune, setTune] = useState<{ running: boolean; log: string[] }>({ running: false, log: [] });
+  const tuneStop = useRef(false);
+  /** 점검 → 제안 배율 적용 → 다시 점검을 비율이 0.95~1.05가 될 때까지(최대 4번) 반복합니다. */
+  async function autoTune() {
+    tuneStop.current = false;
+    const log: string[] = [];
+    const push = (t: string) => { log.push(t); setTune({ running: true, log: [...log] }); };
+    setTune({ running: true, log: [] });
+    try {
+      for (let i = 1; i <= 4 && !tuneStop.current; i++) {
+        push(`${i}번째 점검 중… (차가 앞뒤로 움직입니다)`);
+        await ctx.request('/api/experiment/tools/symmetry', { method: 'POST', body: JSON.stringify({ output_mode: symMode, output_value: symOut, seconds: symSec }) });
+        let st: { state: string; message: string; result: SymResult | null };
+        do { await new Promise(res => window.setTimeout(res, 400)); st = await ctx.request('/api/experiment/tools/symmetry'); } while (st.state === 'running' && !tuneStop.current);
+        setSym(st);
+        const ratio = st.result?.ratio_backward_to_forward;
+        if (st.state !== 'done' || !ratio) { push(`멈춤: ${st.message || '결과 없음'}`); break; }
+        if (ratio >= 0.95 && ratio <= 1.05) { push(`${i}번째: 후진/전진 = ${ratio.toFixed(2)} → 5% 이내, 맞춤 완료!`); break; }
+        const sug = st.result?.suggestion;
+        if (!sug || (!sug.trim_backward && !sug.trim_forward)) { push(`${i}번째: 비율 ${ratio.toFixed(2)}, 제안 배율 없음`); break; }
+        await saveDrive({ ...(sug.trim_backward ? { trim_backward: sug.trim_backward } : {}), ...(sug.trim_forward ? { trim_forward: sug.trim_forward } : {}) });
+        push(`${i}번째: 후진/전진 = ${ratio.toFixed(2)} → ${sug.trim_backward ? `후진 배율 ${sug.trim_backward}` : `전진 배율 ${sug.trim_forward}`}로 바꾸고 다시 점검`);
+        if (i === 4) push('4번 해도 5% 안에 들지 않았습니다. 줄자로 거리를 재서 아래 칸으로 맞춰 보세요.');
+        await new Promise(res => window.setTimeout(res, 1500));
+      }
+    } catch (e) { ctx.fail(e); } finally { setTune(t => ({ ...t, running: false })); await refresh(); }
+  }
   async function reset() {
     try { const r = await ctx.request('/api/experiment/reset', { method: 'POST', body: JSON.stringify({ scope, confirm }) }); setConfirm(''); ctx.setMessage(`시행 ${r.moved}개를 휴지통(${r.batch})으로 옮겼습니다. 아래에서 되돌릴 수 있습니다.`); await ctx.loadRuns(null); await refresh(); } catch (e) { ctx.fail(e); }
   }
@@ -104,7 +131,10 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
         <label>출력값<input type="number" min={1} max={100} value={symOut} onChange={e => setSymOut(Math.max(1, Math.min(100, Number(e.target.value) || 60)))} /></label>
         <label>방향별 주행 시간 (s)<input type="number" min={0.3} max={3} step={0.1} value={symSec} onChange={e => setSymSec(Math.max(0.3, Math.min(3, Number(e.target.value) || 1)))} /></label>
       </div>
-      <div className="button-row"><button className="primary" disabled={!ctx.serverAvailable || ctx.busy || sym?.state === 'running'} onClick={() => void startSym()}><Play size={15} /> 대칭 점검 시작</button>{sym && sym.state !== 'idle' && <span className="exp-hint">{sym.message}</span>}</div>
+      <div className="button-row"><button className="primary" disabled={!ctx.serverAvailable || ctx.busy || sym?.state === 'running'} onClick={() => void startSym()}><Play size={15} /> 대칭 점검 한 번</button>
+        <button className="secondary" disabled={!ctx.serverAvailable || ctx.busy || sym?.state === 'running' || tune.running} onClick={() => void autoTune()}>자동으로 맞추기 (최대 4번 왕복)</button>
+        {tune.running && <button className="secondary" onClick={() => { tuneStop.current = true; void ctx.stopNow(); }}>그만</button>}{sym && sym.state !== 'idle' && <span className="exp-hint">{sym.message}</span>}</div>
+      {tune.log.length > 0 && <ol className="exp-tune-log">{tune.log.map((t, i) => <li key={i}>{t}</li>)}</ol>}
       {r && <>
         {r.note && <p className="exp-hint">{r.note}</p>}
         <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>방향</th><th>요청</th><th>적용 (배율)</th><th>예상 듀티</th><th>핀 듀티 L / R</th><th>방향 핀</th></tr></thead><tbody>{cmdRow('전진', r.commands.forward)}{cmdRow('후진', r.commands.backward)}</tbody></table></div>

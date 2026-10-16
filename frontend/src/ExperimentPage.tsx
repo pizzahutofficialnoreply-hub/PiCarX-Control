@@ -6,7 +6,8 @@ import {
   bumpRadiusMm, DEFAULT_SETTINGS, effectiveDuty, fmt, G, modelPredict, modelSolveSpeed, outputLabel, paramText, PURPOSE_LABEL, readCondition, writeCondition, type Purpose,
   type AutoRunState, type BumpProfile, type ExperimentCondition, type ExperimentSettings, type RunDetail, type RunsResponse,
 } from './services/experiment';
-import { PiChart, RunTraceChart, SpeedImpactChart, XYChart } from './components/ExperimentCharts';
+import { PiChart, SpeedImpactChart, XYChart } from './components/ExperimentCharts';
+import RunViewer, { limitFor } from './experiment/RunViewer';
 import ValidationTab from './experiment/ValidationTab';
 import LineTab from './experiment/LineTab';
 import ToolsTab from './experiment/ToolsTab';
@@ -50,7 +51,6 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const [tab, setTabState] = useState<SubTab>(readSubTab);
   const setTab = (t: SubTab) => { setTabState(t); try { localStorage.setItem('picarx-exp-subtab', t); } catch { /* 무시 */ } };
   const [checked, setChecked] = useState<Set<string>>(new Set());
-  const [pick, setPick] = useState<{ front?: number; rear?: number }>({});
   const [copied, setCopied] = useState(false);
   const seenRuns = useRef(0);
   const pollRef = useRef<number>();
@@ -175,8 +175,9 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     const next = { ...(settings ?? DEFAULT_SETTINGS), ...patch };
     setDraft(d => ({ ...(d ?? next), ...patch }));
     try {
-      const body = { ...next, bumps: next.bumps.map(({ id, name, height_mm, width_mm }) => ({ id, name, height_mm, width_mm })) };
-      delete (body as Partial<ExperimentSettings>).max_output;
+      const body = { ...next, bumps: next.bumps.map(({ id, name, height_mm, width_mm }) => ({ id, name, height_mm, width_mm })) } as Partial<ExperimentSettings>;
+      delete body.max_output; delete body.a_limit_presets;
+      if (!('heading_ff_forward' in patch)) { delete body.heading_ff_forward; delete body.heading_ff_backward; }
       const saved = { ...DEFAULT_SETTINGS, ...(await request('/api/experiment/settings', { method: 'PUT', body: JSON.stringify(body) }) as ExperimentSettings) };
       setSettings(saved);
       await loadRuns();
@@ -195,8 +196,8 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     if (!draft) return;
     setSavingSettings(true); setError('');
     try {
-      const body = { ...draft, bumps: draft.bumps.map(({ id, name, height_mm, width_mm }) => ({ id, name, height_mm, width_mm })) };
-      delete (body as Partial<ExperimentSettings>).max_output;
+      const body = { ...draft, bumps: draft.bumps.map(({ id, name, height_mm, width_mm }) => ({ id, name, height_mm, width_mm })) } as Partial<ExperimentSettings>;
+      delete body.max_output; delete body.heading_ff_forward; delete body.heading_ff_backward; delete body.a_limit_presets;
       const s = await request('/api/experiment/settings', { method: 'PUT', body: JSON.stringify(body) }) as ExperimentSettings;
       setSettings(s); setDraft(s);
       if (reanalyze) {
@@ -219,7 +220,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     try { const r = await request('/api/experiment/runs/delete', { method: 'POST', body: JSON.stringify({ ids }) }); setChecked(new Set()); setMessage(`${r.deleted.length}개 시행을 삭제했습니다.`); await loadRuns(null); } catch (e) { fail(e); }
   }
   async function patchRun(id: string, body: Record<string, unknown>, note?: string) {
-    try { await request(`/api/experiment/runs/${id}`, { method: 'PATCH', body: JSON.stringify(body), timeoutMs: 15000 }); setPick({}); if (note) setMessage(note); await loadRuns(id); } catch (e) { fail(e); }
+    try { await request(`/api/experiment/runs/${id}`, { method: 'PATCH', body: JSON.stringify(body), timeoutMs: 15000 }); if (note) setMessage(note); await loadRuns(id); } catch (e) { fail(e); }
   }
   const download = (path: string, name: string) => { apiDownload(path, name).catch(fail); };
   const updateBump = (index: number, patch: Partial<BumpProfile>) => setDraft(d => d ? { ...d, bumps: d.bumps.map((b, i) => i === index ? { ...b, ...patch } : b) } : d);
@@ -237,14 +238,11 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const vmaxMass = calcMass === '' ? (masses[0] ?? totalMass) : calcMass;
   const bumpInfo = settings?.bumps.find(b => b.id === bump);
   const rEff = bumpInfo?.radius_mm && settings?.wheel_radius_mm ? (bumpInfo.radius_mm + settings.wheel_radius_mm) / 1000 : null;
-  const selected = runs.find(r => r.id === selectedId) ?? null;
   const comparison = data?.models?.[bump];
   const chosenId = data?.chosen_models?.[bump] ?? null;
   const chosenModel = comparison?.models.find(m => m.id === chosenId) ?? null;
   const vmaxChosen = aLimit && chosenModel ? modelSolveSpeed(chosenModel, aLimit - 1, vmaxMass / 1000) : null;
   const interpretation = data?.interpretation?.[bump] ?? [];
-  const selectedGroup = selected ? (data?.groups ?? []).find(g => g.run_ids.includes(selected.id)) : undefined;
-  const speedOff = selected?.analysis.speed_mps && selectedGroup?.mean_speed_mps ? (selected.analysis.speed_mps - selectedGroup.mean_speed_mps) / selectedGroup.mean_speed_mps : null;
   const progress = data?.progress;
   const ctx: ExperimentContext = {
     request, data, settings: settings ?? DEFAULT_SETTINGS, loadRuns, condition, setCondition, startAutoRun, auto, busy, serverAvailable,
@@ -314,15 +312,19 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
             <label>축간거리 L (mm)<input type="number" min={10} value={draft.wheelbase_mm ?? ''} placeholder="앞·뒤 바퀴 중심 거리" onChange={e => setDraft({ ...draft, wheelbase_mm: e.target.value === '' ? null : Number(e.target.value) })} /></label>
             <label>바퀴 반지름 r (mm)<input type="number" min={5} value={draft.wheel_radius_mm ?? ''} onChange={e => setDraft({ ...draft, wheel_radius_mm: e.target.value === '' ? null : Number(e.target.value) })} /></label>
             <label>기본 질량 기본값 (g)<input type="number" min={1} value={draft.base_mass_g ?? ''} onChange={e => setDraft({ ...draft, base_mass_g: e.target.value === '' ? null : Number(e.target.value) })} /></label>
-            <label>직진 보정 배율 (조향°/방향 오차°)<input type="number" min={0} max={5} step={0.1} value={draft.heading_gain} onChange={e => setDraft({ ...draft, heading_gain: Math.max(0, Number(e.target.value) || 0) })} /></label>
-            <label>피크 검출 기준 Δa (g)<input type="number" min={0.02} step={0.05} value={draft.threshold_delta_g} onChange={e => setDraft({ ...draft, threshold_delta_g: Number(e.target.value) || 0.3 })} /></label>
-            <label>피크 최소 간격 (s)<input type="number" min={0.005} step={0.005} value={draft.min_gap_s} onChange={e => setDraft({ ...draft, min_gap_s: Number(e.target.value) || 0.03 })} /></label>
-            <label>지면 이탈 기준 (g)<input type="number" min={0} max={0.9} step={0.05} value={draft.jump_g} onChange={e => setDraft({ ...draft, jump_g: Number(e.target.value) })} /></label>
-            <label>정지 기록 / 주행 / 정지 후 (s)<div className="exp-inline"><input type="number" min={0.3} step={0.1} value={draft.pre_roll_s} onChange={e => setDraft({ ...draft, pre_roll_s: Number(e.target.value) || 1 })} /><input type="number" min={0.3} max={6} step={0.1} value={draft.run_seconds} onChange={e => setDraft({ ...draft, run_seconds: Number(e.target.value) || 2.5 })} /><input type="number" min={0.1} step={0.1} value={draft.tail_s} onChange={e => setDraft({ ...draft, tail_s: Number(e.target.value) || 0.6 })} /></div></label>
+            <label>직진 보정 세기 (기울어진 만큼 핸들을 얼마나 꺾나)<input type="number" min={0} max={5} step={0.1} value={draft.heading_gain} onChange={e => setDraft({ ...draft, heading_gain: Math.max(0, Number(e.target.value) || 0) })} /></label>
+            <label>쌓인 오차 보정 (계속 한쪽으로 휘면 올리기)<input type="number" min={0} max={5} step={0.1} value={draft.heading_ki ?? 0.8} onChange={e => setDraft({ ...draft, heading_ki: Math.max(0, Number(e.target.value) || 0) })} /></label>
+            <label>방지턱 후보로 볼 최소 충격 (g, 평소보다 이만큼 더)<input type="number" min={0.02} step={0.05} value={draft.threshold_delta_g} onChange={e => setDraft({ ...draft, threshold_delta_g: Number(e.target.value) || 0.3 })} /></label>
+            <label>앞·뒤 바퀴 충격 사이 최소 시간 (s)<input type="number" min={0.005} step={0.005} value={draft.min_gap_s} onChange={e => setDraft({ ...draft, min_gap_s: Number(e.target.value) || 0.03 })} /></label>
+            <label>바퀴가 떴다고 볼 기준 (g, 이보다 작으면)<input type="number" min={0} max={0.9} step={0.05} value={draft.jump_g} onChange={e => setDraft({ ...draft, jump_g: Number(e.target.value) })} /></label>
+            <label>출발 전 기록 / 주행 / 멈춘 뒤 기록 (초)<div className="exp-inline"><input type="number" min={0.3} step={0.1} value={draft.pre_roll_s} onChange={e => setDraft({ ...draft, pre_roll_s: Number(e.target.value) || 1 })} /><input type="number" min={0.3} max={6} step={0.1} value={draft.run_seconds} onChange={e => setDraft({ ...draft, run_seconds: Number(e.target.value) || 2.5 })} /><input type="number" min={0.1} step={0.1} value={draft.tail_s} onChange={e => setDraft({ ...draft, tail_s: Number(e.target.value) || 0.6 })} /></div></label>
           </div>
           <div className="exp-bumps"><div className="exp-bumps-head"><b>방지턱 형상</b><button type="button" className="text-button" disabled={draft.bumps.length >= 4} onClick={() => setDraft({ ...draft, bumps: [...draft.bumps, { id: String.fromCharCode(65 + draft.bumps.length), name: '', height_mm: 10, width_mm: 40 }] })}>+ 추가</button></div>
             {draft.bumps.map((b, i) => <div className="exp-bump-row" key={i}><input aria-label="ID" value={b.id} maxLength={12} onChange={e => updateBump(i, { id: e.target.value.replace(/[^A-Za-z0-9_-]/g, '') })} /><input aria-label="이름" value={b.name} placeholder="이름" onChange={e => updateBump(i, { name: e.target.value })} /><label>h<input type="number" min={1} value={b.height_mm ?? ''} onChange={e => updateBump(i, { height_mm: Number(e.target.value) || null })} /></label><label>w<input type="number" min={1} value={b.width_mm ?? ''} onChange={e => updateBump(i, { width_mm: Number(e.target.value) || null })} /></label><span>R {fmt(bumpRadiusMm(b.height_mm, b.width_mm), 1)} mm</span><button type="button" className="text-button" disabled={draft.bumps.length <= 1} onClick={() => setDraft({ ...draft, bumps: draft.bumps.filter((_, n) => n !== i) })}>삭제</button></div>)}
             <small>곡률 반경 R = (w²/4 + h²) / (2h)</small></div>
+          <div className="exp-learn"><label><input type="checkbox" checked={draft.heading_learn ?? true} onChange={e => setDraft({ ...draft, heading_learn: e.target.checked })} /> 직진 습관 자동 학습 (매 회 끝에 '평소 한쪽으로 쏠리는 정도'를 기억해 다음 회 처음부터 미리 보정)</label>
+            <span>지금 기억한 값: 앞으로 {(settings?.heading_ff_forward ?? 0).toFixed(1)}° · 뒤로 {(settings?.heading_ff_backward ?? 0).toFixed(1)}°</span>
+            <button type="button" className="text-button" onClick={() => void patchSettings({ heading_ff_forward: 0, heading_ff_backward: 0 })}>잊기(0으로)</button></div>
           <div className="button-row"><button className="secondary" disabled={savingSettings} onClick={() => void saveSettings(false)}>설정 저장</button><button className="primary" disabled={savingSettings || busy} onClick={() => void saveSettings(true)}>저장 후 전체 재분석</button></div>
         </>}
       </article>
@@ -341,40 +343,12 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       </div></details>
     </section>}
 
-    <section className="experiment-runs"><div className="section-subhead"><h2>시행 결과</h2><p>표에서 시행을 누르면 원자료 그래프와 계산값을 확인할 수 있습니다. 이상한 시행은 '제외'로 표시하면 집계에서 빠집니다.</p></div>
-      {selected && detail && detail.id === selected.id ? <article className="card experiment-run">
-        <div className="card-head"><div><h3>{selected.condition.bump_id} · {selected.condition.total_mass_g.toLocaleString()} g · {outputLabel(selected.condition.output_mode, selected.condition.output_value)} · {selected.condition.trial}회차{selected.excluded ? ' · 제외됨' : ''}</h3><p><span className={'exp-badge ' + (selected.simulated ? 'sim' : 'real')}>{selected.simulated ? '합성 데이터' : '실제 측정 (MPU-6050)'}</span><span className="exp-badge">{PURPOSE_LABEL[(selected.condition.purpose ?? 'main') as Purpose]}</span>{selected.analysis.pair_source === 'manual' && <span className="exp-badge warn">피크 수동 지정</span>} {new Date(selected.created_at).toLocaleString()} · 표본 {selected.analysis.sample_count.toLocaleString()}개 · {fmt(selected.analysis.sample_rate_hz, 0, 'Hz')}{selected.battery_v ? ` · 배터리 ${selected.battery_v.toFixed(2)} V` : ''}{selected.steering_source ? ` · 조향 ${selected.steering_source === 'gyro' ? '자이로' : selected.steering_source === 'line' ? '테이프' : '없음'}` : ''}</p></div>
-          <div className="button-row"><button className="secondary" onClick={() => download(`/api/experiment/runs/${selected.id}/raw.csv`, `run-${selected.id}.csv`)}><Download size={14} /> 원자료 CSV</button><button className="secondary" onClick={() => void toggleExcluded(selected.id, !selected.excluded)}>{selected.excluded ? '집계에 포함' : '집계에서 제외'}</button><button className="secondary" onClick={() => void deleteRun(selected.id)}><Trash2 size={14} /> 삭제</button></div></div>
-        <RunTraceChart key={selected.id} series={detail.series} analysis={selected.analysis} thresholdDelta={Number(selected.analysis.params?.threshold_delta_g ?? settings?.threshold_delta_g ?? 0.3)} jumpG={Number(selected.analysis.params?.jump_g ?? settings?.jump_g ?? 0.2)} title={`수직 가속도 – ${selected.condition.bump_id}, ${selected.condition.total_mass_g} g, ${outputLabel(selected.condition.output_mode, selected.condition.output_value)}, ${selected.condition.trial}회차`} name={`trace_${selected.condition.bump_id}_m${selected.condition.total_mass_g}_${selected.condition.output_mode}${selected.condition.output_value}_t${selected.condition.trial}`} />
-        <div className="exp-stats">
-          <div><small>최대 수직 가속도</small><b>{fmt(selected.analysis.peak_g, 3, 'g')}</b><span>Δa {fmt(selected.analysis.peak_delta_g, 3, 'g')}</span></div>
-          <div><small>통과 속도 v</small><b>{fmt(selected.analysis.speed_mps, 3, 'm/s')}</b><span>Δt {selected.analysis.axle_dt_s == null ? '—' : (selected.analysis.axle_dt_s * 1000).toFixed(1) + ' ms'}{selected.condition.video_speed_mps ? ` · 영상 ${selected.condition.video_speed_mps} m/s` : ''}</span></div>
-          <div><small>최소 가속도 · 점프</small><b>{fmt(selected.analysis.min_g, 3, 'g')}</b><span>{selected.analysis.jump == null ? '판정 불가' : selected.analysis.jump ? `지면 이탈${selected.analysis.airborne_s ? ` · 공중 ${(selected.analysis.airborne_s * 1000).toFixed(0)} ms` : ''}${selected.analysis.landing_g ? ` · 착지 ${selected.analysis.landing_g.toFixed(2)} g` : ''}` : '접지 유지'}</span></div>
-          <div><small>충격력 F = m·a</small><b>{fmt(selected.analysis.peak_force_n, 2, 'N')}</b><span>증가분 {fmt(selected.analysis.dynamic_force_n, 2, 'N')}</span></div>
-          <div><small>Π = v²/(g·R_eff)</small><b>{fmt(selected.analysis.pi, 3)}</b><span>v_c {fmt(selected.analysis.critical_speed_mps, 3, 'm/s')}</span></div>
-          <div><small>앞 / 뒤 바퀴 피크</small><b>{fmt(selected.analysis.front_g, 2)} / {fmt(selected.analysis.rear_g, 2)} g</b><span>검출 피크 {selected.analysis.peak_count}개{selected.heading_max_deg != null ? ` · 방향 오차 최대 ${selected.heading_max_deg.toFixed(1)}°${selected.heading_hold ? ' (보정)' : ''}` : ''}</span></div>
-        </div>
-        {selected.analysis.flags.length > 0 && <ul className="exp-flags">{selected.analysis.flags.map(f => <li key={f}><AlertTriangle size={13} />{f}</li>)}</ul>}
-        {speedOff != null && Math.abs(speedOff) > 0.2 && <ul className="exp-flags"><li><AlertTriangle size={13} />이 시행의 속도가 같은 조건 평균({fmt(selectedGroup?.mean_speed_mps, 3)} m/s)과 {(speedOff * 100).toFixed(0)}% 다릅니다. 앞·뒤 바퀴 피크가 맞게 골라졌는지 아래에서 확인하세요.</li></ul>}
-        <details className="exp-peaks" open={selected.analysis.pair_source === 'manual' || (speedOff != null && Math.abs(speedOff) > 0.2) || selected.analysis.front_t_s == null}>
-          <summary>앞·뒤 바퀴 피크 확인·직접 지정 (후보 {(selected.analysis.candidates ?? []).length}개)</summary>
-          <p className="exp-hint">차는 앞으로 가므로 <b>먼저 나온 피크가 앞바퀴, 나중 피크가 뒷바퀴</b>입니다. 자동 선택은 ① 착지 피크를 빼고 ② 두 피크 간격으로 계산한 속도가 0.03~4 m/s인 쌍 중 ③ 높이 합이 가장 큰 쌍을 고릅니다. 그래프의 회색 ▼#번호가 다른 후보입니다. 잘못 골랐으면 아래에서 앞·뒤를 직접 고르고 적용하세요.</p>
-          <div className="exp-cand-list">{(selected.analysis.candidates ?? []).map((c, i) => { const isF = c.t_s === selected.analysis.front_t_s, isR = c.t_s === selected.analysis.rear_t_s;
-            return <div key={i} className={'exp-cand' + (isF ? ' front' : isR ? ' rear' : '')}><b>#{i + 1}</b><span>{c.t_s.toFixed(3)} s · {c.g.toFixed(2)} g{c.landing ? ' · 착지' : ''}{isF ? ' · 현재 앞바퀴' : isR ? ' · 현재 뒷바퀴' : ''}</span>
-              <button type="button" className={pick.front === c.t_s ? 'secondary selected' : 'secondary'} onClick={() => setPick(p => ({ ...p, front: c.t_s }))}>앞바퀴로</button>
-              <button type="button" className={pick.rear === c.t_s ? 'secondary selected' : 'secondary'} onClick={() => setPick(p => ({ ...p, rear: c.t_s }))}>뒷바퀴로</button></div>; })}</div>
-          <div className="button-row">
-            <span className="exp-hint">{pick.front != null && pick.rear != null ? `Δt = ${((pick.rear - pick.front) * 1000).toFixed(1)} ms → v = ${settings?.wheelbase_mm ? (settings.wheelbase_mm / 1000 / (pick.rear - pick.front)).toFixed(3) + ' m/s' : '축간거리 필요'}` : '앞바퀴와 뒷바퀴 후보를 하나씩 고르세요.'}</span>
-            <button className="primary" disabled={pick.front == null || pick.rear == null || (pick.rear ?? 0) <= (pick.front ?? 0)} onClick={() => void patchRun(selected.id, { peak_override: { front_t_s: pick.front, rear_t_s: pick.rear } }, '피크를 직접 지정하고 다시 분석했습니다.')}>지정 적용</button>
-            {selected.analysis.pair_source === 'manual' && <button className="secondary" onClick={() => void patchRun(selected.id, { clear_peak_override: true }, '자동 피크 선택으로 되돌렸습니다.')}>자동으로 되돌리기</button>}
-            <select aria-label="측정 목적" value={selected.condition.purpose ?? 'main'} onChange={e => void patchRun(selected.id, { purpose: e.target.value }, '측정 목적을 바꿨습니다.')}>{(['main', 'validation', 'pilot'] as Purpose[]).map(p => <option key={p} value={p}>{PURPOSE_LABEL[p]}</option>)}</select>
-          </div>
-        </details>
-      </article> : <div className="card empty-chart">{runs.length ? '시행 데이터를 불러오는 중…' : '아직 저장된 시행이 없습니다. 조건을 입력하고 자동 측정 주행을 하세요.'}</div>}
+    <section className="experiment-runs"><div className="section-subhead"><h2>시행 결과</h2><p>한 번 넘을 때마다 1회차가 기록됩니다. ◀ ▶(키보드 ← →)로 한 회씩 넘겨 보거나 '모두 겹쳐 보기'로 여러 회차를 한 그래프에서 비교하세요. 빨간색은 허용 기준을 넘은 충격입니다.</p></div>
+      <RunViewer runs={runs} selectedId={selectedId} setSelectedId={setSelectedId} detail={detail} settings={settings ?? DEFAULT_SETTINGS} data={data} request={request} download={download} patchRun={patchRun} toggleExcluded={toggleExcluded} deleteRun={deleteRun} />
 
-      <article className="card experiment-card"><div className="card-head"><div><h2>시행 목록 ({runs.length})</h2><p>최신 순. 회색 행은 집계에서 제외된 시행입니다. 왼쪽 칸을 체크해 여러 개를 한 번에 지울 수 있습니다.</p></div><div className="button-row"><button className="secondary" disabled={!checked.size || busy} onClick={() => void deleteChecked()}><Trash2 size={14} /> 선택 삭제 ({checked.size})</button><button className="secondary" disabled={!runs.length} onClick={() => download('/api/experiment/export/runs.csv', 'picarx_runs.csv')}><Download size={14} /> 시행 CSV</button></div></div>
-        {runs.length === 0 ? <div className="empty-chart">기록 없음</div> : <div className="experiment-table-wrap"><table className="experiment-table exp-clickable"><thead><tr><th><input type="checkbox" aria-label="모두 선택" checked={checked.size > 0 && checked.size === runs.length} onChange={e => setChecked(e.target.checked ? new Set(runs.map(r => r.id)) : new Set())} /></th><th>회차</th><th>목적</th><th>방지턱</th><th>총질량</th><th>출력</th><th>속도 (m/s)</th><th>최대 (g)</th><th>Δa (g)</th><th>Π</th><th>점프</th><th>상태</th></tr></thead>
-          <tbody>{runs.map(r => <tr key={r.id} className={(r.id === selectedId ? 'selected ' : '') + (r.excluded ? 'excluded' : '')} onClick={() => { setSelectedId(r.id); setPick({}); }}><td onClick={e => e.stopPropagation()}><input type="checkbox" aria-label="선택" checked={checked.has(r.id)} onChange={e => setChecked(prev => { const next = new Set(prev); if (e.target.checked) next.add(r.id); else next.delete(r.id); return next; })} /></td><td>{r.condition.trial}</td><td>{PURPOSE_LABEL[(r.condition.purpose ?? 'main') as Purpose]}</td><td>{r.condition.bump_id}</td><td>{r.condition.total_mass_g} g</td><td>{outputLabel(r.condition.output_mode, r.condition.output_value)}</td><td>{fmt(r.analysis.speed_mps, 3)}</td><td>{fmt(r.analysis.peak_g, 3)}</td><td>{fmt(r.analysis.peak_delta_g, 3)}</td><td>{fmt(r.analysis.pi, 2)}</td><td>{r.analysis.jump == null ? '—' : r.analysis.jump ? '예' : '아니오'}</td><td>{r.aborted ? '중단' : r.excluded ? '제외' : r.analysis.pair_source === 'manual' ? '수동 지정' : r.analysis.flags.length ? '확인 필요' : '정상'}</td></tr>)}</tbody></table></div>}
+      <article className="card experiment-card"><div className="card-head"><div><h2>시행 목록 ({runs.length})</h2><p>최신 순. 회색 줄은 계산에서 뺀 회차, 빨간 줄은 허용 기준을 넘은 회차입니다. '방지턱 못 찾음'은 평지처럼 뚜렷한 충격이 없어 자동으로 계산에서 빠진 회차입니다.</p></div><div className="button-row"><button className="secondary" disabled={!checked.size || busy} onClick={() => void deleteChecked()}><Trash2 size={14} /> 선택 삭제 ({checked.size})</button><button className="secondary" disabled={!runs.length} onClick={() => download('/api/experiment/export/runs.csv', 'picarx_runs.csv')}><Download size={14} /> 시행 CSV</button></div></div>
+        {runs.length === 0 ? <div className="empty-chart">기록 없음</div> : <div className="experiment-table-wrap"><table className="experiment-table exp-clickable"><thead><tr><th><input type="checkbox" aria-label="모두 선택" checked={checked.size > 0 && checked.size === runs.length} onChange={e => setChecked(e.target.checked ? new Set(runs.map(r => r.id)) : new Set())} /></th><th>회차</th><th>목적</th><th>방지턱</th><th>총질량</th><th>출력</th><th>통과 속도 (m/s)</th><th>가장 큰 충격 (g)</th><th>평소보다 더 (g)</th><th>Π</th><th>바퀴 뜸</th><th>상태</th></tr></thead>
+          <tbody>{runs.map(r => { const lim = limitFor(r, data, settings ?? DEFAULT_SETTINGS); const over = lim != null && r.analysis.peak_g != null && r.analysis.peak_g > lim; return <tr key={r.id} className={(r.id === selectedId ? 'selected ' : '') + (r.excluded ? 'excluded ' : '') + (over ? 'over' : '')} onClick={() => setSelectedId(r.id)}><td onClick={e => e.stopPropagation()}><input type="checkbox" aria-label="선택" checked={checked.has(r.id)} onChange={e => setChecked(prev => { const next = new Set(prev); if (e.target.checked) next.add(r.id); else next.delete(r.id); return next; })} /></td><td>{r.condition.trial}</td><td>{PURPOSE_LABEL[(r.condition.purpose ?? 'main') as Purpose]}</td><td>{r.condition.bump_id}</td><td>{r.condition.total_mass_g} g</td><td>{outputLabel(r.condition.output_mode, r.condition.output_value)}</td><td>{fmt(r.analysis.speed_mps, 3)}</td><td>{fmt(r.analysis.peak_g, 3)}{over && <span className="exp-over">기준 초과</span>}</td><td>{fmt(r.analysis.peak_delta_g, 3)}</td><td>{fmt(r.analysis.pi, 2)}</td><td>{r.analysis.jump == null ? '—' : r.analysis.jump ? '예' : '아니오'}</td><td>{r.aborted ? '중단' : r.excluded ? '제외' : r.analysis.pair_source === 'manual' ? '수동 지정' : r.analysis.bump_detected === false ? '방지턱 못 찾음' : r.analysis.flags.length ? '확인 필요' : '정상'}</td></tr>; })}</tbody></table></div>}
       </article>
     </section>
 
@@ -389,17 +363,19 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
               {chosenModel && <span>R² = {chosenModel.r2.toFixed(3)} · RMSE {chosenModel.rmse.toFixed(3)} g · 교차검증 RMSE {fmt(chosenModel.loocv_rmse, 3, 'g')}{chosenModel.exact_fit ? ' · 점 수 = 매개변수 수(신뢰도 낮음)' : ''}</span>}
               <span>{comparison?.note ?? ''}</span></div>
             {fit && fit.per_mass.length > 0 && <div><small>질량별 거듭제곱 맞춤 (참고)</small>{fit.per_mass.map(p => <span key={p.mass_g}>{p.mass_g.toLocaleString()} g: Δa = {p.k.toPrecision(3)}·v^{p.n.toFixed(3)} (R² {p.r2.toFixed(3)}, {p.points}점)</span>)}</div>}
-            <div className="exp-vmax"><small>허용 최대 수직 가속도 기준</small>
-              <div className="segmented"><button type="button" className={(settings?.a_limit_mode ?? 'manual') === 'manual' ? 'selected' : ''} onClick={() => void applyCriterion({ a_limit_mode: 'manual' })}>직접 입력</button><button type="button" className={settings?.a_limit_mode === 'first_jump' ? 'selected' : ''} onClick={() => void applyCriterion({ a_limit_mode: 'first_jump' })}>첫 점프 조건</button></div>
-              {(settings?.a_limit_mode ?? 'manual') === 'manual' && <div className="exp-inline"><label>a_lim (g)<input type="number" min={1.05} max={8} step={0.1} value={draft?.a_limit_g ?? ''} placeholder="2.0" onChange={e => setDraft(d => ({ ...(d ?? DEFAULT_SETTINGS), a_limit_g: e.target.value === '' ? null : Number(e.target.value) }))} /></label><button type="button" className="secondary" onClick={() => void applyCriterion({ a_limit_mode: 'manual', a_limit_g: draft?.a_limit_g ?? 2 })}>적용</button></div>}
-              <b>{aLimit ? `a_lim = ${aLimit.toFixed(2)} g` : '기준 없음'}</b>
+            <div className="exp-vmax"><small>사람이 견딜 수 있는 충격 기준 (허용 최대 수직 가속도)</small>
+              <label className="exp-preset">기준 고르기<select aria-label="허용 기준" value={settings?.a_limit_mode === 'first_jump' ? 'first_jump' : settings?.a_limit_preset ?? 'trl614'} onChange={e => { const v = e.target.value; void applyCriterion(v === 'first_jump' ? { a_limit_mode: 'first_jump' } : { a_limit_mode: 'manual', a_limit_preset: v }); }}>
+                {Object.entries(settings?.a_limit_presets ?? { trl614: { label: '0.7 g · TRL 614 (2004)', delta_g: 0.7, source: '' } }).map(([k, v]) => <option key={k} value={k}>{v.label}{k === 'trl614' ? ' (기본·추천)' : ''}</option>)}
+                <option value="custom">직접 입력</option><option value="first_jump">이 실험에서 바퀴가 처음 뜬 조건</option></select></label>
+              {settings?.a_limit_mode !== 'first_jump' && settings?.a_limit_preset === 'custom' && <div className="exp-inline"><label>기준 (g, 가만히 있을 때 1 g 포함)<input type="number" min={1.05} max={8} step={0.1} value={draft?.a_limit_g ?? ''} placeholder="1.7" onChange={e => setDraft(d => ({ ...(d ?? DEFAULT_SETTINGS), a_limit_g: e.target.value === '' ? null : Number(e.target.value) }))} /></label><button type="button" className="secondary" onClick={() => void applyCriterion({ a_limit_mode: 'manual', a_limit_preset: 'custom', a_limit_g: draft?.a_limit_g ?? 1.7 })}>적용</button></div>}
+              <b>{aLimit ? `${aLimit.toFixed(2)} g (평소보다 +${(aLimit - 1).toFixed(2)} g 더)` : '기준 없음'}</b>
               <span>{criterion?.source ?? '측정 후 계산됩니다.'}</span>
               {criterion && criterion.vmax_by_mass.length > 0 && <table className="exp-mini"><thead><tr><th>질량</th><th>v_max</th></tr></thead><tbody>{criterion.vmax_by_mass.map(v => <tr key={v.mass_g}><td>{v.mass_g.toLocaleString()} g</td><td>{fmt(v.vmax_mps, 3, 'm/s')}</td></tr>)}</tbody></table>}
               <div className="exp-inline"><label>다른 질량 (g)<input type="number" min={1} value={calcMass === '' ? vmaxMass : calcMass} onChange={e => setCalcMass(e.target.value === '' ? '' : Number(e.target.value))} /></label><b>{vmaxChosen == null ? '—' : `${vmaxChosen.toFixed(3)} m/s`}</b></div>
-              <span>v_max: 선택한 관계식에서 예측 Δa = a_lim − 1 이 되는 속도{criterion?.critical_speed_mps ? ` · 이론 점프 속도 v_c = ${criterion.critical_speed_mps.toFixed(3)} m/s` : ''}. 검증: 실험하지 않은 질량을 넣고 그 속도 근처에서 다시 측정해 오차율을 구하세요.</span></div>
+              <span>v_max = 이 속도보다 빠르면 기준을 넘는다고 예측되는 속도(선택한 관계식으로 계산){criterion?.critical_speed_mps ? ` · 이론 점프 속도 v_c = ${criterion.critical_speed_mps.toFixed(3)} m/s` : ''}. 검증: 실험하지 않은 질량을 넣고 그 속도 근처에서 다시 측정해 오차율을 구하세요.</span></div>
           </div>
-          <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>총질량</th><th>출력</th><th>시행 (사용)</th><th>평균 속도 (m/s)</th><th>평균 최대 (g)</th><th>평균 Δa (g)</th><th>범위 Δa</th><th>제외값</th><th>충격력 (N)</th><th>Π</th><th>점프</th></tr></thead>
-            <tbody>{bumpGroups.map(g => <tr key={`${g.total_mass_g}-${g.output_mode}-${g.output_value}`}><td>{g.total_mass_g} g</td><td>{outputLabel(g.output_mode, g.output_value)}</td><td>{g.n_runs} ({g.n_used})</td><td>{fmt(g.mean_speed_mps, 3)}</td><td>{fmt(g.mean_peak_g, 3)}</td><td>{fmt(g.mean_peak_delta_g, 3)}</td><td>{g.kept_min_delta_g.toFixed(2)}–{g.kept_max_delta_g.toFixed(2)}</td><td>{g.dropped_delta_g.map(v => v.toFixed(2)).join(', ') || '—'}</td><td>{fmt(g.mean_force_n, 2)}</td><td>{fmt(g.mean_pi, 2)}</td><td>{g.jump_count}/{g.n_runs}</td></tr>)}</tbody></table></div>
+          <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>총질량</th><th>출력</th><th>시행 (계산에 쓴 수)</th><th>평균 속도 (m/s)</th><th>평균 최대 충격 (g)</th><th>평균 '평소보다 더' (g)</th><th>쓴 값 범위</th><th>뺀 값(최대·최소)</th><th>충격력 (N)</th><th>Π</th><th>바퀴 뜸</th></tr></thead>
+            <tbody>{bumpGroups.map(g => <tr key={`${g.total_mass_g}-${g.output_mode}-${g.output_value}`} className={aLimit != null && g.mean_peak_g != null && g.mean_peak_g > aLimit ? 'over' : ''}><td>{g.total_mass_g} g</td><td>{outputLabel(g.output_mode, g.output_value)}</td><td>{g.n_runs} ({g.n_used})</td><td>{fmt(g.mean_speed_mps, 3)}</td><td>{fmt(g.mean_peak_g, 3)}{aLimit != null && g.mean_peak_g != null && g.mean_peak_g > aLimit && <span className="exp-over">초과</span>}</td><td>{fmt(g.mean_peak_delta_g, 3)}</td><td>{g.kept_min_delta_g.toFixed(2)}–{g.kept_max_delta_g.toFixed(2)}</td><td>{g.dropped_delta_g.map(v => v.toFixed(2)).join(', ') || '—'}</td><td>{fmt(g.mean_force_n, 2)}</td><td>{fmt(g.mean_pi, 2)}</td><td>{g.jump_count}/{g.n_runs}</td></tr>)}</tbody></table></div>
         </div>
         {comparison && comparison.models.length > 0 && <div className="card experiment-card"><div className="card-head"><div><h2>관계식 후보 비교</h2><p>식은 하나로 정해져 있지 않습니다. 같은 조건 평균 {comparison.points}개에 여러 식을 맞춰 비교합니다. <b>교차검증 RMSE</b>(한 점씩 빼고 맞춘 식이 그 점을 얼마나 틀리는지)가 작을수록 새 데이터를 잘 맞히는 식입니다. R²는 매개변수가 많을수록 커지므로 그것만으로 고르지 마세요.</p></div>
           <div className="segmented"><button type="button" className={(settings?.model_id ?? 'auto') === 'auto' ? 'selected' : ''} onClick={() => void patchSettings({ model_id: 'auto' })}>자동 선택</button></div></div>

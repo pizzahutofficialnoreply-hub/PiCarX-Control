@@ -13,6 +13,8 @@ import time
 LOCK = threading.Lock()
 WHEELBASE = 0.095
 BUMP_X = 0.6
+# FAKE_BUMP=0 이면 방지턱 없는 평지(평지 오검출 시험용)
+HAS_BUMP = os.getenv("FAKE_BUMP", "1") != "0"
 DRIFT_DPS = 4.0
 GYRO_BIAS_DPS = 0.8
 TAU_S = 0.15  # 모터 속도 응답 시간상수(가속 구간을 흉내)
@@ -63,7 +65,7 @@ def update(now: float | None = None) -> None:
         x0 = state["x"]
         state["x"] += state["v"] * dt
         state["y"] += state["v"] * dt * math.sin(math.radians(state["heading"]))
-        if v > 0.01:
+        if v > 0.01 and HAS_BUMP:
             _crossings(x0, state["x"], now, v)
         steer = math.radians(state["steering"])
         # 앞으로 갈 때 오른쪽 조향(+) → 시계 방향(−) 회전, 후진이면 반대

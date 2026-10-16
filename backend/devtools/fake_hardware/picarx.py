@@ -56,7 +56,20 @@ class Picarx:
         self._drive("stopped", 0)
 
     def set_motor_speed(self, motor, speed):
-        pass
+        """라이브러리와 같이 motor 1(왼쪽)은 +가 전진, motor 2(오른쪽)는 −가 전진."""
+        fs.update()
+        speed = max(-100, min(100, speed))
+        duty = (int(abs(speed) / 2) + 50) if speed else 0.0
+        self.motor_speed_pins[motor - 1]._value = duty
+        forward = speed > 0 if motor == 1 else speed < 0
+        self.motor_direction_pins[motor - 1]._v = (0 if forward else 1) if motor == 1 else (1 if forward else 0)
+        if motor == 1:
+            self._m1 = (forward, duty)
+        else:
+            m1 = getattr(self, "_m1", (forward, duty))
+            with fs.LOCK:
+                fs.state["motion"] = ("forward" if m1[0] else "backward") if duty or m1[1] else "stopped"
+                fs.state["duty"] = (duty + m1[1]) / 2
 
     def set_dir_servo_angle(self, angle):
         fs.update()

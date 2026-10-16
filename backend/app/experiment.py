@@ -39,6 +39,24 @@ RUN_COLUMNS = ("t_s", "ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "ver
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
 
 
+# 허용 최대 수직 가속도 증가분(Δa, g) – 해석 가이드의 선행 연구에서 가져온 값
+A_LIMIT_PRESETS: dict[str, dict[str, Any]] = {
+    "trl614": {"delta_g": 0.7, "label": "0.7 g · TRL 614 (2004)",
+               "source": "TRL 614(Kennedy 외, 2004): 차량 5종·탑승자 더미로 방지턱을 측정한 영국 교통부 연구. 탑승자가 받아들이지 않는 최대 수직 가속도 약 0.7 g."},
+    "watts1973": {"delta_g": 0.9, "label": "0.9 g · Watts (1973)",
+                  "source": "Watts(1973, TRRL LR597): 6명이 방지턱을 넘으며 불편 점수를 매긴 연구. 약 0.9 g부터 '불편'."},
+    "kjemtrup04": {"delta_g": 0.4, "label": "0.4 g · Kjemtrup (환자·노약자)",
+                   "source": "Kjemtrup 기준(Kyrollos 외 2020 인용, 구급차): 0.4 g에서 상당히 불편."},
+    "kjemtrup02": {"delta_g": 0.2, "label": "0.2 g · Kjemtrup (매우 엄격)",
+                   "source": "Kjemtrup 기준(Kyrollos 외 2020 인용, 구급차): 0.2 g에서 약간 불편."},
+}
+
+
+def effective_a_limit(settings: "ExperimentSettings") -> float | None:
+    preset = A_LIMIT_PRESETS.get(settings.a_limit_preset)
+    return round(1.0 + preset["delta_g"], 4) if preset else settings.a_limit_g
+
+
 # --------------------------------------------------------------------------- 모델
 class BumpProfile(BaseModel):
     id: str = Field(min_length=1, max_length=12, pattern=r"^[A-Za-z0-9_-]+$")
@@ -55,7 +73,9 @@ class ExperimentSettings(BaseModel):
     min_gap_s: float = Field(default=0.03, ge=0.005, le=1)
     jump_g: float = Field(default=0.2, ge=0, le=0.9)
     a_limit_mode: Literal["manual", "first_jump"] = Field(default="manual", description="manual: 직접 입력, first_jump: 점프가 처음 나타난 조건의 평균 최대 가속도")
-    a_limit_g: float | None = Field(default=2.0, gt=1, le=8)
+    a_limit_preset: Literal["trl614", "watts1973", "kjemtrup04", "kjemtrup02", "custom"] = Field(
+        default="trl614", description="허용 기준 출처(선행 연구). custom이면 a_limit_g를 직접 씀")
+    a_limit_g: float | None = Field(default=1.7, gt=1, le=8, description="허용 최대 수직 가속도(정지 1 g 포함)")
     pre_roll_s: float = Field(default=1.0, ge=0.3, le=5)
     run_seconds: float = Field(default=2.5, ge=0.3, le=6)
     tail_s: float = Field(default=0.6, ge=0.1, le=3)
@@ -66,6 +86,10 @@ class ExperimentSettings(BaseModel):
     rest_s: float = Field(default=1.5, ge=0.3, le=10)
     heading_hold: bool = True
     heading_gain: float = Field(default=1.2, ge=0, le=5, description="조향 보정 각도 = 배율 × 방향 오차")
+    heading_ki: float = Field(default=0.8, ge=0, le=5, description="쌓인 방향 오차를 없애는 적분 계수(1/s)")
+    heading_learn: bool = Field(default=True, description="측정할 때마다 차가 한쪽으로 쏠리는 정도를 학습해 다음 출발부터 미리 보정")
+    heading_ff_forward: float = Field(default=0.0, ge=-12, le=12, description="학습된 전진 기본 조향(°)")
+    heading_ff_backward: float = Field(default=0.0, ge=-12, le=12, description="학습된 후진 기본 조향(°)")
     steering_source: Literal["gyro", "line", "none"] = Field(default="gyro", description="측정 직진 중 조향 방식")
     kick_ms: int = Field(default=0, ge=0, le=400, description="출발 순간 최대 출력으로 밀어 주는 시간(정지마찰 극복)")
     model_id: str = Field(default="auto", max_length=20, description="관계식 모델(auto = 교차검증 오차 최소)")
@@ -341,7 +365,8 @@ def finalize_run(run: dict[str, Any], columns: dict[str, list[float]], meta: dic
 def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return {k: run.get(k) for k in ("id", "created_at", "simulated", "source", "aborted", "excluded", "condition", "bump", "analysis", "recording",
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
-                                    "peak_override", "data_source", "line_lost", "kick_ms")}
+                                    "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
+                                    "heading_ff_learned")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -357,8 +382,10 @@ def criterion_for(bump_id: str, groups: list[dict[str, Any]], model: dict[str, A
                            "model_id": model["id"] if model else None}
     mine = [g for g in groups if g["bump_id"] == bump_id]
     if settings.a_limit_mode == "manual":
-        out["a_limit_g"] = settings.a_limit_g
-        out["source"] = "직접 입력한 허용 기준"
+        out["a_limit_g"] = effective_a_limit(settings)
+        preset = A_LIMIT_PRESETS.get(settings.a_limit_preset)
+        out["source"] = preset["source"] if preset else "직접 입력한 허용 기준"
+        out["preset"] = settings.a_limit_preset
     else:
         jumped = [g for g in mine if g["jump_count"] > 0 and g.get("mean_speed_mps") and g.get("mean_peak_g")]
         if jumped:
@@ -508,13 +535,35 @@ async def _wait(ctl, seconds: float, generation: int) -> None:
         await asyncio.sleep(min(0.05, max(0.0, end - loop.time())))
 
 
+class HeadingController:
+    """자이로 방향 유지(비례 + 적분 + 학습된 기본 조향).
+
+    - 비례: 지금 틀어진 만큼 반대로 조향
+    - 적분: 계속 한쪽으로 틀어져 있으면 조향을 점점 더해 오차를 0으로(바퀴 정렬 불량 보정)
+    - 기본 조향(ff): 지난 측정에서 배운 '직진하려면 필요한 조향'으로 출발부터 보정
+    """
+
+    def __init__(self, kp: float, ki: float, ff: float, limit: float = MAX_HEADING_CORRECTION_DEG) -> None:
+        self.kp, self.ki, self.ff, self.limit = kp, ki, ff, limit
+        self.integral = 0.0
+
+    def update(self, heading: float, dt: float, sign: float) -> float:
+        err = heading * sign  # 왼쪽으로 돈 상태(+)에서 전진이면 오른쪽(+) 조향, 후진이면 왼쪽(−)
+        if self.ki > 0:
+            self.integral = max(-self.limit / self.ki, min(self.limit / self.ki, self.integral + err * dt))
+        steer = self.ff + self.kp * err + self.ki * self.integral
+        return max(-self.limit, min(self.limit, steer))
+
+
 async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: str, generation: int,
                      heading_hold: bool, gain: float, track: bool | None = None,
-                     line: LineTracker | None = None, kick_ms: int = 0) -> dict[str, Any]:
-    """정해진 시간 동안 직진/후진.
+                     line: LineTracker | None = None, kick_ms: int = 0,
+                     ki: float = 0.0, ff: float = 0.0) -> dict[str, Any]:
+    """정해진 시간 동안 일정한 출력으로 직진/후진.
 
+    출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
     조향: 라인 추종(테이프) > 자이로 방향 유지 > 조향 없음 순서로 사용합니다.
-    ``kick_ms`` 동안은 최대 출력으로 밀어 정지마찰을 넘긴 뒤 설정 출력으로 바꿉니다.
+    ``kick_ms`` 동안은 최대 출력으로 밀어 정지마찰을 넘긴 뒤 설정 출력으로 바꿉니다(기본 끔).
     """
     loop = asyncio.get_running_loop()
     start = loop.time()
@@ -523,30 +572,52 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     worst = 0.0
     last = None
     line_lost = False
+    controller = HeadingController(gain, ki, ff) if heading_hold and line is None else None
+    log: list[list[float]] = []
+    prev_t = start
     while loop.time() < end:
         if ctl.stop_generation != generation:
             raise Aborted()
+        now = loop.time()
         steer = 0.0
         heading = mpu6050_service.heading_deg() if (heading_hold if track is None else track) else None
         if heading is not None:
             last = heading
             worst = max(worst, abs(heading))
-            if heading_hold and line is None:
-                # 왼쪽으로 돈 상태(+)에서 전진이면 오른쪽(+) 조향, 후진이면 왼쪽(−) 조향
-                steer = max(-MAX_HEADING_CORRECTION_DEG, min(MAX_HEADING_CORRECTION_DEG, gain * heading * sign))
+            if controller is not None:
+                steer = controller.update(heading, now - prev_t, sign)
         if line is not None:
             raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
             steer, ok = line.update(raw, direction)
             if not ok:
                 line_lost = True
                 break
-        out = 100.0 if kick_ms and (loop.time() - start) * 1000 < kick_ms else value
+        prev_t = now
+        out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else value
         if not await ctl.experiment_drive(mode, out, generation, direction, steer):
             raise Aborted()
+        log.append([round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)])
         await asyncio.sleep(0.05)
+    half = [row[2] for row in log if row[0] >= seconds / 2]
     return {"heading_max_deg": round(worst, 2) if last is not None else None,
             "heading_end_deg": round(last, 2) if last is not None else None,
-            "line_lost": line_lost if line is not None else None}
+            "line_lost": line_lost if line is not None else None,
+            "drive_log": log[:400],
+            "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None}
+
+
+def _learn_heading(direction: str, steer_mean: float | None) -> float | None:
+    """측정이 끝나면 후반부 평균 조향을 '직진에 필요한 기본 조향'으로 반쯤 반영합니다."""
+    if steer_mean is None:
+        return None
+    settings = store.load_settings()
+    if not settings.heading_learn:
+        return None
+    key = "heading_ff_forward" if direction == "forward" else "heading_ff_backward"
+    new = max(-12.0, min(12.0, 0.5 * getattr(settings, key) + 0.5 * steer_mean))
+    setattr(settings, key, round(new, 3))
+    store.save_settings(settings)
+    return new
 
 
 async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSettings, opts: dict[str, Any],
@@ -577,7 +648,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         auto_runner._phase("driving", opts["run_seconds"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · 직진 측정 중 · {cond.output_mode.upper()} {cond.output_value:g}{' · 직진 보정' if hold else ''}")
         try:
             drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], "forward", gen, hold,
-                                          settings.heading_gain, track, line, opts["kick_ms"])
+                                          settings.heading_gain, track, line, opts["kick_ms"],
+                                          ki=settings.heading_ki, ff=store.load_settings().heading_ff_forward if hold else 0.0)
+            if hold and not drive_info.get("line_lost"):
+                drive_info["heading_ff_learned"] = _learn_heading("forward", drive_info.get("steer_mean_late"))
         finally:
             await ctl.stop(reason="experiment_auto_run_end")
         gen = ctl.stop_generation
@@ -651,8 +725,11 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                 try:
                     # 복귀(후진)는 테이프 센서가 앞쪽에 있어 라인 대신 자이로로 방향을 유지합니다.
                     hold = bool(opts["steering_source"] in ("gyro", "line") and not simulated and mpu6050_service.heading_deg() is not None)
-                    await _drive_for(ctl, cond.output_mode, opts["return_output"], opts["run_seconds"] * opts["return_scale"],
-                                     "backward", gen, hold, settings.heading_gain)
+                    back = await _drive_for(ctl, cond.output_mode, opts["return_output"], opts["run_seconds"] * opts["return_scale"],
+                                            "backward", gen, hold, settings.heading_gain,
+                                            ki=settings.heading_ki, ff=store.load_settings().heading_ff_backward if hold else 0.0)
+                    if hold:
+                        _learn_heading("backward", back.get("steer_mean_late"))
                 finally:
                     await ctl.stop(reason="experiment_return_end")
             if not last_cycle:
@@ -694,13 +771,19 @@ def _csv_response(rows: list[list[Any]], filename: str) -> Response:
 async def get_settings():
     s = store.load_settings()
     return {**s.model_dump(), "bumps": [bump_snapshot(s, b.id) for b in s.bumps],
-            "max_output": EXPERIMENT_MAX_OUTPUT}
+            "max_output": EXPERIMENT_MAX_OUTPUT, "a_limit_effective_g": effective_a_limit(s),
+            "a_limit_presets": [{"id": k, **v} for k, v in A_LIMIT_PRESETS.items()]}
 
 
 @router.put("/settings")
 async def put_settings(settings: ExperimentSettings):
     if len({b.id for b in settings.bumps}) != len(settings.bumps):
         raise HTTPException(422, "방지턱 ID가 중복되었습니다.")
+    # 학습된 직진 보정값은 요청에 명시했을 때만 바꿉니다(다른 설정을 저장하다 학습값이 지워지지 않도록).
+    current = store.load_settings()
+    for key in ("heading_ff_forward", "heading_ff_backward"):
+        if key not in settings.model_fields_set:
+            setattr(settings, key, getattr(current, key))
     store.save_settings(settings)
     return await get_settings()
 
@@ -714,12 +797,36 @@ async def list_runs():
     return {"simulated": simulated, "runs": [run_summary(r) for r in runs], **analysis_bundle(runs, settings)}
 
 
+@router.get("/series")
+async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points: int = 400):
+    """여러 시행을 앞바퀴 피크(없으면 최대 피크) 시각에 맞춰 겹쳐 보기 위한 시계열."""
+    out = []
+    for run_id in [x for x in ids.split(",") if x][:60]:
+        try:
+            run = store.get(run_id)
+            cols = await asyncio.to_thread(store.read_columns, run_id)
+        except HTTPException:
+            continue
+        a = run.get("analysis") or {}
+        t0 = a.get("front_t_s") if a.get("front_t_s") is not None else a.get("peak_t_s")
+        if t0 is None:
+            continue
+        idx = [i for i, t in enumerate(cols["t_s"]) if t0 - before <= t <= t0 + after]
+        sub = {"t_s": [round(cols["t_s"][i] - t0, 4) for i in idx], "vertical_g": [cols["vertical_g"][i] for i in idx]}
+        sub = ia.decimate_columns(sub, max(100, min(1500, points)))
+        out.append({"id": run_id, "condition": run["condition"], "aligned_on": "front" if a.get("front_t_s") is not None else "peak",
+                    "rear_t_s": None if a.get("rear_t_s") is None or a.get("front_t_s") is None else round(a["rear_t_s"] - a["front_t_s"], 4),
+                    "peak_g": a.get("peak_g"), "speed_mps": a.get("speed_mps"), "bump_detected": a.get("bump_detected"),
+                    "t": sub["t_s"], "g": sub["vertical_g"]})
+    return {"series": out}
+
+
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, points: int = 1500):
     run = store.get(run_id)
     cols = await asyncio.to_thread(store.read_columns, run_id)
     series = ia.decimate_columns({k: cols[k] for k in ("t_s", "vertical_g", "dynamic_g")}, max(200, min(5000, points)))
-    return {**run_summary(run), "series": series}
+    return {**run_summary(run), "series": series, "drive_log": run.get("drive_log")}
 
 
 @router.get("/runs/{run_id}/raw.csv")

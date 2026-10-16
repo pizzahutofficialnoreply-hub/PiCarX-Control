@@ -107,6 +107,16 @@ def airborne_segments(t: Sequence[float], v: Sequence[float], jump_g: float, min
     return segments
 
 
+def _robust_sigma(values: list[float]) -> float:
+    """중앙값 절대편차(MAD)로 구한 표준편차. 큰 피크 몇 개에 흔들리지 않습니다."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    med = ordered[len(ordered) // 2]
+    dev = sorted(abs(x - med) for x in values)
+    return 1.4826 * dev[len(dev) // 2]
+
+
 def _manual_pair(t: Sequence[float], v: Sequence[float], front: float, rear: float, window_s: float = 0.015) -> tuple[Peak, Peak] | None:
     """지정한 시각 ±15 ms 안의 최댓값을 피크로 씁니다."""
     def near(target: float) -> Peak | None:
@@ -163,6 +173,7 @@ def analyze_run(
         "peak_force_n": None, "dynamic_force_n": None,
         "pi": None, "r_eff_m": None, "critical_speed_mps": None,
         "peak_count": 0, "flags": flags, "candidates": [], "pair_source": None,
+        "bump_detected": None, "noise_sigma_g": None, "threshold_used_g": None, "standout_ratio": None,
         "params": {"threshold_delta_g": threshold_delta_g, "min_gap_s": min_gap_s, "jump_g": jump_g,
                    "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius},
     }
@@ -177,7 +188,12 @@ def analyze_run(
     if v[k] >= 7.5:
         flags.append("±8 g 범위 포화 가능성이 있습니다.")
 
-    peaks = find_peaks(t, v, threshold_delta_g, min_gap_s)
+    # 주행 진동의 크기(σ)를 중앙값 기반으로 재고, 피크 기준을 max(설정값, 6σ)로 올립니다.
+    # 바닥이 거칠거나 모터 진동이 큰 날에도 진동을 바퀴 피크로 착각하지 않게 하려는 것입니다.
+    sigma = _robust_sigma([x - 1.0 for x in v])
+    threshold_used = max(threshold_delta_g, 6.0 * sigma)
+    result.update(noise_sigma_g=round(sigma, 4), threshold_used_g=round(threshold_used, 4))
+    peaks = find_peaks(t, v, threshold_used, min_gap_s)
     result["peak_count"] = len(peaks)
     # 공중 구간 직후(30 ms 이내)의 피크는 바퀴가 방지턱에 닿은 피크가 아니라 착지 피크이므로
     # 앞·뒤 바퀴 짝짓기에서 뺍니다. 착지 피크를 뒷바퀴로 잘못 고르면 속도가 크게 틀어집니다.
@@ -205,9 +221,30 @@ def analyze_run(
         pair = pick_axle_pair(peaks, wheelbase_mm)
         if pair is not None:
             flags.append("착지 피크가 바퀴 피크와 겹쳐 짝에 포함했습니다 – 속도 오차 가능(영상 실측과 비교 권장).")
+    if pair is not None and result["pair_source"] != "manual":
+        # 방지턱이 정말 있었는지: 고른 두 피크가 나머지 진동 피크보다 뚜렷이(1.5배 이상) 커야 합니다.
+        small = find_peaks(t, v, max(0.08, 3.0 * sigma), min_gap_s)
+        near = lambda p: any(0 <= p.t_s - q.t_s <= 0.04 or abs(p.t_s - q.t_s) < 1e-9 for q in pair)  # noqa: E731
+        others = [p.value_g - 1.0 for p in small if not near(p) and p not in landing
+                  and not any(abs(p.t_s - q.t_s) < 1e-9 for q in landing)]
+        weakest = min(pair[0].value_g, pair[1].value_g) - 1.0
+        if others:
+            ratio = weakest / max(others) if max(others) > 0 else None
+            result["standout_ratio"] = None if ratio is None else round(ratio, 2)
+            if ratio is not None and ratio < 1.5:
+                flags.append(f"방지턱 통과가 확인되지 않았습니다: 고른 두 피크({weakest:.2f} g)가 다른 진동({max(others):.2f} g)보다 뚜렷하지 않습니다. "
+                             "평지 주행이었거나 충격이 너무 작으면 이렇게 됩니다. 이 시행은 집계에서 빠집니다.")
+                pair = None
+                result["bump_detected"] = False
+        hi, lo = max(pair[0].value_g, pair[1].value_g) - 1.0 if pair else 0, weakest
+        if pair and lo > 0 and hi / lo > 4:
+            flags.append("앞·뒤 바퀴 피크 크기가 4배 넘게 다릅니다. 짝이 맞는지 그래프로 확인하세요.")
     if pair is None:
-        flags.append("앞·뒤 바퀴 피크 한 쌍을 찾지 못했습니다(검출 기준을 낮추거나 원자료를 확인).")
+        if result["bump_detected"] is None:
+            result["bump_detected"] = False
+            flags.append("방지턱 통과(앞·뒤 바퀴 피크 한 쌍)를 찾지 못했습니다. 평지 주행이거나 충격이 진동과 구분되지 않습니다. 이 시행은 집계에서 빠집니다.")
     else:
+        result["bump_detected"] = True
         a, b = pair
         dt = b.t_s - a.t_s
         result.update(front_t_s=round(a.t_s, 4), front_g=round(a.value_g, 4),
@@ -265,7 +302,7 @@ def aggregate(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if run.get("excluded"):
             continue
         a = run.get("analysis") or {}
-        if a.get("peak_delta_g") is None:
+        if a.get("peak_delta_g") is None or a.get("bump_detected") is False:
             continue
         groups.setdefault(group_key(run), []).append(run)
     rows = []

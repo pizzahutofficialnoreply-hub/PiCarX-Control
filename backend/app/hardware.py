@@ -233,9 +233,12 @@ class PiCarXAdapter:
         car = self._require_car()
         car.stop()
         self._set_steering(0)
+        self._last_motor_key = None
+        self._last_angle = None
         self.last_command = {"direction": "stopped", "at": time.time()}
 
-    def _apply_output(self, direction: str, mapping: str, value: float, steering: float, trim: float) -> None:
+    def _apply_output(self, direction: str, mapping: str, value: float, steering: float, trim: float,
+                      equal_wheels: bool = False) -> None:
         """전진·후진 모두 같은 경로로 모터 출력을 적용합니다(방향만 다름).
 
         - ``library``: 0~100을 ``forward()/backward()``에 전달. 라이브러리가 ``value/2 + 50``(%)로 바꿉니다.
@@ -249,8 +252,27 @@ class PiCarXAdapter:
             raise ValueError(f"Unsupported output mapping: {mapping}")
         output = self._clamp(round(max(0.0, value) * max(0.1, trim)), 0, MAX_PWM)
         move = car.forward if direction == "forward" else car.backward
-        self._set_steering(self._clamp(round(steering), -MAX_STEERING, MAX_STEERING))
-        if mapping == "library":
+        angle = self._clamp(round(steering), -MAX_STEERING, MAX_STEERING)
+        motor_key = (direction, mapping, output, equal_wheels)
+        if equal_wheels and motor_key == getattr(self, "_last_motor_key", None):
+            # 측정 중에는 같은 출력을 다시 쓰지 않습니다(바퀴 출력 고정). 조향만 바뀌었으면 서보만 움직입니다.
+            if angle != getattr(self, "_last_angle", None):
+                self._set_steering(angle)
+                self._last_angle = angle
+                if self.last_command:
+                    self.last_command["steering"] = float(angle)
+            return
+        self._set_steering(angle)
+        self._last_angle = angle
+        set_speed = getattr(car, "set_motor_speed", None)
+        if mapping == "library" and equal_wheels and callable(set_speed):
+            # 라이브러리 forward()/backward()는 조향각만큼 안쪽 바퀴 출력을 줄입니다(조향 12° → 12% 감속).
+            # 측정 직진에서는 자이로 보정 때문에 조향이 계속 바뀌어 바퀴 출력이 오르내리므로(멈칫),
+            # 두 바퀴에 같은 출력을 직접 줍니다. 라이브러리의 직진(조향 0)과 같은 호출입니다.
+            sign = 1 if direction == "forward" else -1
+            set_speed(1, sign * output)
+            set_speed(2, -sign * output)
+        elif mapping == "library":
             move(output)
         else:
             pins = getattr(car, "motor_speed_pins", None)
@@ -259,6 +281,7 @@ class PiCarXAdapter:
             move(1 if output > 0 else 0)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
             for pin in pins:
                 pin.pulse_width_percent(output)
+        self._last_motor_key = motor_key
         self.last_command = describe_command(direction, mapping, value, trim, steering, car)
 
     def drive(self, direction: str, speed: int, steering: int, mapping: str = "library", trim: float = 1.0) -> None:
@@ -270,11 +293,12 @@ class PiCarXAdapter:
             angle, direction = abs(angle), "forward"
         if direction not in ("forward", "backward"):
             raise ValueError(f"Unsupported direction: {direction}")
+        self._last_motor_key = None  # 수동 주행은 매번 그대로 보냅니다(회전 시 좌우 차등 유지).
         self._apply_output(direction, mapping, self._clamp(speed, 0, MAX_PWM), angle, trim)
 
     def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0, trim: float = 1.0) -> None:
         """방지턱 실험용 직진·후진(자동 측정 주행과 복귀). ``pwm`` = 라이브러리, ``duty`` = 직접 듀티."""
-        self._apply_output(direction, "duty" if mode == "duty" else "library", value, steering, trim)
+        self._apply_output(direction, "duty" if mode == "duty" else "library", value, steering, trim, equal_wheels=True)
 
     def set_camera_view(self, pan: int, tilt: int) -> None:
         """주행 중 카메라 시야 조절. 모터를 멈추지 않고 저장하지도 않습니다(보정 중심값 기준)."""

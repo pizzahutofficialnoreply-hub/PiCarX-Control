@@ -16,6 +16,34 @@ def synth(output, mass=1000, base=1000, radius=50.0, seed=1, mode="pwm"):
                              wheelbase_mm=95, bump_radius=radius, wheel_radius_mm=33, seed=seed)
 
 
+class FlatGroundTests(unittest.TestCase):
+    def test_flat_floor_vibration_is_not_a_bump(self):
+        import random
+        rng = random.Random(7)
+        t, v = [], []
+        for i in range(3000):
+            x = i / 1000
+            g = 1.0 + rng.gauss(0, 0.04)
+            if rng.random() < 0.01:          # 바닥 이음매·모터 진동: 0.3~0.6 g 짧은 튐
+                g += rng.uniform(0.3, 0.6)
+            t.append(x); v.append(g)
+        res = ia.analyze_run({"t_s": t, "vertical_g": v, "dynamic_g": [abs(x - 1) for x in v]}, wheelbase_mm=95, mass_g=1000)
+        self.assertFalse(res["bump_detected"])
+        self.assertIsNone(res["speed_mps"])
+        runs = [{"id": "x", "condition": {"bump_id": "A", "total_mass_g": 1000, "output_mode": "pwm", "output_value": 50}, "analysis": res}]
+        self.assertEqual(ia.aggregate(runs), [])
+
+    def test_real_bump_still_detected_over_vibration(self):
+        import random
+        rng = random.Random(3)
+        cols = synth(60, seed=5)
+        cols["vertical_g"] = [g + (rng.uniform(0.2, 0.4) if rng.random() < 0.006 else 0) for g in cols["vertical_g"]]
+        res = ia.analyze_run(cols, wheelbase_mm=95, mass_g=1000, bump_radius=50, wheel_radius_mm=33)
+        self.assertTrue(res["bump_detected"])
+        self.assertIsNotNone(res["speed_mps"])
+        self.assertGreater(res["standout_ratio"] or 99, 1.5)
+
+
 class AnalysisTests(unittest.TestCase):
     def test_bump_radius_formula(self):
         self.assertAlmostEqual(ia.bump_radius_mm(10, 60), 50.0)
@@ -100,10 +128,18 @@ class DutyModeTests(unittest.TestCase):
             pin.pulse_width_percent.assert_any_call(35)
         car.reset_mock()
         adapter.drive_experiment("pwm", 80)
-        car.forward.assert_called_once_with(80)
+        # 측정 직진은 조향과 무관하게 두 바퀴에 같은 출력(라이브러리의 직진과 같은 호출)
+        car.set_motor_speed.assert_any_call(1, 80)
+        car.set_motor_speed.assert_any_call(2, -80)
+        car.forward.assert_not_called()
+        car.reset_mock()
+        adapter.drive_experiment("pwm", 80, "forward", 7)   # 같은 출력, 조향만 변경 → 모터 명령 안 보냄
+        car.set_motor_speed.assert_not_called()
+        car.set_dir_servo_angle.assert_called_with(7)
         car.reset_mock()
         adapter.drive_experiment("pwm", 40, "backward", 5.4)
-        car.backward.assert_called_once_with(40)
+        car.set_motor_speed.assert_any_call(1, -40)
+        car.set_motor_speed.assert_any_call(2, 40)
         car.set_dir_servo_angle.assert_called_with(5)
         # 전진과 후진은 같은 출력 경로: 같은 값이면 예상 듀티도 같아야 합니다.
         adapter.drive("forward", 100, 0); fwd = adapter.last_command["expected_duty_percent"]
@@ -130,6 +166,17 @@ class ExperimentApiTests(unittest.TestCase):
                 return state
             time.sleep(0.05)
         self.fail("auto-run did not finish")
+
+    def test_saving_settings_keeps_learned_heading(self):
+        from app.main import app
+        with TestClient(app) as client:
+            s = client.get("/api/experiment/settings").json()
+            s.update(heading_ff_forward=2.5, heading_ff_backward=-1.5)
+            client.put("/api/experiment/settings", json=s)
+            other = {k: v for k, v in s.items() if not k.startswith("heading_ff")}
+            other["jump_g"] = 0.25
+            saved = client.put("/api/experiment/settings", json=other).json()
+            self.assertEqual((saved["heading_ff_forward"], saved["heading_ff_backward"], saved["jump_g"]), (2.5, -1.5, 0.25))
 
     def test_mock_auto_run_saves_analyzes_and_exports(self):
         from app.main import app
@@ -189,10 +236,12 @@ class ExperimentApiTests(unittest.TestCase):
         from app.main import app
         with TestClient(app) as client:
             settings = client.get("/api/experiment/settings").json()
-            self.assertEqual(settings["a_limit_g"], 2.0)
-            settings.update(wheelbase_mm=95, wheel_radius_mm=33, a_limit_mode="manual", a_limit_g=1.8)
+            self.assertEqual(settings["a_limit_preset"], "trl614")
+            self.assertEqual(settings["a_limit_effective_g"], 1.7)
+            settings.update(wheelbase_mm=95, wheel_radius_mm=33, a_limit_mode="manual", a_limit_preset="custom", a_limit_g=1.8)
             settings["bumps"] = [{k: b[k] for k in ("id", "name", "height_mm", "width_mm")} for b in settings["bumps"]]
-            settings.pop("max_output")
+            for k in ("max_output", "a_limit_effective_g", "a_limit_presets"):
+                settings.pop(k)
             client.put("/api/experiment/settings", json=settings)
             body = {"condition": {"trial": 4, "base_mass_g": 1000, "output_value": 60},
                     "pre_roll_s": 0.3, "run_seconds": 0.3, "tail_s": 0.1, "repeats": 3, "return_enabled": True,
@@ -210,6 +259,10 @@ class ExperimentApiTests(unittest.TestCase):
             self.assertEqual(len(state["completed_run_ids"]), 3)
             listing = client.get("/api/experiment/runs").json()
             self.assertEqual(sorted(r["condition"]["trial"] for r in listing["runs"]), [4, 5, 6])
+            ids = ",".join(r["id"] for r in listing["runs"])
+            series = client.get(f"/api/experiment/series?ids={ids}").json()["series"]
+            self.assertEqual(len(series), 3)
+            self.assertTrue(all(abs(min(x["t"], key=abs)) < 0.01 for x in series))  # 앞바퀴 피크가 t = 0
             crit = listing["criteria"]["A"]
             self.assertEqual(crit["a_limit_g"], 1.8)
             self.assertEqual(len(crit["vmax_by_mass"]), 1)
