@@ -836,6 +836,7 @@ async def list_runs():
             continue
         run["analysis"] = run_analysis(run, cols, settings)
         store.put(run)
+    runs = ia.harmonize_pairs(runs)
     return {"simulated": simulated, "runs": [run_summary(r) for r in runs], **analysis_bundle(runs, settings)}
 
 
@@ -868,6 +869,8 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, points: int = 1500):
     run = store.get(run_id)
+    same = [r for r in store.list_runs() if r.get("simulated") == run.get("simulated")]
+    run = next((r for r in ia.harmonize_pairs(same) if r.get("id") == run_id), run)
     cols = await asyncio.to_thread(store.read_columns, run_id)
     base = {k: cols[k] for k in ("t_s", "vertical_g", "dynamic_g")}
     hz = store.load_settings().filter_hz

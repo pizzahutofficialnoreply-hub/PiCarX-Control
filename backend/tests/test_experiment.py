@@ -366,3 +366,24 @@ class ReturnTapeStopTests(unittest.TestCase):
         self.assertTrue(out["stopped_on_mark"])
         self.assertLess(out["elapsed_s"], 1.0)
         self.assertIsNone(ex._tape_detector(SimpleNamespace(line=LineSettings())))
+
+
+class HarmonizeTests(unittest.TestCase):
+    def test_outlier_pair_is_repicked_to_match_condition(self):
+        def run(i, front, rear, extra=()):
+            cands = [{"t_s": front, "g": 3.0, "landing": False}, {"t_s": rear, "g": 2.0, "landing": False}] + [
+                {"t_s": t, "g": g, "landing": False} for t, g in extra]
+            cands.sort(key=lambda c: c["t_s"])
+            dt = rear - front
+            return {"id": f"r{i}", "condition": {"bump_id": "A", "total_mass_g": 600, "output_mode": "pwm", "output_value": 50},
+                    "analysis": {"bump_detected": True, "pair_source": "auto", "front_t_s": front, "rear_t_s": rear, "axle_dt_s": dt,
+                                 "speed_mps": 0.095 / dt, "candidates": cands, "params": {"wheelbase_mm": 95}, "flags": []}}
+        runs = [run(1, 1.0, 1.38), run(2, 1.1, 1.47), run(3, 0.9, 1.29),
+                run(4, 1.0, 1.95, extra=[(1.37, 1.8)])]        # 뒷바퀴를 0.95 s 뒤 진동으로 잘못 고름
+        out = {r["id"]: r for r in ia.harmonize_pairs(runs)}
+        fixed = out["r4"]["analysis"]
+        self.assertEqual(fixed["pair_source"], "consistency")
+        self.assertAlmostEqual(fixed["axle_dt_s"], 0.37, places=3)
+        self.assertAlmostEqual(fixed["speed_mps"], 0.095 / 0.37, places=3)
+        self.assertEqual(runs[3]["analysis"]["axle_dt_s"], 0.95)   # 원본은 그대로
+        self.assertEqual(out["r1"]["analysis"]["pair_source"], "auto")

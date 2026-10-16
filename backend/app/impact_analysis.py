@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 G = 9.80665
-MIN_SPEED_MPS = 0.03
-MAX_SPEED_MPS = 4.0
+MIN_SPEED_MPS = 0.05  # PiCar-X가 방지턱을 넘으며 낼 수 있는 속도 범위(이 밖이면 바퀴 짝이 아님)
+MAX_SPEED_MPS = 2.0
 
 
 # --------------------------------------------------------------------------- 형상
@@ -311,7 +311,9 @@ def analyze_run(
         seg = [v[i] for i in range(len(v)) if peaks[0].t_s - 0.05 <= t[i] <= peaks[-1].t_s + 0.3]
         if seg:
             result["min_g"] = round(min(seg), 4)
-            result["jump"] = bool(segments) or min(seg) < jump_g
+            # 진동 한 점이 잠깐 기준 아래로 내려간 것은 점프가 아닙니다. 5 ms 이상 이어진 공중 구간만 인정합니다.
+            lo_t, hi_t = peaks[0].t_s - 0.05, peaks[-1].t_s + 0.3
+            result["jump"] = any(end >= lo_t and start <= hi_t for start, end, _ in segments)
     if landing and not any("겹쳐" in f for f in flags):
         flags.append(f"지면 이탈 후 착지 피크 {result['landing_g']:.2f} g를 앞·뒤 바퀴 피크에서 제외했습니다.")
 
@@ -347,6 +349,56 @@ def group_key(run: dict[str, Any]) -> tuple:
     c = run.get("condition", {})
     return (c.get("bump_id") or "-", round(float(c.get("total_mass_g") or 0) / 5) * 5,
             c.get("output_mode") or "pwm", int(round(float(c.get("output_value") or 0))))
+
+
+def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[dict[str, Any]]:
+    """같은 조건 반복 회차끼리 앞·뒤 바퀴 간격(Δt)을 맞춥니다.
+
+    같은 조건이면 통과 속도가 비슷해야 하므로, 회차들의 Δt 중앙값에서 30% 넘게 벗어난 회차는
+    저장된 피크 후보 중 중앙값에 가장 가까운(±25%) 쌍으로 다시 고릅니다. 맞는 쌍이 없으면 그대로 둡니다.
+    원본은 바꾸지 않고 고친 복사본 목록을 돌려줍니다(사람이 직접 지정한 쌍은 건드리지 않음).
+    """
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for run in runs:
+        a = run.get("analysis") or {}
+        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") == "manual" or not a.get("axle_dt_s"):
+            continue
+        groups.setdefault(group_key(run), []).append(run)
+    fixed: dict[str, dict[str, Any]] = {}
+    for members in groups.values():
+        if len(members) < 3:
+            continue
+        dts = sorted(m["analysis"]["axle_dt_s"] for m in members)
+        med = dts[len(dts) // 2] if len(dts) % 2 else (dts[len(dts) // 2 - 1] + dts[len(dts) // 2]) / 2
+        for m in members:
+            a = m["analysis"]
+            if abs(a["axle_dt_s"] / med - 1) <= tolerance:
+                continue
+            cands = [c for c in a.get("candidates") or [] if not c.get("landing")]
+            best = None
+            for i, c1 in enumerate(cands):
+                for c2 in cands[i + 1:]:
+                    dt = c2["t_s"] - c1["t_s"]
+                    if dt > 0 and abs(dt / med - 1) <= 0.25:
+                        score = c1["g"] + c2["g"]
+                        if best is None or score > best[0]:
+                            best = (score, c1, c2)
+            if best is None:
+                continue
+            _, f, r = best
+            new = dict(a)
+            dt = r["t_s"] - f["t_s"]
+            wb = (a.get("params") or {}).get("wheelbase_mm")
+            new.update(front_t_s=f["t_s"], front_g=f["g"], rear_t_s=r["t_s"], rear_g=r["g"], axle_dt_s=round(dt, 4),
+                       pair_source="consistency")
+            if wb:
+                new["speed_mps"] = round(wb / 1000.0 / dt, 4)
+                if a.get("r_eff_m"):
+                    new["pi"] = round(new["speed_mps"] ** 2 / (G * a["r_eff_m"]), 4)
+            new["flags"] = list(a.get("flags") or []) + [
+                f"같은 조건 다른 회차들의 앞·뒤 바퀴 간격({med * 1000:.0f} ms)과 많이 달라({a['axle_dt_s'] * 1000:.0f} ms) 그 간격에 맞는 피크 쌍으로 다시 골랐습니다."]
+            fixed[m["id"]] = {**m, "analysis": new}
+    return [fixed.get(r.get("id"), r) for r in runs]
 
 
 def aggregate(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
