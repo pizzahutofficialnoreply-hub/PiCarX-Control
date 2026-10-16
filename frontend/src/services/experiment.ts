@@ -27,6 +27,8 @@ export type ExperimentSettings = {
   return_output: number | null;
   return_scale: number;
   return_stop_on_tape?: boolean;
+  stop_after_bump?: boolean;
+  after_bump_s?: number;
   rest_s: number;
   heading_hold: boolean;
   heading_gain: number;

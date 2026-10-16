@@ -63,6 +63,9 @@ class MPU6050Service:
         self._heading = 0.0
         self._heading_active = False
         self._gyro_bias = 0.0
+        # 앞뒤·좌우 기울기(수평 두 축 자이로 적분, °). 방지턱을 다 넘었는지 실시간으로 알아내는 데 씁니다.
+        self._tilt = [0.0, 0.0]
+        self._tilt_bias = [0.0, 0.0]
         self._last_t: float | None = None
         # 단조 시간 ↔ 실제 시각 변환 기준
         self._mono0 = time.monotonic()
@@ -131,7 +134,10 @@ class MPU6050Service:
                 with self._lock:
                     if self._heading_active and self._last_t is not None and self._bias is not None:
                         yaw = self._vertical_sign * sample[4 + self._vertical_axis] - self._gyro_bias
-                        self._heading += yaw * (sample[0] - self._last_t)
+                        dt = sample[0] - self._last_t
+                        self._heading += yaw * dt
+                        for n, ax in enumerate(a for a in range(3) if a != self._vertical_axis):
+                            self._tilt[n] += (sample[4 + ax] - self._tilt_bias[n]) * dt
                     self._last_t = sample[0]
                     self._samples.append(sample)
                     if self._recording:
@@ -234,6 +240,10 @@ class MPU6050Service:
             if len(recent) < 10:
                 return False
             self._gyro_bias = self._vertical_sign * sum(recent) / len(recent)
+            for n, ax in enumerate(a for a in range(3) if a != self._vertical_axis):
+                vals = [s[4 + ax] for s in self._samples if t_end - s[0] <= still_window_s]
+                self._tilt_bias[n] = sum(vals) / len(vals)
+                self._tilt[n] = 0.0
             self._heading = 0.0
             self._heading_active = True
             return True
@@ -241,6 +251,11 @@ class MPU6050Service:
     def heading_deg(self) -> float | None:
         with self._lock:
             return self._heading if self._heading_active else None
+
+    def tilt_deg(self) -> tuple[float, float] | None:
+        """수평 두 축의 기울기(°). heading_reset 이후에만 값이 있습니다."""
+        with self._lock:
+            return (self._tilt[0], self._tilt[1]) if self._heading_active else None
 
     def heading_stop(self) -> None:
         with self._lock:

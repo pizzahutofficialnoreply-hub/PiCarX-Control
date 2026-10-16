@@ -487,3 +487,34 @@ class PitchTimingTests(unittest.TestCase):
             r = client.get("/api/experiment/export/summary.csv")
             self.assertEqual(r.status_code, 200)
             self.assertIn("통과 속도", r.text)
+
+
+class BumpPassWatcherTests(unittest.TestCase):
+    def _feed(self, profile):
+        from app.experiment import BumpPassWatcher
+        w = BumpPassWatcher()
+        for i in range(400):
+            t = i * 0.01
+            if w.update((profile(t), 0.3 * profile(t)), t):
+                return t, w
+        return None, w
+
+    def test_wide_and_narrow_bumps_end_after_rear_wheel(self):
+        def wide(t):   # 앞 오름 1.0, 뒤 오름 1.4(수평), 앞 내림 1.6(−), 뒤 내림 2.0(수평)
+            return 6.0 if 1.0 <= t < 1.4 else (-6.0 if 1.6 <= t < 2.0 else 0.0)
+        def narrow(t):  # 앞 오름 1.0, 앞 내림 1.1, 뒤 오름 1.4, 뒤 내림 1.5
+            return 6.0 if 1.0 <= t < 1.1 else (-6.0 if 1.4 <= t < 1.5 else 0.0)
+        tw, _ = self._feed(wide)
+        tn, _ = self._feed(narrow)
+        self.assertTrue(2.0 <= tw <= 2.2, tw)
+        self.assertTrue(1.5 <= tn <= 1.7, tn)
+
+    def test_flat_floor_never_stops(self):
+        import math
+        t, _ = self._feed(lambda t: 0.8 * math.sin(7 * t))
+        self.assertIsNone(t)
+
+    def test_negative_mount_sign(self):
+        t, w = self._feed(lambda t: -5.0 if 1.0 <= t < 1.3 else (5.0 if 1.5 <= t < 1.8 else 0.0))
+        self.assertIsNotNone(t)
+        self.assertEqual(w.sign, -1.0)

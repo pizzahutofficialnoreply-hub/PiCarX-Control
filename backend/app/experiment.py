@@ -83,6 +83,8 @@ class ExperimentSettings(BaseModel):
     tail_s: float = Field(default=0.6, ge=0.1, le=3)
     repeats: int = Field(default=5, ge=1, le=20)
     return_enabled: bool = True
+    stop_after_bump: bool = Field(default=True, description="방지턱을 다 넘으면(차 기울기가 +, −를 거쳐 다시 수평) 자동 정지. 못 알아내면 주행 시간까지 달림")
+    after_bump_s: float = Field(default=0.3, ge=0.0, le=2.0, description="다 넘은 뒤 더 달리는 시간(s)")
     return_stop_on_tape: bool = Field(default=False, description="후진 복귀 때 바닥의 출발선 테이프를 그레이스케일 센서가 보면 멈춤(라인 보정 필요)")
     return_output: float | None = Field(default=None, ge=1, le=100, description="복귀 후진 출력(없으면 측정 출력과 같음)")
     return_scale: float = Field(default=1.0, ge=0.3, le=3, description="복귀 후진 시간 = 주행 시간 × 배율")
@@ -375,7 +377,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return {k: run.get(k) for k in ("id", "created_at", "simulated", "source", "aborted", "excluded", "condition", "bump", "analysis", "recording",
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
-                                    "heading_ff_learned", "heading_flipped", "steer_saturated")}
+                                    "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -550,6 +552,48 @@ async def _wait(ctl, seconds: float, generation: int) -> None:
         await asyncio.sleep(min(0.05, max(0.0, end - loop.time())))
 
 
+class BumpPassWatcher:
+    """차 기울기로 '방지턱을 다 넘었는지' 실시간 판단합니다.
+
+    앞바퀴가 오르면 한쪽으로 기울고(+), 이후 반대쪽(−)을 거쳐(앞바퀴가 내려오거나 뒷바퀴가 오름),
+    마지막에 뒷바퀴가 내려오면 다시 수평이 됩니다. 방지턱 폭과 상관없이 '+ → − → 수평' 순서입니다.
+    """
+
+    def __init__(self, up_deg: float = 2.5, down_deg: float = 1.5, level_deg: float = 1.0, level_s: float = 0.12) -> None:
+        self.up, self.down, self.level, self.level_s = up_deg, down_deg, level_deg, level_s
+        self.axis: int | None = None
+        self.sign = 1.0
+        self.stage = "wait_up"
+        self.level_since: float | None = None
+        self.events: dict[str, float] = {}
+
+    def update(self, tilt: tuple[float, float] | None, now: float) -> bool:
+        if tilt is None:
+            return False
+        if self.axis is None:
+            for n in (0, 1):
+                if abs(tilt[n]) >= self.up:
+                    self.axis, self.sign = n, (1.0 if tilt[n] > 0 else -1.0)
+                    self.stage = "wait_down"
+                    self.events["up"] = now
+                    break
+            return False
+        a = self.sign * tilt[self.axis]
+        if self.stage == "wait_down" and a <= -self.down:
+            self.stage = "wait_level"
+            self.events["down"] = now
+        elif self.stage == "wait_level":
+            if abs(a) <= self.level:
+                self.level_since = self.level_since if self.level_since is not None else now
+                if now - self.level_since >= self.level_s:
+                    self.stage = "passed"
+                    self.events["passed"] = now
+                    return True
+            else:
+                self.level_since = None
+        return self.stage == "passed"
+
+
 class HeadingController:
     """자이로 방향 유지(비례 + 적분 + 학습된 기본 조향).
 
@@ -603,7 +647,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                      heading_hold: bool, gain: float, track: bool | None = None,
                      line: LineTracker | None = None, kick_ms: int = 0,
                      ki: float = 0.0, ff: float = 0.0,
-                     stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0, polarity: int = 1) -> dict[str, Any]:
+                     stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0, polarity: int = 1,
+                     bump_watch: "BumpPassWatcher | None" = None, after_bump_s: float = 0.3) -> dict[str, Any]:
     """정해진 시간 동안 일정한 출력으로 직진/후진.
 
     출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
@@ -621,6 +666,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     log: list[list[float]] = []
     prev_t = start
     stopped_on_mark = False
+    passed_at: float | None = None
     while loop.time() < end:
         if ctl.stop_generation != generation:
             raise Aborted()
@@ -638,6 +684,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             if not ok:
                 line_lost = True
                 break
+        if bump_watch is not None and passed_at is None and bump_watch.update(mpu6050_service.tilt_deg(), now - start):
+            passed_at = now
+            end = min(end, now + after_bump_s)
         if stop_when is not None and now - start >= min_s:
             raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
             if stop_when(raw):
@@ -654,6 +703,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "heading_end_deg": round(last, 2) if last is not None else None,
             "line_lost": line_lost if line is not None else None,
             "drive_log": log[:400], "stopped_on_mark": stopped_on_mark, "elapsed_s": round(loop.time() - start, 3),
+            "bump_passed_s": round(passed_at - start, 3) if passed_at is not None else None,
+            "bump_events": dict(bump_watch.events) if bump_watch is not None else None,
             "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None,
             "heading_flipped": bool(controller and controller.flipped),
             "steer_saturated": bool(controller and sum(1 for row in log if abs(row[2]) >= MAX_HEADING_CORRECTION_DEG - 0.01) > len(log) * 0.3)}
@@ -724,7 +775,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], "forward", gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
                                           ki=settings.heading_ki, ff=store.load_settings().heading_ff_forward if hold else 0.0,
-                                          polarity=store.load_settings().heading_sign)
+                                          polarity=store.load_settings().heading_sign,
+                                          bump_watch=BumpPassWatcher() if (settings.stop_after_bump and track) else None,
+                                          after_bump_s=settings.after_bump_s)
+            auto_runner.last_forward_s = drive_info.get("elapsed_s")
             if hold and not drive_info.get("line_lost"):
                 drive_info["heading_ff_learned"] = _learn_heading("forward", drive_info.get("steer_mean_late"), drive_info)
         finally:
@@ -802,7 +856,9 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                 try:
                     # 복귀(후진)는 테이프 센서가 앞쪽에 있어 라인 대신 자이로로 방향을 유지합니다.
                     hold = bool(opts["steering_source"] in ("gyro", "line") and not simulated and mpu6050_service.heading_deg() is not None)
-                    planned = opts["run_seconds"] * opts["return_scale"]
+                    # 방지턱을 넘고 일찍 멈췄으면 실제로 달린 시간만큼만 되돌아갑니다(속도마다 거리가 달라도 출발선 근처로).
+                    fwd = getattr(auto_runner, "last_forward_s", None) or opts["run_seconds"]
+                    planned = fwd * opts["return_scale"]
                     tape = _tape_detector(settings) if opts["return_stop_on_tape"] and not simulated else None
                     back = await _drive_for(ctl, cond.output_mode, opts["return_output"], planned * (1.6 if tape else 1.0),
                                             "backward", gen, hold, settings.heading_gain,
