@@ -8,7 +8,7 @@ import type { ExperimentContext } from './context';
 type Check = { ok: boolean; text: string };
 type DataCheck = { mode: string; real_runs: number; simulated_runs: number; mean_sample_rate_hz: number | null; checks: Check[]; last_real_run: { id: string; created_at: string } | null };
 type DriveSettings = { mapping: 'library' | 'duty'; trim_forward: number; trim_backward: number; max_pwm: number };
-type Cmd = { direction: string; mapping: string; requested: number; applied: number; expected_duty_percent: number; trim: number; pins?: { duty_percent?: number[]; direction_pins?: number[]; cali_speed_value?: number[] } | null } | null;
+type Cmd = { direction: string; mapping: string; requested: number; applied: number; expected_duty_percent: number; trim: number; pins?: { cali_dir_value?: number[]; cali_speed_value?: number[] } | null } | null;
 type SymResult = {
   axis: string; ratio_backward_to_forward: number | null; note?: string;
   forward: { peak_speed_mps: number | null; series: [number, number][] }; backward: { peak_speed_mps: number | null; series: [number, number][] };
@@ -105,7 +105,7 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
 
   const r = sym?.result;
   const tapeRatio = distF && distB ? Number(distB) / Number(distF) : null;
-  const cmdRow = (name: string, c: Cmd | undefined) => <tr><td>{name}</td><td>{c ? `${c.mapping === 'duty' ? '직접 듀티' : '라이브러리'} ${c.requested}` : '—'}</td><td>{c ? `${c.applied} (×${c.trim})` : '—'}</td><td>{c ? `${c.expected_duty_percent}%` : '—'}</td><td>{c?.pins?.duty_percent ? c.pins.duty_percent.map(d => `${d}%`).join(' / ') : '읽기 불가'}</td><td>{c?.pins?.direction_pins ? c.pins.direction_pins.join(' / ') : '—'}</td></tr>;
+  const cmdRow = (name: string, c: Cmd | undefined) => <tr><td>{name}</td><td>{c ? `${c.mapping === 'duty' ? '직접 듀티' : '라이브러리'} ${c.requested}` : '—'}</td><td>{c ? `${c.applied} (×${c.trim})` : '—'}</td><td>{c ? `${c.expected_duty_percent}%` : '—'}</td><td>{c?.pins?.cali_dir_value ? c.pins.cali_dir_value.join(' / ') : '—'}</td></tr>;
 
   return <>
     <section className="experiment-layout">
@@ -137,8 +137,8 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
       {tune.log.length > 0 && <ol className="exp-tune-log">{tune.log.map((t, i) => <li key={i}>{t}</li>)}</ol>}
       {r && <>
         {r.note && <p className="exp-hint">{r.note}</p>}
-        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>방향</th><th>요청</th><th>적용 (배율)</th><th>예상 듀티</th><th>핀 듀티 L / R</th><th>방향 핀</th></tr></thead><tbody>{cmdRow('전진', r.commands.forward)}{cmdRow('후진', r.commands.backward)}</tbody></table></div>
-        <p className="exp-hint">'핀 듀티'가 전진과 후진에서 같으면 앱은 같은 출력을 보낸 것입니다. 그런데도 속도가 다르면 모터·기어·바퀴 쪽 차이이므로 아래 배율로 맞춥니다. 핀 듀티가 다르면 라이브러리·보정값(cali_speed_value) 문제입니다.</p>
+        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>방향</th><th>요청</th><th>적용 (배율)</th><th>모터에 가는 듀티</th><th>방향 보정 L / R</th></tr></thead><tbody>{cmdRow('전진', r.commands.forward)}{cmdRow('후진', r.commands.backward)}</tbody></table></div>
+        <p className="exp-hint">'모터에 가는 듀티'가 전진과 후진에서 같으면 앱은 같은 출력을 보낸 것입니다. 그런데도 속도가 다르면 모터·기어·바퀴 쪽 차이이므로 아래 배율로 맞춥니다. (모터 핀을 직접 읽으면 robot_hat이 방향 핀을 입력으로 바꿔 바퀴가 떨리므로 읽지 않습니다.)</p>
         <div className="exp-fit">
           <div><small>가속도 적분 최고 속도 (진행축 {r.axis})</small><b>전진 {fmt(r.forward.peak_speed_mps, 3, 'm/s')} · 후진 {fmt(r.backward.peak_speed_mps, 3, 'm/s')}</b><span>후진/전진 = {fmt(r.ratio_backward_to_forward, 2)} · 적분 추정이라 ±10% 정도 오차가 있습니다. 아래 줄자 측정으로 확인하세요.</span></div>
           <div><small>제안</small><b>{r.suggestion?.text ?? '—'}</b>{r.suggestion && (r.suggestion.trim_backward || r.suggestion.trim_forward) ? <button className="secondary" onClick={() => void saveDrive({ ...(r.suggestion?.trim_backward ? { trim_backward: r.suggestion.trim_backward } : {}), ...(r.suggestion?.trim_forward ? { trim_forward: r.suggestion.trim_forward } : {}) })}>제안 배율 적용</button> : null}</div>

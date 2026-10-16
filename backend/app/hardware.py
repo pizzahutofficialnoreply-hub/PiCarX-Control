@@ -385,27 +385,15 @@ class PiCarXAdapter:
 
 
 def _read_pins(car) -> dict | None:
-    """모터 핀에 실제로 적용된 듀티비와 방향 핀 값을 읽습니다(robot_hat이 지원할 때만)."""
+    """보정값만 읽습니다. 모터 핀 자체는 읽지 않습니다.
+
+    robot_hat의 ``Pin.value()``는 인자 없이 부르면 핀을 '입력'으로 바꿉니다. 방향 핀이 입력이 되면
+    모터 드라이버의 방향 신호가 떠서 바퀴가 앞뒤로 떨립니다(실제로 왼쪽 바퀴 떨림의 원인이었음).
+    그래서 핀 값 대신 라이브러리가 계산하는 기대 듀티(``expected_duty_percent``)만 보여 줍니다.
+    """
     if car is None:
         return None
     out: dict = {}
-    try:
-        pins = getattr(car, "motor_speed_pins", None) or []
-        duties = []
-        for pin in pins:
-            value = pin.pulse_width_percent()
-            duties.append(None if value is None else round(float(value), 1))
-        if duties:
-            out["duty_percent"] = duties
-    except Exception:
-        pass
-    try:
-        dirs = getattr(car, "motor_direction_pins", None) or []
-        values = [int(pin.value()) for pin in dirs]
-        if values:
-            out["direction_pins"] = values
-    except Exception:
-        pass
     try:
         cali = getattr(car, "cali_speed_value", None)
         if cali is not None:

@@ -115,6 +115,25 @@ class AnalysisTests(unittest.TestCase):
 
 
 class DutyModeTests(unittest.TestCase):
+    def test_never_reads_motor_pins(self):
+        """robot_hat의 인자 없는 Pin.value()/pulse_width_percent()는 핀 상태를 바꿀 수 있어 호출하면 안 됩니다."""
+        adapter = PiCarXAdapter.__new__(PiCarXAdapter)
+        adapter.connected, adapter.connection_error, adapter.steering_center = True, None, 0
+        car = MagicMock()
+        car.motor_speed_pins = [MagicMock(), MagicMock()]
+        car.motor_direction_pins = [MagicMock(), MagicMock()]
+        adapter._car = car
+        adapter.drive("forward", 60, 0)
+        adapter.drive("backward", 60, 10)
+        adapter.drive_experiment("pwm", 80)
+        adapter.drive_experiment("duty", 50)
+        for pin in car.motor_direction_pins:
+            for call in pin.value.call_args_list:
+                self.assertTrue(call.args or call.kwargs, "방향 핀을 인자 없이 읽었습니다")
+        for pin in car.motor_speed_pins:
+            for call in pin.pulse_width_percent.call_args_list:
+                self.assertTrue(call.args or call.kwargs, "PWM 핀을 인자 없이 읽었습니다")
+
     def test_duty_mode_sets_direction_then_overrides_pins(self):
         adapter = PiCarXAdapter.__new__(PiCarXAdapter)
         adapter.connected, adapter.connection_error, adapter.steering_center = True, None, 0

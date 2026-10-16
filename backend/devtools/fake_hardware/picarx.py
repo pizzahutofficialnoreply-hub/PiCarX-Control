@@ -18,11 +18,14 @@ class _Pin:
 
 
 class _DirPin:
+    """실제 robot_hat처럼 인자 없는 value()는 핀을 입력으로 바꾼 것으로 기록합니다(앱이 하면 안 됨)."""
     def __init__(self):
         self._v = 0
+        self.input_reads = 0
 
     def value(self, v=None):
         if v is None:
+            self.input_reads += 1
             return self._v
         self._v = int(v)
 
