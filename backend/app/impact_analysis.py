@@ -373,6 +373,99 @@ def _manual_pair(t: Sequence[float], v: Sequence[float], front: float, rear: flo
     return a, b
 
 
+def entry_sin(bump_radius_mm: float | None, bump_height_mm: float | None, wheel_radius_mm: float | None) -> float | None:
+    """바퀴 중심이 방지턱(원호)에 오르기 시작할 때 진행 방향이 꺾이는 각 α의 sin.
+
+    바퀴 중심은 반지름 R+r인 원(방지턱 원호를 바퀴 반지름만큼 바깥으로 넓힌 원)을 따라 움직이고,
+    평지 높이(r)에서 이 원과 만나는 점에서 갑자기 위로 꺾입니다.
+        sin α = √((R+r)² − (R−h+r)²) / (R+r)
+    수평 속도 v로 들어오면 위쪽 속도가 순간적으로 v·sin α 생기므로, 충격량(이론) = m·v·sin α 입니다.
+    """
+    if not bump_radius_mm or not bump_height_mm or wheel_radius_mm is None:
+        return None
+    big = bump_radius_mm + wheel_radius_mm
+    low = bump_radius_mm - bump_height_mm + wheel_radius_mm
+    if big <= 0 or low >= big:
+        return None
+    return (big * big - low * low) ** 0.5 / big
+
+
+def _pulse_metrics(t: Sequence[float], v: Sequence[float], result: dict[str, Any], mass_g: float | None,
+                   bump_radius: float | None, bump_height_mm: float | None, wheel_radius_mm: float | None) -> dict[str, Any]:
+    """앞·뒤 바퀴 충격 펄스의 넓이(충격량)와 길이(Δt), 그리고 이론값.
+
+    - Δv_z = g·∫(a−1)dt : 펄스 동안 생긴 위쪽 속도 변화(m/s). 넓이는 저역 필터로 거의 바뀌지 않습니다.
+    - 충격량 I = m·Δv_z (N·s), 평균 충격력 = I / Δt
+    - 펄스 구간: 피크에서 양옆으로 (a−1)이 피크 높이의 10% 아래로 떨어질 때까지(최대 ±60 ms)
+    - 앞바퀴 + 뒷바퀴 Δv_z 합은 센서 위치와 상관없이 차 전체가 받은 위쪽 속도 변화(이론 v·sin α)와 비교합니다.
+    - 원운동: 바퀴가 원호 꼭대기를 지날 때 a = 1 − v²/(g·R_eff) (g 단위) → 꼭대기 최솟값과 비교
+    """
+    out: dict[str, Any] = {"impulse_front_ns": None, "impulse_rear_ns": None, "impulse_ns": None, "dvz_mps": None,
+                           "pulse_s": None, "pulse_rear_s": None, "avg_force_n": None, "momentum_nsx": None,
+                           "entry_sin": None, "dvz_theory_mps": None, "impulse_theory_ns": None,
+                           "crest_min_g": None, "crest_theory_g": None}
+    n = len(t)
+    if n < 5 or result.get("front_t_s") is None:
+        return out
+
+    def pulse(tc: float) -> tuple[float, float] | None:
+        i = min(range(n), key=lambda k: abs(t[k] - tc))
+        top = v[i] - 1.0
+        if top <= 0:
+            return None
+        lim = 0.1 * top
+        a = i
+        while a > 0 and v[a - 1] - 1.0 > lim and tc - t[a - 1] <= 0.06:
+            a -= 1
+        b = i
+        while b < n - 1 and v[b + 1] - 1.0 > lim and t[b + 1] - tc <= 0.06:
+            b += 1
+        area = 0.0
+        for k in range(a, b):
+            area += ((v[k] - 1.0) + (v[k + 1] - 1.0)) / 2 * (t[k + 1] - t[k])
+        width = t[b] - t[a]
+        return area, width
+
+    pf = pulse(result["front_t_s"])
+    pr = pulse(result["rear_t_s"]) if result.get("rear_t_s") is not None else None
+    m = (mass_g or 0) / 1000.0
+    if pf:
+        out["pulse_s"] = round(pf[1], 5)
+        if m:
+            out["impulse_front_ns"] = round(m * G * pf[0], 6)
+            if pf[1] > 0:
+                out["avg_force_n"] = round(m * G * pf[0] / pf[1], 4)
+    if pr:
+        out["pulse_rear_s"] = round(pr[1], 5)
+        if m:
+            out["impulse_rear_ns"] = round(m * G * pr[0], 6)
+    if pf and pr:
+        dv = G * (pf[0] + pr[0])
+        out["dvz_mps"] = round(dv, 5)
+        if m:
+            out["impulse_ns"] = round(m * dv, 6)
+    sp = result.get("speed_mps")
+    s_in = entry_sin(bump_radius, bump_height_mm, wheel_radius_mm)
+    out["entry_sin"] = None if s_in is None else round(s_in, 4)
+    if sp:
+        if m:
+            out["momentum_nsx"] = round(m * sp, 5)
+        if s_in is not None:
+            out["dvz_theory_mps"] = round(sp * s_in, 5)
+            if m:
+                out["impulse_theory_ns"] = round(m * sp * s_in, 6)
+    # 꼭대기(원운동) 구간: 앞바퀴 피크 직후 ~ 뒷바퀴 피크 직전(뒷바퀴가 없으면 앞바퀴 뒤 0.15 s)
+    lo_t = result["front_t_s"] + 0.01
+    hi_t = (result["rear_t_s"] - 0.01) if result.get("rear_t_s") is not None else lo_t + 0.15
+    seg = [v[k] for k in range(n) if lo_t <= t[k] <= hi_t]
+    if seg:
+        out["crest_min_g"] = round(min(seg), 4)
+    r_eff = effective_radius_m(bump_radius, wheel_radius_mm)
+    if r_eff and sp:
+        out["crest_theory_g"] = round(1.0 - sp * sp / (G * r_eff), 4)
+    return out
+
+
 def _restore_peak_heights(result: dict[str, Any], t: Sequence[float], raw: Sequence[float],
                           lo: float | None, hi: float | None, w: float = 0.01) -> None:
     """진동을 거르면 충격 봉우리도 낮아지므로, 찾은 피크 시각 ±10 ms 안의 '거르기 전' 최댓값으로 높이를 되돌립니다.
@@ -620,6 +713,8 @@ def analyze_run(
     if landing and not any("겹쳐" in f for f in flags):
         flags.append(f"지면 이탈 후 착지 피크 {result['landing_g']:.2f} g를 앞·뒤 바퀴 피크에서 제외했습니다.")
 
+    # 이론식 ② 충격량·③ 원운동 비교용 값(바퀴가 턱에 오르는 순간의 충격 펄스)
+    result.update(_pulse_metrics(t, v, result, mass_g, bump_radius, bump_height_mm, wheel_radius_mm))
     if filter_hz:
         _restore_peak_heights(result, t_all, v_raw_all, window[0], window[1])
 
@@ -644,6 +739,51 @@ def trimmed(values: list[float]) -> tuple[list[float], list[float]]:
         return list(values), []
     ordered = sorted(values)
     return ordered[1:-1], [ordered[0], ordered[-1]]
+
+
+OUTLIER_METHODS = ("trim", "sigma2", "iqr", "none")
+
+
+def quartile_inc(sorted_vals: list[float], q: float) -> float:
+    """엑셀 QUARTILE.INC(=PERCENTILE.INC)과 같은 선형 보간 사분위수."""
+    if not sorted_vals:
+        raise ValueError("empty")
+    pos = (len(sorted_vals) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
+
+
+def outlier_flags(values: list[float], method: str = "trim") -> tuple[list[bool], dict[str, Any]]:
+    """값마다 '이상치로 뺄지' 여부와 판정에 쓴 기준을 돌려줍니다.
+
+    - trim: 3개 이상이면 최댓값·최솟값을 하나씩 뺌(계획서의 원래 규칙)
+    - sigma2: 평균 ± 2×표본표준편차(엑셀 AVERAGE, STDEV.S) 밖이면 뺌
+    - iqr: Q1 − 1.5×IQR 보다 작거나 Q3 + 1.5×IQR 보다 크면 뺌(엑셀 QUARTILE.INC, 투키 울타리)
+    - none: 빼지 않음
+    """
+    n = len(values)
+    out = [False] * n
+    info: dict[str, Any] = {"method": method}
+    if method == "trim":
+        if n >= 3:
+            order = sorted(range(n), key=lambda i: values[i])
+            out[order[0]] = out[order[-1]] = True
+        return out, info
+    if method == "sigma2" and n >= 3:
+        m = sum(values) / n
+        s = (sum((x - m) ** 2 for x in values) / (n - 1)) ** 0.5
+        info.update(mean=round(m, 4), sd=round(s, 4), low=round(m - 2 * s, 4), high=round(m + 2 * s, 4))
+        out = [abs(x - m) > 2 * s for x in values]
+    elif method == "iqr" and n >= 4:
+        sv = sorted(values)
+        q1, q3 = quartile_inc(sv, 0.25), quartile_inc(sv, 0.75)
+        d = q3 - q1
+        info.update(q1=round(q1, 4), q3=round(q3, 4), iqr=round(d, 4), low=round(q1 - 1.5 * d, 4), high=round(q3 + 1.5 * d, 4))
+        out = [x < q1 - 1.5 * d or x > q3 + 1.5 * d for x in values]
+    if all(out):  # 전부 빠지는 일은 없게
+        out = [False] * n
+    return out, info
 
 
 def _mean(values: Iterable[float]) -> float | None:
@@ -701,13 +841,20 @@ def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[
                 new["speed_mps"] = round(wb / 1000.0 / dt, 4)
                 if a.get("r_eff_m"):
                     new["pi"] = round(new["speed_mps"] ** 2 / (G * a["r_eff_m"]), 4)
+                    new["crest_theory_g"] = round(1.0 - new["pi"], 4)
+                if a.get("entry_sin") is not None:
+                    new["dvz_theory_mps"] = round(new["speed_mps"] * a["entry_sin"], 5)
+                    if a.get("momentum_nsx") and a.get("speed_mps"):
+                        m_kg = a["momentum_nsx"] / a["speed_mps"]
+                        new["momentum_nsx"] = round(m_kg * new["speed_mps"], 5)
+                        new["impulse_theory_ns"] = round(m_kg * new["speed_mps"] * a["entry_sin"], 6)
             new["flags"] = list(a.get("flags") or []) + [
                 f"같은 조건 다른 회차들의 앞·뒤 바퀴 간격({med * 1000:.0f} ms)과 많이 달라({a['axle_dt_s'] * 1000:.0f} ms) 그 간격에 맞는 피크 쌍으로 다시 골랐습니다."]
             fixed[m["id"]] = {**m, "analysis": new}
     return [fixed.get(r.get("id"), r) for r in runs]
 
 
-def aggregate(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def aggregate(runs: list[dict[str, Any]], method: str = "trim") -> list[dict[str, Any]]:
     groups: dict[tuple, list[dict[str, Any]]] = {}
     for run in runs:
         if run.get("excluded"):
@@ -719,13 +866,19 @@ def aggregate(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for key, items in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2], kv[0][3])):
         deltas = [r["analysis"]["peak_delta_g"] for r in items]
-        kept, dropped = trimmed(deltas)
-        # 제외된 최댓값·최솟값 시행을 뺀 나머지(같은 값이 여러 개여도 kept 개수만큼만)
-        ordered_runs = sorted(items, key=lambda r: r["analysis"]["peak_delta_g"])
-        kept_runs = ordered_runs[1:-1] if dropped else items
+        flags, info = outlier_flags(deltas, method)
+        kept_runs = [r for r, f in zip(items, flags) if not f]
+        kept = [r["analysis"]["peak_delta_g"] for r in kept_runs]
+        dropped = [r["analysis"]["peak_delta_g"] for r, f in zip(items, flags) if f]
         speeds = [r["analysis"].get("speed_mps") for r in kept_runs if r["analysis"].get("speed_mps")]
         pis = [r["analysis"].get("pi") for r in kept_runs if r["analysis"].get("pi")]
+        imps = [r["analysis"].get("impulse_ns") for r in kept_runs if r["analysis"].get("impulse_ns")]
+        dvzs = [r["analysis"].get("dvz_mps") for r in kept_runs if r["analysis"].get("dvz_mps")]
+        crests = [r["analysis"].get("crest_min_g") for r in kept_runs if r["analysis"].get("crest_min_g") is not None]
+        favg = [r["analysis"].get("avg_force_n") for r in kept_runs if r["analysis"].get("avg_force_n")]
+        pulses = [r["analysis"].get("pulse_s") for r in kept_runs if r["analysis"].get("pulse_s")]
         mean_delta = _mean(kept)
+        sd_delta = (sum((x - mean_delta) ** 2 for x in kept) / (len(kept) - 1)) ** 0.5 if len(kept) > 1 and mean_delta is not None else None
         mass_g = key[1]
         rows.append({
             "bump_id": key[0], "total_mass_g": mass_g, "output_mode": key[2], "output_value": key[3], "direction": key[4],
@@ -734,10 +887,18 @@ def aggregate(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "speed_min_mps": round(min(speeds), 4) if speeds else None,
             "speed_max_mps": round(max(speeds), 4) if speeds else None,
             "mean_peak_delta_g": round(mean_delta, 4) if mean_delta is not None else None,
+            "sd_peak_delta_g": round(sd_delta, 4) if sd_delta is not None else None,
             "mean_peak_g": round(mean_delta + 1.0, 4) if mean_delta is not None else None,
             "kept_min_delta_g": round(min(kept), 4), "kept_max_delta_g": round(max(kept), 4),
             "dropped_delta_g": [round(x, 4) for x in dropped],
+            "dropped_run_ids": [r["id"] for r, f in zip(items, flags) if f],
+            "outlier": info,
             "mean_force_n": round(mass_g / 1000.0 * G * (mean_delta + 1.0), 4) if mean_delta is not None else None,
+            "mean_impulse_ns": round(_mean(imps), 6) if imps else None,
+            "mean_pulse_s": round(_mean(pulses), 5) if pulses else None,
+            "mean_dvz_mps": round(_mean(dvzs), 5) if dvzs else None,
+            "mean_crest_min_g": round(_mean(crests), 4) if crests else None,
+            "mean_avg_force_n": round(_mean(favg), 4) if favg else None,
             "mean_pi": round(_mean(pis), 4) if pis else None,
             "jump_count": sum(1 for r in items if r["analysis"].get("jump")),
             "run_ids": [r["id"] for r in items],

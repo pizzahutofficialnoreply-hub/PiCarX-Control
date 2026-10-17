@@ -3,6 +3,8 @@ import { useMemo, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { G } from '../services/experiment';
 import type { ExperimentContext } from './context';
+import NumInput from '../components/NumInput';
+import { usePersistentState } from '../services/persist';
 
 type Ref = { id: string; who: string; title: string; where: string; url: string; finding: string; use: string };
 const REFS: Ref[] = [
@@ -86,10 +88,10 @@ function fitPi(points: { pi: number; d: number }[]) {
 export default function GuideTab({ ctx }: { ctx: ExperimentContext }) {
   const runs = (ctx.data?.runs ?? []).filter(r => !r.excluded && (r.condition.purpose ?? 'main') === 'main');
   const piFit = useMemo(() => fitPi(runs.map(r => ({ pi: r.analysis.pi ?? 0, d: r.analysis.peak_delta_g ?? 0 }))), [runs]);
-  const [humanLimit, setHumanLimit] = useState(0.7);
-  const [realH, setRealH] = useState(100);
-  const [realW, setRealW] = useState(3600);
-  const [realWheel, setRealWheel] = useState(300);
+  const [humanLimit, setHumanLimit] = usePersistentState('guide-human', 0.7);
+  const [realH, setRealH] = usePersistentState('guide-realH', 100);
+  const [realW, setRealW] = usePersistentState('guide-realW', 3600);
+  const [realWheel, setRealWheel] = usePersistentState('guide-realWheel', 300);
   const rReal = (realW ** 2 / 4 + realH ** 2) / (2 * realH) / 1000 + realWheel / 1000;
   const piLimit = piFit && piFit.n > 0 ? (humanLimit / piFit.k) ** (1 / piFit.n) : null;
   const vReal = piLimit ? Math.sqrt(piLimit * G * rReal) : null;
@@ -181,9 +183,9 @@ export default function GuideTab({ ctx }: { ctx: ExperimentContext }) {
       <p>원운동에서 생기는 가속도는 v²/R이므로 <b>Π = v²/(g·R)가 같으면 크기가 달라도 가속도(g 단위)가 같습니다</b>. 그래서 모형 실험에서 "Δa가 사람 기준에 닿는 Π"를 찾으면, 실제 방지턱 반경을 넣어 실제 속도로 바꿀 수 있습니다. 서스펜션이 없는 모형이라 실제보다 엄격한(낮은) 속도가 나오는 상한 추정입니다.</p>
       <div className="experiment-fields">
         <label>사람 기준 Δa (g)<select value={humanLimit} onChange={e => setHumanLimit(Number(e.target.value))}><option value={0.2}>0.2 g – 약간 불편 (Kjemtrup)</option><option value={0.4}>0.4 g – 상당히 불편 (Kjemtrup)</option><option value={0.7}>0.7 g – 받아들이지 않음 (TRL 614)</option><option value={0.9}>0.9 g – 불편 (Watts 1973)</option></select></label>
-        <label>실제 방지턱 높이 (mm)<input type="number" min={10} value={realH} onChange={e => setRealH(Math.max(1, Number(e.target.value) || 100))} /></label>
-        <label>실제 방지턱 폭 (mm)<input type="number" min={100} value={realW} onChange={e => setRealW(Math.max(10, Number(e.target.value) || 3600))} /></label>
-        <label>실제 바퀴 반지름 (mm)<input type="number" min={100} value={realWheel} onChange={e => setRealWheel(Math.max(10, Number(e.target.value) || 300))} /></label>
+        <label>실제 방지턱 높이 (mm)<NumInput min={10} value={realH} onChange={e => setRealH(Math.max(1, Number(e.target.value) || 100))} /></label>
+        <label>실제 방지턱 폭 (mm)<NumInput min={100} value={realW} onChange={e => setRealW(Math.max(10, Number(e.target.value) || 3600))} /></label>
+        <label>실제 바퀴 반지름 (mm)<NumInput min={100} value={realWheel} onChange={e => setRealWheel(Math.max(10, Number(e.target.value) || 300))} /></label>
       </div>
       <div className="exp-fit">
         <div><small>모형 데이터의 Δa – Π 관계 (본 실험 {piFit?.count ?? 0}회)</small><b>{piFit ? `Δa = ${piFit.k.toFixed(3)} · Π^${piFit.n.toFixed(3)}` : '속도·Π가 계산된 시행이 3개 이상 필요'}</b><span>모든 방지턱을 함께 맞춘 식입니다(그래프 2의 곡선).</span></div>

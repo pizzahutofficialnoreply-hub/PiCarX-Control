@@ -37,6 +37,7 @@ class HardwareAdapter(Protocol):
     def set_camera_view(self, pan: int, tilt: int) -> None: ...
     def read_battery(self) -> float | None: ...
     def read_grayscale(self) -> list[float] | None: ...
+    def read_distance(self) -> float | None: ...
     def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None: ...
     def test_steering(self, direction: str, angle: int) -> None: ...
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None: ...
@@ -81,6 +82,8 @@ class MockAdapter:
         return None
     def read_grayscale(self) -> list[float] | None:
         return [320.0, 340.0, 315.0]
+    def read_distance(self) -> float | None:
+        return None
     def test_steering(self, direction: str, angle: int) -> None:
         pass
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -132,6 +135,8 @@ class UnavailableAdapter:
         return None
     def read_grayscale(self) -> list[float] | None:
         raise RuntimeError(self.connection_error or "PiCar-X is unavailable.")
+    def read_distance(self) -> float | None:
+        return None
     def test_steering(self, direction: str, angle: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -348,6 +353,17 @@ class PiCarXAdapter:
         if not callable(getattr(car, "get_grayscale_data", None)):
             return None
         return [float(x) for x in car.get_grayscale_data()]
+
+    def read_distance(self) -> float | None:
+        """앞쪽 초음파 센서 거리(cm). 실패하면(라이브러리가 -1, -2 등을 돌려줌) None."""
+        car = self._require_car()
+        if not callable(getattr(car, "get_distance", None)):
+            return None
+        try:
+            d = float(car.get_distance())
+        except Exception:
+            return None
+        return d if d > 0 else None
 
     def test_steering(self, direction: str, angle: int) -> None:
         car = self._require_car()

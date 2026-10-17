@@ -92,7 +92,9 @@ class Picarx:
         pass
 
     def get_distance(self):
-        return round(80 - fs.state["x"] * 100, 1)
+        import time as _t
+        _t.sleep(0.006)  # 초음파 왕복 시간 흉내
+        return fs.wall_distance_cm()
 
     def get_grayscale_data(self):
         fs.update()

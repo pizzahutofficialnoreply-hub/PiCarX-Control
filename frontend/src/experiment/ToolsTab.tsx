@@ -4,6 +4,8 @@ import { AlertTriangle, Battery, CheckCircle2, Download, Play, RefreshCw, Rotate
 import { fmt, outputLabel, type OutputMode } from '../services/experiment';
 import { XYChart } from '../components/ExperimentCharts';
 import type { ExperimentContext } from './context';
+import NumInput from '../components/NumInput';
+import { usePersistentState } from '../services/persist';
 
 type Check = { ok: boolean; text: string };
 type DataCheck = { mode: string; real_runs: number; simulated_runs: number; mean_sample_rate_hz: number | null; checks: Check[]; last_real_run: { id: string; created_at: string } | null };
@@ -33,9 +35,9 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
   const [battery, setBattery] = useState<{ voltage: number | null; level: string | null } | null>(null);
   const [drive, setDrive] = useState<DriveSettings | null>(null);
   const [sym, setSym] = useState<{ state: string; message: string; result: SymResult | null } | null>(null);
-  const [symMode, setSymMode] = useState<OutputMode>('pwm');
-  const [symOut, setSymOut] = useState(70);
-  const [symSec, setSymSec] = useState(1.0);
+  const [symMode, setSymMode] = usePersistentState<OutputMode>('sym-mode', 'pwm');
+  const [symOut, setSymOut] = usePersistentState('sym-out', 70);
+  const [symSec, setSymSec] = usePersistentState('sym-sec', 1.0);
   const [distF, setDistF] = useState<number | ''>('');
   const [distB, setDistB] = useState<number | ''>('');
   const [trash, setTrash] = useState<{ batch: string; runs: number }[]>([]);
@@ -94,8 +96,8 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
     } catch (e) { ctx.fail(e); } finally { setTune(t => ({ ...t, running: false })); await refresh(); }
   }
   const [bal, setBal] = useState<BalState | null>(null);
-  const [balOut, setBalOut] = useState(70);
-  const [balSec, setBalSec] = useState(1.5);
+  const [balOut, setBalOut] = usePersistentState('bal-out', 70);
+  const [balSec, setBalSec] = usePersistentState('bal-sec', 1.5);
   async function startBalance(auto: boolean) {
     try {
       await ctx.request('/api/experiment/tools/balance', { method: 'POST', body: JSON.stringify({ output_mode: symMode, output_value: balOut, seconds: balSec, auto }) });
@@ -140,8 +142,8 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
     <section className="card experiment-card">
       <div className="card-head"><div><h2>좌우 바퀴 균형 맞추기</h2><p>왼쪽·오른쪽 모터 힘이 다르면 차가 곧게 가지 못하고 한쪽으로 돕니다. 직진 보정을 끄고 핸들을 가운데(0°)로 둔 채 {balSec}초 달리며 자이로로 <b>차가 도는 속도</b>를 재고, 빠른 쪽 바퀴 출력을 낮춰 0에 가깝게 맞춥니다. 한 번 달릴 때마다 같은 시간 뒤로 돌아옵니다. 앞뒤로 1 m 이상 비우고, 바닥은 측정할 곳과 같게 하세요.</p></div></div>
       <div className="experiment-fields">
-        <label>출력값<input type="number" min={20} max={100} value={balOut} onChange={e => setBalOut(Math.max(20, Math.min(100, Number(e.target.value) || 70)))} /></label>
-        <label>달리는 시간 (s)<input type="number" min={0.6} max={4} step={0.1} value={balSec} onChange={e => setBalSec(Math.max(0.6, Math.min(4, Number(e.target.value) || 1.5)))} /></label>
+        <label>출력값<NumInput min={20} max={100} value={balOut} onChange={e => setBalOut(Math.max(20, Math.min(100, Number(e.target.value) || 70)))} /></label>
+        <label>달리는 시간 (s)<NumInput min={0.6} max={4} step={0.1} value={balSec} onChange={e => setBalSec(Math.max(0.6, Math.min(4, Number(e.target.value) || 1.5)))} /></label>
       </div>
       <div className="button-row"><button className="secondary" disabled={!ctx.serverAvailable || ctx.busy || bal?.state === 'running'} onClick={() => void startBalance(false)}><Play size={15} /> 한 번 점검</button>
         <button className="primary" disabled={!ctx.serverAvailable || ctx.busy || bal?.state === 'running'} onClick={() => void startBalance(true)}>자동으로 맞추기 (최대 5번)</button>
@@ -151,8 +153,8 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
         <tbody>{bal.trials.map(t => <tr key={t.try}><td>{t.try}</td><td>{t.trim_left}</td><td>{t.trim_right}</td><td>{t.yaw_dps == null ? '—' : t.yaw_dps.toFixed(1)}</td></tr>)}</tbody></table></div>}
       {bal?.result && <p className="exp-hint"><b>{bal.result.text}</b> 지금 적용된 배율: 왼쪽 ×{bal.result.trim_left} · 오른쪽 ×{bal.result.trim_right}. ±1.5°/s 안이면 충분히 곧습니다.</p>}
       {drive && <div className="experiment-fields">
-        <label>왼쪽 바퀴 배율<input type="number" min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_left ?? 1} key={'l' + drive.trim_left} onBlur={e => void saveDrive({ trim_left: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
-        <label>오른쪽 바퀴 배율<input type="number" min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_right ?? 1} key={'r' + drive.trim_right} onBlur={e => void saveDrive({ trim_right: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
+        <label>왼쪽 바퀴 배율<NumInput min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_left ?? 1} key={'l' + drive.trim_left} onBlur={e => void saveDrive({ trim_left: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
+        <label>오른쪽 바퀴 배율<NumInput min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_right ?? 1} key={'r' + drive.trim_right} onBlur={e => void saveDrive({ trim_right: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
       </div>}
       <p className="exp-hint">자동으로 맞춰도 계속 한쪽으로 돌거나 좌회전이 잘 안 되면 <b>조향 중앙</b>이 틀어졌을 수 있습니다. 설정 → 조향 보정에서 앞바퀴가 정확히 앞을 보도록 맞춘 뒤 다시 하세요. 좌우 배율은 수동 주행(WASD)과 측정 주행 모두에 적용됩니다.</p>
     </section>
@@ -161,8 +163,8 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
       <div className="card-head"><div><h2>전진·후진 출력 대칭 점검</h2><p>같은 출력에서 전진과 후진 속도가 다른지 확인하고 맞춥니다. '자동으로 맞추기'는 <b>느린 쪽을 먼저 올리고</b>(오르막을 넘는 힘도 커짐), 이미 최대 출력이면 빠른 쪽을 낮춥니다. 차가 전진 {symSec}초 → 정지 → 후진 {symSec}초 움직이며, 앱이 실제로 모터에 보낸 듀티와 핀 값을 기록하고, 가속도를 적분해 방향별 최고 속도를 추정합니다. 앞뒤로 {symSec * 0.8 + 0.3 > 1 ? '1 m' : '50 cm'} 이상 빈 공간을 두세요.</p></div></div>
       <div className="experiment-fields">
         <label>출력 방식<select value={symMode} onChange={e => setSymMode(e.target.value as OutputMode)}><option value="pwm">라이브러리 PWM</option><option value="duty">직접 듀티비</option></select></label>
-        <label>출력값<input type="number" min={1} max={100} value={symOut} onChange={e => setSymOut(Math.max(1, Math.min(100, Number(e.target.value) || 60)))} /></label>
-        <label>방향별 주행 시간 (s)<input type="number" min={0.3} max={3} step={0.1} value={symSec} onChange={e => setSymSec(Math.max(0.3, Math.min(3, Number(e.target.value) || 1)))} /></label>
+        <label>출력값<NumInput min={1} max={100} value={symOut} onChange={e => setSymOut(Math.max(1, Math.min(100, Number(e.target.value) || 60)))} /></label>
+        <label>방향별 주행 시간 (s)<NumInput min={0.3} max={3} step={0.1} value={symSec} onChange={e => setSymSec(Math.max(0.3, Math.min(3, Number(e.target.value) || 1)))} /></label>
       </div>
       <div className="button-row"><button className="primary" disabled={!ctx.serverAvailable || ctx.busy || sym?.state === 'running'} onClick={() => void startSym()}><Play size={15} /> 대칭 점검 한 번</button>
         <button className="secondary" disabled={!ctx.serverAvailable || ctx.busy || sym?.state === 'running' || tune.running} onClick={() => void autoTune()}>자동으로 맞추기 (최대 4번 왕복)</button>
@@ -180,15 +182,15 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
           series={[{ name: '전진', color: '#2f6fb0', line: true, dots: false, points: r.forward.series.map(([x, y]) => ({ x, y })) }, { name: '후진', color: '#d0782a', line: true, dots: false, points: r.backward.series.map(([x, y]) => ({ x, y })) }]} />}
       </>}
       <div className="exp-repeat"><div className="exp-repeat-head"><b>줄자로 확인 (가장 정확)</b><small>대칭 점검 중 전진·후진한 거리를 줄자로 재서 넣으세요(같은 시간 동안 움직인 거리 비 = 속도 비).</small></div>
-        <div className="experiment-fields"><label>전진 거리 (cm)<input type="number" min={0} value={distF} onChange={e => setDistF(e.target.value === '' ? '' : Number(e.target.value))} /></label><label>후진 거리 (cm)<input type="number" min={0} value={distB} onChange={e => setDistB(e.target.value === '' ? '' : Number(e.target.value))} /></label></div>
+        <div className="experiment-fields"><label>전진 거리 (cm)<NumInput min={0} value={distF} onChange={e => setDistF(e.target.value === '' ? '' : Number(e.target.value))} /></label><label>후진 거리 (cm)<NumInput min={0} value={distB} onChange={e => setDistB(e.target.value === '' ? '' : Number(e.target.value))} /></label></div>
         {tapeRatio && drive && <div className="button-row"><span className="exp-hint">후진/전진 = {tapeRatio.toFixed(2)}{Math.abs(tapeRatio - 1) <= 0.05 ? ' · 5% 이내로 대칭입니다.' : tapeRatio > 1 ? ` · 후진이 빠름 → 후진 배율 ${(drive.trim_backward / tapeRatio).toFixed(3)} 추천` : ` · 전진이 빠름 → 전진 배율 ${(drive.trim_forward * tapeRatio).toFixed(3)} 추천`}</span>
           {Math.abs(tapeRatio - 1) > 0.05 && <button className="secondary" onClick={() => void saveDrive(tapeRatio > 1 ? { trim_backward: Math.max(0.5, drive.trim_backward / tapeRatio) } : { trim_forward: Math.max(0.5, drive.trim_forward * tapeRatio) })}>추천 배율 적용</button>}</div>}
       </div>
       {drive && <div className="exp-repeat"><div className="exp-repeat-head"><b>주행 출력 설정 (수동 주행·자동 측정 공통)</b><small>최대 출력 {drive.max_pwm}. 배율은 방향별 출력에 곱해집니다(예: 후진 0.8 → 후진 출력 100을 80으로).</small></div>
         <div className="experiment-fields">
           <label>수동 주행 출력 방식<select value={drive.mapping} onChange={e => void saveDrive({ mapping: e.target.value as DriveSettings['mapping'] })}><option value="library">라이브러리 PWM (값/2+50 %)</option><option value="duty">직접 듀티비 (값 %)</option></select></label>
-          <label>전진 배율<input type="number" min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_forward} key={'f' + drive.trim_forward} onBlur={e => void saveDrive({ trim_forward: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
-          <label>후진 배율<input type="number" min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_backward} key={'b' + drive.trim_backward} onBlur={e => void saveDrive({ trim_backward: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
+          <label>전진 배율<NumInput min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_forward} key={'f' + drive.trim_forward} onBlur={e => void saveDrive({ trim_forward: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
+          <label>후진 배율<NumInput min={0.5} max={1.5} step={0.01} defaultValue={drive.trim_backward} key={'b' + drive.trim_backward} onBlur={e => void saveDrive({ trim_backward: Math.max(0.5, Math.min(1.5, Number(e.target.value) || 1)) })} /></label>
         </div>
         <div className="button-row"><button className="secondary" onClick={() => void saveDrive({ trim_forward: 1, trim_backward: 1 })}><RotateCcw size={14} /> 전진·후진 배율 1.0으로</button><span className="exp-hint">현재: {drive.mapping === 'duty' ? '직접 듀티' : '라이브러리'} · 전진 ×{drive.trim_forward} · 후진 ×{drive.trim_backward} · 예: {outputLabel('pwm', 100)} → 전진 {Math.round(100 * drive.trim_forward)} / 후진 {Math.round(100 * drive.trim_backward)}</span></div>
       </div>}

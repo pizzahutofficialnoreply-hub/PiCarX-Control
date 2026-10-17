@@ -266,6 +266,53 @@ def output_for_speed(maps: list[dict[str, Any]], bump_id: str, mass_g: float, mo
             "extrapolated": not (min(xs) <= out <= max(xs)), "r2": best["r2"]}
 
 
+def speed_models(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """방지턱·출력 방식별 '출력값·질량 → 통과 속도' 식.
+
+    질량이 2가지 이상이면 v = a + b·출력 + c·m(kg), 한 가지면 v = a + b·출력 입니다.
+    예측 계산기(PWM → m/s)와 '목표 속도에 필요한 출력' 계산, 방지턱 앞 감속 제어에 씁니다.
+    """
+    buckets: dict[tuple, list[tuple[float, float, float]]] = {}
+    for g in groups:
+        if g.get("mean_speed_mps"):
+            buckets.setdefault((g["bump_id"], g["output_mode"]), []).append(
+                (float(g["output_value"]), g["total_mass_g"] / 1000.0, g["mean_speed_mps"]))
+    out = []
+    for (bump, mode), pts in sorted(buckets.items()):
+        outs = {o for o, _, _ in pts}
+        masses = {m for _, m, _ in pts}
+        entry: dict[str, Any] = {"bump_id": bump, "output_mode": mode, "a": None, "b": None, "c": 0.0, "r2": None,
+                                 "uses_mass": False, "n": len(pts),
+                                 "output_range": [min(outs), max(outs)], "mass_range_g": [min(masses) * 1000, max(masses) * 1000]}
+        if len(outs) >= 2:
+            use_mass = len(masses) >= 2 and len(pts) >= 4
+            x = [[1.0, o, m] if use_mass else [1.0, o] for o, m, _ in pts]
+            y = [v for _, _, v in pts]
+            res = ols(x, y)
+            if res:
+                beta = res["beta"]
+                mean = sum(y) / len(y)
+                sst = sum((yy - mean) ** 2 for yy in y)
+                entry.update(a=beta[0], b=beta[1], c=beta[2] if use_mass else 0.0, uses_mass=use_mass,
+                             r2=1 - res["ssr"] / sst if sst > 0 else 1.0)
+        out.append(entry)
+    return out
+
+
+def speed_from_output(models: list[dict[str, Any]], bump_id: str, mode: str, output: float, mass_g: float) -> float | None:
+    m = next((x for x in models if x["bump_id"] == bump_id and x["output_mode"] == mode and x["b"]), None)
+    if not m:
+        return None
+    return m["a"] + m["b"] * output + m["c"] * mass_g / 1000.0
+
+
+def output_from_speed(models: list[dict[str, Any]], bump_id: str, mode: str, speed: float, mass_g: float) -> float | None:
+    m = next((x for x in models if x["bump_id"] == bump_id and x["output_mode"] == mode and x["b"]), None)
+    if not m or m["b"] <= 0:
+        return None
+    return (speed - m["a"] - m["c"] * mass_g / 1000.0) / m["b"]
+
+
 # --------------------------------------------------------------------------- 해석 문장
 def _f(x: float | None, d: int = 3) -> str:
     return "—" if x is None else f"{x:.{d}f}"

@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Download, Image as ImageIcon } from 'lucide-react';
 import { modelPredict, modelSolveSpeed, type ConditionGroup, type ModelResult, type PowerFit, type RunAnalysis, type RunSummary } from '../services/experiment';
+import { usePersistentState } from '../services/persist';
 
 const W = 640, H = 360, M = { l: 58, r: 18, t: 30, b: 48 };
 const PW = W - M.l - M.r, PH = H - M.t - M.b;
@@ -129,16 +130,50 @@ function nearestPoint<T>(items: T[], px: number, py: number, pos: (t: T) => [num
 }
 
 /* ------------------------------------------------------------------ 시행 원자료 */
-export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, name, showCandidates = false, aLimit = null, pickMode = null, onPick, picked }: {
+export const bumpWindowAfter = (rearRel: number | null | undefined) => Math.max(0.45, (rearRel ?? 0.15) + 0.3);
+const shiftT = (t: number | null | undefined, t0: number) => t == null ? (t ?? null) as null : t - t0;
+
+/** 시행 그래프. ``timeBase='front'``면 앞바퀴가 턱에 닿은 순간을 0초로 그려 겹쳐 보기와 시간축이 똑같습니다. */
+export function RunTraceChart(props: {
   series: { t_s: number[]; vertical_g: number[]; filtered_g?: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string;
   showCandidates?: boolean; aLimit?: number | null;
   pickMode?: 'front' | 'rear' | null; onPick?: (t: number) => void; picked?: { front?: number; rear?: number };
+  zoom?: 'bump' | 'all'; onZoom?: (z: 'bump' | 'all') => void; timeBase?: 'front' | 'record'; extraMarks?: { t: number; label: string; color: string }[];
+}) {
+  const { series, analysis, timeBase = 'record' } = props;
+  const t0 = timeBase === 'front' && analysis.front_t_s != null ? analysis.front_t_s : 0;
+  const shifted = useMemo(() => !t0 ? { series, analysis } : {
+    series: { ...series, t_s: series.t_s.map(t => t - t0) },
+    analysis: {
+      ...analysis,
+      front_t_s: shiftT(analysis.front_t_s, t0), rear_t_s: shiftT(analysis.rear_t_s, t0), peak_t_s: shiftT(analysis.peak_t_s, t0), landing_t_s: shiftT(analysis.landing_t_s, t0),
+      candidates: (analysis.candidates ?? []).map(c => ({ ...c, t_s: c.t_s - t0 })),
+      auto_pair: analysis.auto_pair ? { ...analysis.auto_pair, front_t_s: analysis.auto_pair.front_t_s - t0, rear_t_s: analysis.auto_pair.rear_t_s - t0 } : analysis.auto_pair,
+    } as RunAnalysis,
+  }, [series, analysis, t0]);
+  return <RunTraceChartInner {...props} series={shifted.series} analysis={shifted.analysis} relative={!!t0}
+    picked={props.picked ? { front: props.picked.front != null ? props.picked.front - t0 : undefined, rear: props.picked.rear != null ? props.picked.rear - t0 : undefined } : undefined}
+    onPick={props.onPick ? (t => props.onPick?.(t + t0)) : undefined}
+    extraMarks={(props.extraMarks ?? []).map(m => ({ ...m, t: m.t - t0 }))} />;
+}
+
+function RunTraceChartInner({ series, analysis, thresholdDelta, jumpG, title, name, showCandidates = false, aLimit = null, pickMode = null, onPick, picked, zoom: zoomProp, onZoom, relative = false, extraMarks = [] }: {
+  series: { t_s: number[]; vertical_g: number[]; filtered_g?: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string;
+  showCandidates?: boolean; aLimit?: number | null;
+  pickMode?: 'front' | 'rear' | null; onPick?: (t: number) => void; picked?: { front?: number; rear?: number };
+  zoom?: 'bump' | 'all'; onZoom?: (z: 'bump' | 'all') => void; relative?: boolean; extraMarks?: { t: number; label: string; color: string }[];
 }) {
   const hasPair = analysis.front_t_s != null && analysis.rear_t_s != null;
-  const [zoom, setZoom] = useState<'bump' | 'all'>(hasPair ? 'bump' : 'all');
+  const [zoomLocal, setZoomLocal] = useState<'bump' | 'all'>(hasPair ? 'bump' : 'all');
+  const zoomWanted = zoomProp ?? zoomLocal;
+  const zoom = zoomWanted === 'bump' && !hasPair ? 'all' : zoomWanted;
+  const setZoom = (z: 'bump' | 'all') => { setZoomLocal(z); onZoom?.(z); };
   const view = useMemo(() => {
     let lo = series.t_s[0] ?? 0, hi = series.t_s[series.t_s.length - 1] ?? 1;
-    if (zoom === 'bump' && hasPair) { lo = (analysis.front_t_s as number) - 0.15; hi = (analysis.rear_t_s as number) + 0.3; }
+    if (zoom === 'bump' && hasPair) {
+      const f = analysis.front_t_s as number;
+      lo = f - 0.15; hi = f + bumpWindowAfter((analysis.rear_t_s as number) - f);
+    }
     const idx = series.t_s.map((t, i) => i).filter(i => series.t_s[i] >= lo && series.t_s[i] <= hi);
     return { lo, hi, idx };
   }, [series, zoom, hasPair, analysis.front_t_s, analysis.rear_t_s]);
@@ -164,7 +199,8 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
   return <Figure name={name} tools={<div className="segmented"><button type="button" className={zoom === 'bump' ? 'selected' : ''} disabled={!hasPair} onClick={() => setZoom('bump')}>방지턱 부분 확대</button><button type="button" className={zoom === 'all' ? 'selected' : ''} onClick={() => setZoom('all')}>전체 기록</button></div>}
     caption={<>파란 선 = 차체가 위아래로 받은 가속도(가만히 있으면 1 g){filtered ? ', 진동을 거른 값 · 연한 회색 = 거르기 전 원래 기록' : ''}. 주황 ● 앞바퀴, 초록 ● 뒷바퀴가 방지턱에 닿은 순간이고, 두 점 사이 시간으로 속도를 계산합니다.{aLimit ? ' 빨간 선 위로 올라가면 허용 기준을 넘은 충격입니다.' : ''}</>}>
     {ref => <svg ref={ref} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title}>
-      <Axes x={x} y={y} xLabel="시간 (초)" yLabel="위아래 가속도 (g)" title={title} />
+      <Axes x={x} y={y} xLabel={relative ? '앞바퀴 기준 시간 (초, 0 = 앞바퀴가 턱에 닿은 순간)' : '시간 (초, 기록 시작 기준)'} yLabel="위아래 가속도 (g)" title={title} />
+      {extraMarks.filter(m => m.t >= x[0] && m.t <= x[1]).map(m => <g key={m.label} fontFamily={FONT}><line x1={sx(m.t)} x2={sx(m.t)} y1={M.t} y2={M.t + PH} stroke={m.color} strokeWidth={1.5} strokeDasharray="6 3" /><text x={sx(m.t) + 4} y={M.t + 26} fontSize={10.5} fill={m.color} fontWeight={700} {...HALO}>{m.label}</text></g>)}
       {aLimit != null && aLimit <= y[1] && <><rect x={M.l} y={M.t} width={PW} height={Math.max(0, sy(aLimit) - M.t)} fill={overColor} opacity={0.06} />
         <line x1={M.l} x2={M.l + PW} y1={sy(aLimit)} y2={sy(aLimit)} stroke={overColor} strokeWidth={1.4} strokeDasharray="7 4" />
         <text x={M.l + 4} y={sy(aLimit) - 5} fontSize={10.5} fill={overColor} fontWeight={600} fontFamily={FONT} {...HALO}>허용 기준 {aLimit.toFixed(2)} g</text></>}
@@ -195,7 +231,7 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
         getTip={(px) => { const t = x[0] + (px - M.l) / PW * (x[1] - x[0]); const i = nearestIdx(series.t_s, t); if (i < 0) return null;
           const tt = series.t_s[i], g = main[i], rows: Tip['rows'] = [{ color: '#2f6fb0', text: `${filtered ? '거른 값' : '가속도'} ${g.toFixed(3)} g (Δa ${(g - 1 >= 0 ? '+' : '')}${(g - 1).toFixed(3)} g)` }];
           if (filtered) rows.push({ color: '#9aa3ad', text: `원래 기록 ${series.vertical_g[i].toFixed(3)} g` });
-          if (analysis.front_t_s != null) rows.push({ text: `앞바퀴로부터 ${((tt - analysis.front_t_s) * 1000).toFixed(0)} ms` });
+          if (analysis.front_t_s != null && !relative) rows.push({ text: `앞바퀴로부터 ${((tt - analysis.front_t_s) * 1000).toFixed(0)} ms` });
           const c = (analysis.candidates ?? []).findIndex(c => Math.abs(c.t_s - tt) < 0.006); if (c >= 0) rows.push({ text: `후보 ${c + 1} 근처${(analysis.candidates ?? [])[c].landing ? ' (착지)' : ''}` });
           if (pickMode) rows.push({ text: `클릭 → 여기를 ${pickMode === 'front' ? '앞바퀴' : '뒷바퀴'}로` });
           return { px: sx(tt), py: sy(Math.max(y[0], Math.min(y[1], g))), title: `${tt.toFixed(3)} 초`, rows, dots: [{ px: sx(tt), py: sy(Math.max(y[0], Math.min(y[1], g))), color: '#2f6fb0' }] }; }} />
@@ -280,7 +316,7 @@ export function PiChart({ runs, title, name }: { runs: RunSummary[]; title: stri
   const pts = runs.filter(r => r.analysis.pi != null && r.analysis.peak_g != null);
   const bumps = Array.from(new Set(pts.map(r => r.condition.bump_id))).sort();
   const piMax = Math.max(1.1, ...pts.map(r => r.analysis.pi as number));
-  const [cap, setCap] = useState(true);
+  const [cap, setCap] = usePersistentState('pi-cap', true);
   // 점프 이후 Π가 매우 큰 시행이 있으면 경계(Π=1) 주변이 눌리므로 기본은 Π ≤ 2.5 구간을 확대합니다.
   const limit = cap && piMax > 2.5 ? 2.5 : piMax;
   const shown = pts.filter(r => (r.analysis.pi as number) <= limit);
@@ -321,7 +357,7 @@ export function XYChart({ series, title, name, xLabel, yLabel, identity, band, z
       {identity && <><line x1={sx(x[0])} y1={sy(x[0])} x2={sx(x[1])} y2={sy(x[1])} stroke="#3c9a5f" strokeDasharray="5 4" /><text x={sx(x[1]) - 4} y={sy(x[1]) + 14} textAnchor="end" fontSize={10} fill="#2d7a4a" fontFamily={FONT} {...HALO}>예측 = 실측{band ? ` (±${Math.round(band * 100)}% 띠)` : ''}</text></>}
       {zeroLine && y[0] < 0 && y[1] > 0 && <line x1={M.l} x2={M.l + PW} y1={sy(0)} y2={sy(0)} stroke="#9aa3ad" strokeDasharray="5 4" />}
       {(hLines ?? []).filter(h => h.y >= y[0] && h.y <= y[1]).map(h => <g key={'h' + h.label} fontFamily={FONT}><line x1={M.l} x2={M.l + PW} y1={sy(h.y)} y2={sy(h.y)} stroke={h.color} strokeDasharray="6 4" strokeWidth={1.3} /><text x={M.l + PW - 4} y={sy(h.y) - 5} fontSize={10.5} textAnchor="end" fill={h.color} fontWeight={600} {...HALO}>{h.label}</text></g>)}
-      {(vLines ?? []).filter(v => v.x >= x[0] && v.x <= x[1]).map(v => <g key={'v' + v.label} fontFamily={FONT}><line x1={sx(v.x)} x2={sx(v.x)} y1={M.t} y2={M.t + PH} stroke={v.color} strokeDasharray="3 3" /><text x={sx(v.x) + 4} y={M.t + PH - 6} fontSize={10.5} fill={v.color} fontWeight={600} {...HALO}>{v.label}</text></g>)}
+      {(vLines ?? []).filter(v => v.x >= x[0] && v.x <= x[1]).map((v, vi) => <g key={'v' + v.label} fontFamily={FONT}><line x1={sx(v.x)} x2={sx(v.x)} y1={M.t} y2={M.t + PH} stroke={v.color} strokeDasharray="3 3" /><text x={sx(v.x) + 4} y={M.t + PH - 6 - vi * 14} fontSize={10.5} fill={v.color} fontWeight={600} {...HALO}>{v.label}</text></g>)}
       {series.map((s, si) => <g key={s.name + si}>
         {s.line && s.points.length > 1 && <path d={s.points.map((p, i) => `${i ? 'L' : 'M'}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join('')} fill="none" stroke={s.color} strokeWidth={s.width ?? 1.6} strokeDasharray={s.dash} opacity={s.width && s.width < 2 ? 0.8 : 1} />}
         {(s.dots ?? !s.line) && s.points.map((p, i) => <g key={i}><circle cx={sx(p.x)} cy={sy(p.y)} r={4} fill="#fff" stroke={s.color} strokeWidth={2} />{p.label && <text x={sx(p.x) + 6} y={sy(p.y) - 6} fontSize={9.5} fill={MUTED} fontFamily={FONT} {...HALO}>{p.label}</text>}</g>)}

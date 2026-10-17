@@ -4,17 +4,19 @@ import { CheckCircle2, CircleStop, Download, Play } from 'lucide-react';
 import { fmt, modelPredict, modelSolveSpeed, outputForSpeed, outputLabel, type OutputMode } from '../services/experiment';
 import { XYChart } from '../components/ExperimentCharts';
 import type { ExperimentContext } from './context';
+import NumInput from '../components/NumInput';
+import { usePersistentState } from '../services/persist';
 
 export default function ValidationTab({ ctx }: { ctx: ExperimentContext }) {
   const { data, settings, condition } = ctx;
   const bumpIds = useMemo(() => Object.keys(data?.models ?? {}).sort(), [data]);
   const [bump, setBump] = useState(condition.bump_id);
   const activeBump = bumpIds.includes(bump) ? bump : bumpIds[0] ?? condition.bump_id;
-  const [added, setAdded] = useState(75);
-  const [target, setTarget] = useState<'vmax' | 'custom'>('vmax');
-  const [customV, setCustomV] = useState(0.5);
+  const [added, setAdded] = usePersistentState('val-added', 75);
+  const [target, setTarget] = usePersistentState<'vmax' | 'custom'>('val-target', 'vmax');
+  const [customV, setCustomV] = usePersistentState('val-customV', 0.5);
   const [mode, setMode] = useState<OutputMode>(condition.output_mode);
-  const [repeats, setRepeats] = useState(3);
+  const [repeats, setRepeats] = usePersistentState('val-repeats', 3);
   const [manualOutput, setManualOutput] = useState<number | ''>('');
 
   const comparison = data?.models?.[activeBump];
@@ -51,12 +53,12 @@ export default function ValidationTab({ ctx }: { ctx: ExperimentContext }) {
       {!model ? <div className="empty-chart">아직 관계식이 없습니다. 측정·분석 탭에서 본 실험(속도 2단계 이상)을 먼저 하세요.</div> : <>
         <div className="experiment-fields">
           <label>방지턱<select value={activeBump} onChange={e => setBump(e.target.value)}>{bumpIds.map(id => <option key={id} value={id}>방지턱 {id}</option>)}</select></label>
-          <label>추가 질량 (g){testedMasses.length ? ` · 실험한 총질량: ${testedMasses.join(', ')} g` : ''}<input type="number" min={0} value={added} onChange={e => setAdded(Math.max(0, Number(e.target.value) || 0))} /></label>
+          <label>추가 질량 (g){testedMasses.length ? ` · 실험한 총질량: ${testedMasses.join(', ')} g` : ''}<NumInput min={0} value={added} onChange={e => setAdded(Math.max(0, Number(e.target.value) || 0))} /></label>
           <label>목표 속도<select value={target} onChange={e => setTarget(e.target.value as 'vmax' | 'custom')}><option value="vmax">허용 기준의 최대 통과 속도 v_max</option><option value="custom">직접 입력</option></select></label>
-          {target === 'custom' && <label>목표 속도 (m/s)<input type="number" min={0.05} step={0.01} value={customV} onChange={e => setCustomV(Math.max(0.01, Number(e.target.value) || 0.5))} /></label>}
+          {target === 'custom' && <label>목표 속도 (m/s)<NumInput min={0.05} step={0.01} value={customV} onChange={e => setCustomV(Math.max(0.01, Number(e.target.value) || 0.5))} /></label>}
           <label>출력 방식<select value={mode} onChange={e => setMode(e.target.value as OutputMode)}><option value="pwm">라이브러리 PWM</option><option value="duty">직접 듀티비</option></select></label>
-          <label>출력값 (빈칸 = 추천값){rec ? ` · 추천 ${rec.output.toFixed(0)}` : ''}<input type="number" min={1} max={100} value={manualOutput} placeholder={output ? String(output) : '출력→속도 자료 부족'} onChange={e => setManualOutput(e.target.value === '' ? '' : Math.max(1, Math.min(100, Number(e.target.value))))} /></label>
-          <label>반복 횟수<input type="number" min={1} max={10} value={repeats} onChange={e => setRepeats(Math.max(1, Math.min(10, Math.round(Number(e.target.value) || 3))))} /></label>
+          <label>출력값 (빈칸 = 추천값){rec ? ` · 추천 ${rec.output.toFixed(0)}` : ''}<NumInput min={1} max={100} value={manualOutput} placeholder={output ? String(output) : '출력→속도 자료 부족'} onChange={e => setManualOutput(e.target.value === '' ? '' : Math.max(1, Math.min(100, Number(e.target.value))))} /></label>
+          <label>반복 횟수<NumInput min={1} max={10} value={repeats} onChange={e => setRepeats(Math.max(1, Math.min(10, Math.round(Number(e.target.value) || 3))))} /></label>
         </div>
         <div className="exp-fit">
           <div><small>사용하는 관계식</small><b>{model.name}: {model.formula}</b><span>측정·분석 탭에서 바꿀 수 있습니다.</span></div>

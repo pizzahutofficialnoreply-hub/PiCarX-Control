@@ -16,3 +16,5 @@ PYTHONPATH=devtools/fake_hardware PICARX_MODE=hardware uvicorn app.main:app --po
 - 실제 측정값이 아니므로 연구 데이터로 쓰지 마세요. 저장 위치를 분리하려면 `PICARX_DATA_DIR`를 지정하세요.
 
 - `FAKE_LEFT_FACTOR=1.08`이면 왼쪽 바퀴가 8% 빠른 차가 됩니다(좌우 균형 맞추기 시험).
+
+- 초음파 센서는 뒷축 x = `FAKE_WALL_X`(기본 1.6 m)에 있는 벽까지 거리를 ±0.5 cm 잡음과 가끔 튀는 값으로 돌려줍니다. 방지턱을 넘을 때 속도가 10% 줄어듭니다.

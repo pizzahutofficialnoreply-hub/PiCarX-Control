@@ -2,6 +2,10 @@
 // 실험 기록은 Raspberry Pi 디스크에 저장되며, 브라우저에는 입력 중인 조건만 기억합니다.
 
 export type OutputMode = 'pwm' | 'duty';
+export type OutlierMethod = 'trim' | 'sigma2' | 'iqr' | 'none';
+export const OUTLIER_LABEL: Record<OutlierMethod, string> = {
+  trim: '최댓값·최솟값 1개씩 빼기', sigma2: '평균 ± 2×표준편차 밖 빼기', iqr: '사분위수 범위(IQR) 1.5배 밖 빼기', none: '빼지 않음(전부 평균)',
+};
 
 export type BumpProfile = { id: string; name: string; height_mm: number | null; width_mm: number | null; radius_mm?: number | null };
 
@@ -44,6 +48,10 @@ export type ExperimentSettings = {
   plan_repeats?: number;
   plan_bumps?: string[] | null;
   analysis_direction?: 'forward' | 'backward';
+  outlier_method?: OutlierMethod;
+  ultrasonic_log?: boolean;
+  ultrasonic_hz?: number;
+  wall_stop_cm?: number;
   line?: LineSettings;
   bumps: BumpProfile[];
   max_output?: number;
@@ -87,6 +95,21 @@ export type RunAnalysis = {
   critical_speed_mps: number | null; peak_count: number; flags: string[];
   bump_detected?: boolean | null; noise_sigma_g?: number | null; threshold_used_g?: number | null; standout_ratio?: number | null;
   params?: Record<string, number | null>;
+  impulse_front_ns?: number | null; impulse_rear_ns?: number | null; impulse_ns?: number | null; dvz_mps?: number | null;
+  pulse_s?: number | null; pulse_rear_s?: number | null; avg_force_n?: number | null; momentum_nsx?: number | null;
+  entry_sin?: number | null; dvz_theory_mps?: number | null; impulse_theory_ns?: number | null; crest_min_g?: number | null; crest_theory_g?: number | null;
+};
+
+export type SlowdownInfo = {
+  trigger: 'time' | 'tape' | 'distance'; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
+  v0_pred_mps: number; pred_delta_v0_g: number; vmax_mps: number; target_v_mps: number; pred_delta_target_g: number; needed: boolean;
+  output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null;
+  measured_speed_mps?: number | null; measured_peak_g?: number | null; pass?: boolean;
+};
+export type DistanceSummary = {
+  n_samples: number; n_valid: number; n_removed: number; rate_hz: number | null; approach_speed_mps: number | null; bump_speed_mps: number | null;
+  min_speed_mps: number | null; drop_pct: number | null; us_bump_t_s: number | null; us_vs_imu_s: number | null; us_dip_pct?: number | null;
+  distance_at_front_cm: number | null; axle_vs_us_pct: number | null; max_speed_mps: number | null;
 };
 
 export type RunSummary = {
@@ -99,15 +122,29 @@ export type RunSummary = {
   battery_v?: number | null; steering_source?: string | null; data_source?: string | null; line_lost?: boolean | null; kick_ms?: number | null;
   peak_override?: { front_t_s: number; rear_t_s: number } | null;
   steer_mean_late?: number | null; heading_ff_learned?: number | null;
+  slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null;
 };
 
-export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[]; filtered_g?: number[] }; drive_log?: [number, number, number, number | null][] | null };
+export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[]; filtered_g?: number[] }; drive_log?: [number, number, number, number | null][] | null;
+  distance_series?: { t_s: number[]; cm: number[]; t_clean: number[]; cm_clean: number[]; speed_mps: (number | null)[] } | null };
 
 export type ConditionGroup = {
   bump_id: string; total_mass_g: number; output_mode: OutputMode; output_value: number;
   n_runs: number; n_used: number; mean_speed_mps: number | null; speed_min_mps: number | null; speed_max_mps: number | null;
   mean_peak_delta_g: number | null; mean_peak_g: number | null; kept_min_delta_g: number; kept_max_delta_g: number;
   dropped_delta_g: number[]; mean_force_n: number | null; mean_pi: number | null; jump_count: number; run_ids: string[];
+  sd_peak_delta_g?: number | null; dropped_run_ids?: string[]; outlier?: { method: OutlierMethod; low?: number; high?: number; mean?: number; sd?: number; q1?: number; q3?: number; iqr?: number };
+  mean_impulse_ns?: number | null; mean_pulse_s?: number | null; mean_dvz_mps?: number | null; mean_crest_min_g?: number | null; mean_avg_force_n?: number | null;
+  direction?: 'forward' | 'backward';
+};
+export type SpeedModel = { bump_id: string; output_mode: OutputMode; a: number | null; b: number | null; c: number; r2: number | null; uses_mass: boolean; n: number; output_range: [number, number]; mass_range_g: [number, number] };
+export const speedFromOutput = (models: SpeedModel[] | undefined, bump: string, mode: OutputMode, output: number, massG: number): number | null => {
+  const m = models?.find(x => x.bump_id === bump && x.output_mode === mode && x.b);
+  return m && m.a != null && m.b != null ? m.a + m.b * output + m.c * massG / 1000 : null;
+};
+export const outputFromSpeed = (models: SpeedModel[] | undefined, bump: string, mode: OutputMode, v: number, massG: number): number | null => {
+  const m = models?.find(x => x.bump_id === bump && x.output_mode === mode && x.b);
+  return m && m.a != null && m.b != null && m.b > 0 ? (v - m.a - m.c * massG / 1000) / m.b : null;
 };
 
 export type PowerFit = {
@@ -125,7 +162,7 @@ export type Criterion = {
 export type RunsResponse = {
   simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit>; criteria?: Record<string, Criterion>;
   models?: Record<string, ModelComparison>; chosen_models?: Record<string, string | null>; interpretation?: Record<string, string[]>;
-  speed_maps?: SpeedMap[]; validation?: ValidationBundle; progress?: Progress;
+  speed_maps?: SpeedMap[]; speed_models?: SpeedModel[]; validation?: ValidationBundle; progress?: Progress;
 };
 
 export type AutoRunState = {

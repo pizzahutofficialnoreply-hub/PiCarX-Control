@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 
 from . import impact_analysis as ia
 from . import model_fit as mf
+from .distance import DistanceLogger
+from . import distance as dist
 from .line_follow import LineSettings, LineTracker
 from .mpu6050 import mpu6050_service
 from .services.event_log import record_event
@@ -74,6 +76,7 @@ class ExperimentSettings(BaseModel):
     jump_g: float = Field(default=0.2, ge=0, le=0.9)
     filter_hz: float = Field(default=0, ge=0, le=100, description="진동 거르기(저역 통과) 기준 주파수 Hz, 0이면 끔")
     detect_level: Literal["strict", "normal", "sensitive"] = Field(default="normal", description="방지턱 감지 민감도")
+    outlier_method: Literal["trim", "sigma2", "iqr", "none"] = Field(default="trim", description="조건별 평균의 이상치 제거 방식")
     a_limit_mode: Literal["manual", "first_jump"] = Field(default="manual", description="manual: 직접 입력, first_jump: 점프가 처음 나타난 조건의 평균 최대 가속도")
     a_limit_preset: Literal["trl614", "watts1973", "kjemtrup04", "kjemtrup02", "custom"] = Field(
         default="trl614", description="허용 기준 출처(선행 연구). custom이면 a_limit_g를 직접 씀")
@@ -98,6 +101,9 @@ class ExperimentSettings(BaseModel):
     heading_sign: Literal[1, -1] = Field(default=1, description="자이로 보정 조향 방향(센서 장착 방향에 따라 반대일 수 있어 주행 중 자동 판정)")
     steering_source: Literal["gyro", "line", "none"] = Field(default="gyro", description="측정 직진 중 조향 방식")
     kick_ms: int = Field(default=0, ge=0, le=400, description="출발 순간 최대 출력으로 밀어 주는 시간(정지마찰 극복)")
+    ultrasonic_log: bool = Field(default=False, description="측정 주행 중 초음파 거리 기록(벽까지 거리 → 속력)")
+    ultrasonic_hz: float = Field(default=20.0, ge=5, le=40)
+    wall_stop_cm: float = Field(default=0.0, ge=0, le=200, description="벽까지 이 거리(cm)보다 가까워지면 정지(0 = 끔)")
     model_id: str = Field(default="auto", max_length=20, description="관계식 모델(auto = 교차검증 오차 최소)")
     plan_added_masses: list[float] = Field(default_factory=lambda: [0.0, 150.0, 300.0])
     plan_outputs: list[float] = Field(default_factory=lambda: [40.0, 55.0, 70.0, 85.0, 100.0])
@@ -138,6 +144,22 @@ class AutoRunRequest(BaseModel):
     heading_hold: bool | None = None
     steering_source: Literal["gyro", "line", "none"] | None = None
     kick_ms: int | None = Field(default=None, ge=0, le=400)
+    ultrasonic: bool | None = None
+    wall_stop_cm: float | None = Field(default=None, ge=0, le=200)
+    slowdown: "SlowdownRequest | None" = None
+
+
+class SlowdownRequest(BaseModel):
+    """목표 2: 관계식으로 '허용 기준을 넘지 않는 속도'를 구해, 방지턱 앞에서 그 속도에 맞는 출력으로 줄입니다."""
+    trigger: Literal["time", "tape", "distance"] = "time"
+    at_s: float = Field(default=0.6, ge=0.0, le=6, description="출발 후 이 시간(초)에 감속(trigger=time)")
+    at_cm: float = Field(default=60.0, ge=5, le=300, description="벽까지 이 거리(cm)가 되면 감속(trigger=distance)")
+    safety: float = Field(default=0.9, ge=0.3, le=1.0, description="v_max에 곱하는 여유율(0.9 = 10% 느리게)")
+    min_output: float = Field(default=10.0, ge=1, le=100, description="이보다 낮은 출력으로는 줄이지 않음(멈춤 방지)")
+    target_g: float | None = Field(default=None, gt=1.0, le=8, description="허용 기준(g)을 따로 줄 때. 비우면 분석 탭 기준")
+
+
+AutoRunRequest.model_rebuild()
 
 
 class SaveRecordingRequest(BaseModel):
@@ -327,6 +349,27 @@ def condition_dict(condition: ExperimentCondition) -> dict[str, Any]:
 
 
 def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings: ExperimentSettings) -> dict[str, Any]:
+    a = _analyze_columns(run, columns, settings)
+    # 분석에 딸린 값(초음파 속력 분석, 감속 제어 판정)도 새 분석에 맞춰 다시 계산합니다.
+    if run.get("distance"):
+        run["distance_summary"] = _distance_summary(run, a)
+    if run.get("slowdown"):
+        sd = run["slowdown"]
+        sd["measured_speed_mps"] = a.get("speed_mps")
+        if a.get("peak_g") is not None and sd.get("a_limit_g"):
+            sd["measured_peak_g"] = a["peak_g"]
+            sd["pass"] = bool(a["peak_g"] <= sd["a_limit_g"])
+    return a
+
+
+def _distance_summary(run: dict[str, Any], a: dict[str, Any]) -> dict[str, Any]:
+    sd = run.get("slowdown") or {}
+    ignore = sd.get("slowed_at_s") + 0.4 if sd.get("slowed_at_s") is not None else None
+    return dist.analyze(run["distance"]["t_s"], run["distance"]["cm"], a.get("front_t_s"), a.get("rear_t_s"),
+                        a.get("speed_mps"), (run.get("condition") or {}).get("direction") or "forward", ignore)
+
+
+def _analyze_columns(run: dict[str, Any], columns: dict[str, list[float]], settings: ExperimentSettings) -> dict[str, Any]:
     bump = run.get("bump") or {}
     window = (max(0.0, (run.get("pre_roll_s") or 0) - 0.1), None)
     return ia.analyze_run(
@@ -380,7 +423,8 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return {k: run.get(k) for k in ("id", "created_at", "simulated", "source", "aborted", "excluded", "condition", "bump", "analysis", "recording",
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
-                                    "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s")}
+                                    "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
+                                    "slowdown", "distance_summary", "stopped_by_wall")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -480,7 +524,7 @@ def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) ->
     want = settings.analysis_direction
     runs = [r for r in runs if (r.get("condition", {}).get("direction") or "forward") == want]
     main_runs = [r for r in runs if purpose_of(r) == "main"]
-    groups = ia.aggregate(main_runs)
+    groups = ia.aggregate(main_runs, settings.outlier_method)
     bump_ids = sorted({g["bump_id"] for g in groups})
     fits = {bump_id: ia.fit_power_law(groups, bump_id) for bump_id in bump_ids}
     comparisons = {bump_id: mf.compare_models(_points(groups, bump_id)) for bump_id in bump_ids}
@@ -490,7 +534,7 @@ def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) ->
     return {"groups": groups, "fits": fits, "models": comparisons,
             "chosen_models": {k: (v["id"] if v else None) for k, v in chosen.items()},
             "criteria": criteria, "interpretation": interpretation,
-            "speed_maps": mf.speed_maps(groups), "validation": validation_rows(runs, chosen),
+            "speed_maps": mf.speed_maps(groups), "speed_models": mf.speed_models(groups), "validation": validation_rows(runs, chosen),
             "progress": plan_progress(runs, settings)}
 
 
@@ -654,7 +698,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                      line: LineTracker | None = None, kick_ms: int = 0,
                      ki: float = 0.0, ff: float = 0.0,
                      stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0, polarity: int = 1,
-                     bump_watch: "BumpPassWatcher | None" = None, after_bump_s: float = 0.3) -> dict[str, Any]:
+                     bump_watch: "BumpPassWatcher | None" = None, after_bump_s: float = 0.3,
+                     slowdown: dict[str, Any] | None = None, distance: "DistanceLogger | None" = None,
+                     wall_stop_cm: float = 0.0, slow_tape: Callable[[Any], bool] | None = None) -> dict[str, Any]:
     """정해진 시간 동안 일정한 출력으로 직진/후진.
 
     출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
@@ -691,6 +737,22 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                 else:
                     await asyncio.sleep(0.01)
         poller = asyncio.create_task(poll())
+    slow_seen = asyncio.Event()
+    slow_poller: asyncio.Task | None = None
+    slowed_at: float | None = None
+    stopped_by_wall = False
+    if slowdown and slowdown.get("trigger") == "tape" and slow_tape is not None:
+        # 방지턱 앞에 붙인 '감속 표시 테이프'를 정지선과 같은 방식(수 ms 간격, 2번 연속)으로 찾습니다.
+        async def poll_slow() -> None:
+            hits = 0
+            while not slow_seen.is_set():
+                raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+                hits = hits + 1 if slow_tape(raw) else 0
+                if hits >= 2:
+                    slow_seen.set()
+                    return
+                await asyncio.sleep(0.002)
+        slow_poller = asyncio.create_task(poll_slow())
     try:
       while loop.time() < end:
           if ctl.stop_generation != generation:
@@ -715,8 +777,19 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
           if mark_seen.is_set():
               stopped_on_mark = True
               break
+          near = distance.latest() if distance is not None else None
+          if wall_stop_cm and near is not None and near <= wall_stop_cm:
+              stopped_by_wall = True
+              break
+          if slowdown and slowed_at is None and slowdown.get("output") is not None:
+              trig = slowdown.get("trigger")
+              if (trig == "time" and now - start >= float(slowdown.get("at_s") or 0)) \
+                      or (trig == "distance" and near is not None and near <= float(slowdown.get("at_cm") or 0)) \
+                      or (trig == "tape" and slow_seen.is_set()):
+                  slowed_at = now
           prev_t = now
-          out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else value
+          cur = float(slowdown["output"]) if slowed_at is not None and slowdown else value
+          out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else cur
           if not await ctl.experiment_drive(mode, out, generation, direction, steer):
               raise Aborted()
           log.append([round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)])
@@ -725,6 +798,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
         if poller is not None:
             mark_seen.set()
             poller.cancel()
+        if slow_poller is not None:
+            slow_seen.set()
+            slow_poller.cancel()
 
     half = [row[2] for row in log if row[0] >= seconds / 2]
     return {"heading_max_deg": round(worst, 2) if last is not None else None,
@@ -735,6 +811,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "bump_events": dict(bump_watch.events) if bump_watch is not None else None,
             "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None,
             "heading_flipped": bool(controller and controller.flipped),
+            "slowed_at_s": round(slowed_at - start, 3) if slowed_at is not None else None,
+            "stopped_by_wall": stopped_by_wall,
             "steer_saturated": bool(controller and sum(1 for row in log if abs(row[2]) >= MAX_HEADING_CORRECTION_DEG - 0.01) > len(log) * 0.3)}
 
 
@@ -771,6 +849,57 @@ def _learn_heading(direction: str, steer_mean: float | None, info: dict[str, Any
     return new
 
 
+def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: "SlowdownRequest", simulated: bool) -> dict[str, Any]:
+    """목표 2 감속 계획: 관계식(선택된 식)과 '출력·질량 → 속도' 식으로 방지턱에서 쓸 출력을 정합니다.
+
+    1) 지금 출력으로 들어가면 속도 v₀ = 속도식(출력₀, m), 예측 충격 Δa(v₀, m)
+    2) 허용 기준 a_lim에서 Δa(v, m) = a_lim − 1 을 풀어 v_max(m)
+    3) 목표 속도 v* = v_max × 여유율. v₀ ≤ v* 이면 감속 불필요
+    4) 감속 출력 = 속도식을 거꾸로 풀어 v*가 나오는 출력(최소 출력 아래로는 안 내림)
+    거듭제곱식 Δa = k·vⁿ·mᵖ 이면 v*/v₀ = (Δa_lim/Δa(v₀))^(1/n) 와 같습니다.
+    """
+    runs = runs_for_mode(simulated)
+    bundle = analysis_bundle(runs, settings)
+    bump = cond.bump_id
+    cmp = bundle["models"].get(bump)
+    model = None
+    if cmp:
+        mid = bundle["chosen_models"].get(bump)
+        model = next((m for m in cmp["models"] if m["id"] == mid), None)
+    if model is None:
+        raise RuntimeError(f"방지턱 {bump}의 관계식이 아직 없습니다. 본 실험(여러 출력·질량)을 먼저 측정하세요.")
+    crit = bundle["criteria"].get(bump) or {}
+    a_lim = req.target_g or crit.get("a_limit_g")
+    if not a_lim or a_lim <= 1:
+        raise RuntimeError("허용 기준(g)이 없습니다. 분석 탭에서 기준을 고르거나 감속 설정에 직접 넣으세요.")
+    m_g = cond.base_mass_g + cond.added_mass_g
+    models = bundle["speed_models"]
+    v0 = mf.speed_from_output(models, bump, cond.output_mode, cond.output_value, m_g)
+    if v0 is None:
+        raise RuntimeError("출력 → 속도 식이 없습니다. 같은 방지턱·출력 방식으로 출력을 2단계 이상 측정하세요.")
+    vmax = mf.solve_speed(model, a_lim - 1.0, m_g / 1000.0)
+    if vmax is None:
+        raise RuntimeError("관계식으로 v_max를 풀지 못했습니다(기준이 너무 낮거나 식이 맞지 않음).")
+    target_v = vmax * req.safety
+    need = v0 > target_v
+    out_slow = mf.output_from_speed(models, bump, cond.output_mode, target_v, m_g) if need else cond.output_value
+    clipped = False
+    if out_slow is None:
+        raise RuntimeError("목표 속도에 맞는 출력을 계산하지 못했습니다.")
+    if out_slow < req.min_output:
+        out_slow, clipped = req.min_output, True
+    out_slow = min(out_slow, cond.output_value)
+    mk = m_g / 1000.0
+    return {"trigger": req.trigger, "at_s": req.at_s, "at_cm": req.at_cm, "safety": req.safety,
+            "a_limit_g": round(a_lim, 4), "model_id": model["id"], "model_formula": model.get("formula"),
+            "v0_pred_mps": round(v0, 4), "pred_delta_v0_g": round(mf.predict(model, v0, mk), 4),
+            "vmax_mps": round(vmax, 4), "target_v_mps": round(target_v, 4),
+            "pred_delta_target_g": round(mf.predict(model, target_v, mk), 4),
+            "needed": need, "output": round(out_slow, 1) if need else None, "output_initial": cond.output_value,
+            "output_clipped": clipped,
+            "ratio": round(target_v / v0, 4) if v0 else None}
+
+
 async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSettings, opts: dict[str, Any],
                         simulated: bool) -> dict[str, Any]:
     """한 번의 측정: 정지 기록 → 직진(기록) → 정지 후 기록 → 분석·저장."""
@@ -779,12 +908,18 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     run["battery_v"] = await asyncio.to_thread(ctl.adapter.read_battery) if ctl.adapter.connected else None
     run["steering_source"] = opts["steering_source"]
     run["kick_ms"] = opts["kick_ms"]
+    if opts.get("slowdown_plan"):
+        run["slowdown"] = dict(opts["slowdown_plan"])
+    logger: DistanceLogger | None = None
     if not simulated:
         from .camera import camera_service
         camera_service.paused = True
         status = await asyncio.to_thread(mpu6050_service.start_recording)
         if status.get("error") or not status.get("recording"):
             raise RuntimeError(status.get("error") or "MPU-6050 기록을 시작하지 못했습니다.")
+        if opts.get("ultrasonic") or opts.get("wall_stop_cm") or (opts.get("slowdown_plan") or {}).get("trigger") == "distance":
+            logger = DistanceLogger(ctl.adapter.read_distance, settings.ultrasonic_hz)
+            logger.start()
     gen = ctl.stop_generation
     aborted = False
     drive_info: dict[str, Any] = {}
@@ -811,7 +946,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                                           ki=settings.heading_ki, ff=getattr(store.load_settings(), ff_key) if hold else 0.0,
                                           polarity=store.load_settings().heading_sign,
                                           bump_watch=BumpPassWatcher() if (settings.stop_after_bump and track) else None,
-                                          after_bump_s=settings.after_bump_s)
+                                          after_bump_s=settings.after_bump_s,
+                                          slowdown=opts.get("slowdown_plan") if (opts.get("slowdown_plan") or {}).get("needed") else None,
+                                          distance=logger, wall_stop_cm=opts.get("wall_stop_cm") or 0.0,
+                                          slow_tape=_tape_detector(settings) if not simulated else None)
             auto_runner.last_forward_s = drive_info.get("elapsed_s")
             if line is not None and line.flipped:
                 st = store.load_settings()
@@ -829,8 +967,9 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         run["aborted"] = True
     auto_runner._phase("analyzing", None, f"{auto_runner.cycle}/{auto_runner.cycles}회 · 분석·저장 중")
     if simulated:
+        plan = opts.get("slowdown_plan") or {}
         columns = ia.synthesize_run(
-            output_mode=cond.output_mode, output_value=cond.output_value,
+            output_mode=cond.output_mode, output_value=plan["output"] if plan.get("needed") and plan.get("output") else cond.output_value,
             mass_g=cond.base_mass_g + cond.added_mass_g, base_mass_g=cond.base_mass_g,
             wheelbase_mm=settings.wheelbase_mm or 95.0, bump_radius=run["bump"].get("radius_mm"),
             wheel_radius_mm=settings.wheel_radius_mm or 33.0, pre_roll_s=opts["pre_roll"])
@@ -838,14 +977,39 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                 "vertical_axis": "z", "vertical_sign": 1.0, "calibration_stability_g": None}
     else:
         await asyncio.to_thread(mpu6050_service.stop_recording)
+        if logger is not None:
+            logger.stop()
+            t0 = getattr(mpu6050_service, "_record_started_mono", None)
+            if t0 is not None:
+                run["distance"] = {"t_s": [round(t - t0, 4) for t, _ in logger.samples], "cm": [d for _, d in logger.samples],
+                                   "errors": logger.errors}
         camera_service.paused = False
         meta = await asyncio.to_thread(mpu6050_service.recording_columns)
         columns = meta.pop("columns")
         if not columns["t_s"]:
             raise RuntimeError("센서 표본이 없어 저장하지 않았습니다.")
-    run.update(drive_info)
+    if run.get("slowdown") and drive_info.get("slowed_at_s") is not None:
+        run["slowdown"]["slowed_at_s"] = round(drive_info["slowed_at_s"] + opts["pre_roll"], 3)  # 기록 시작 기준
+    run.update({k: v for k, v in drive_info.items() if k != "slowed_at_s"})
     run["data_source"] = "synthetic" if simulated else "mpu6050"
     run = await asyncio.to_thread(finalize_run, run, columns, meta, settings)
+    if simulated and opts.get("ultrasonic"):
+        a = run.get("analysis") or {}
+        ts, ds = dist.synthesize(a.get("front_t_s"), a.get("rear_t_s"), a.get("speed_mps"), opts["pre_roll"],
+                                 columns["t_s"][-1] if columns["t_s"] else 3.0, seed=hash(run["id"]) % 1000)
+        run["distance"] = {"t_s": ts, "cm": ds, "errors": 0}
+    if run.get("distance"):
+        a = run.get("analysis") or {}
+        run["distance_summary"] = _distance_summary(run, a)
+        store.put(run)
+    if run.get("slowdown"):
+        a = run.get("analysis") or {}
+        sd = run["slowdown"]
+        if a.get("peak_g") is not None:
+            sd["measured_peak_g"] = a["peak_g"]
+            sd["pass"] = bool(a["peak_g"] <= sd["a_limit_g"])
+        sd["measured_speed_mps"] = a.get("speed_mps")
+        store.put(run)
     if drive_info.get("line_lost"):
         run["analysis"].setdefault("flags", []).append("측정 중 테이프를 놓쳐 일찍 멈췄습니다.")
         store.put(run)
@@ -874,6 +1038,8 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
         "rest": pick(request.rest_s, settings.rest_s),
         "heading_hold": pick(request.heading_hold, settings.heading_hold),
         "kick_ms": pick(request.kick_ms, settings.kick_ms),
+        "ultrasonic": pick(request.ultrasonic, settings.ultrasonic_log),
+        "wall_stop_cm": pick(request.wall_stop_cm, settings.wall_stop_cm),
     }
     source = request.steering_source or (settings.steering_source if request.heading_hold is None else ("gyro" if request.heading_hold else "none"))
     opts["steering_source"] = source
@@ -881,6 +1047,10 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
     auto_runner.cycles = opts["repeats"]
     auto_runner.completed = []
     try:
+        if request.slowdown is not None:
+            # 감속 제어 시행은 관계식을 만드는 데 쓰지 않고 '검증'으로 저장합니다(관계식 → 제어 → 실측 비교).
+            opts["slowdown_plan"] = slowdown_plan(cond, settings, request.slowdown, simulated)
+            cond = cond.model_copy(update={"purpose": "validation", "note": (cond.note + " · " if cond.note else "") + "감속 제어"})
         for i in range(opts["repeats"]):
             auto_runner.cycle = i + 1
             trial_cond = cond.model_copy(update={"trial": cond.trial + i})
@@ -978,7 +1148,7 @@ async def list_runs():
     settings = store.load_settings()
     runs = runs_for_mode(simulated)
     # 평지 오검출 판정(bump_detected)이 생기기 전에 분석된 시행은 저장된 원자료로 한 번 다시 분석합니다.
-    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {})
+    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {}) or "entry_sin" not in (r.get("analysis") or {})
              or ((r.get("analysis") or {}).get("params") or {}).get("filter_hz") and not r["analysis"]["params"].get("peak_keep")]
     for run in stale:
         try:
@@ -992,13 +1162,24 @@ async def list_runs():
 
 
 @router.get("/series")
-async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points: int = 400):
-    """여러 시행을 앞바퀴 피크(없으면 최대 피크) 시각에 맞춰 겹쳐 보기 위한 시계열."""
+async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points: int = 400, raw: bool = False):
+    """여러 시행을 앞바퀴 피크(없으면 최대 피크) 시각에 맞춰 겹쳐 보기 위한 시계열.
+
+    한 회씩 보기와 같은 기준을 쓰도록 같은 조건 회차 맞춤(harmonize)과 진동 거르기 설정을 똑같이 적용합니다.
+    ``before``/``after``를 크게 주면(예: 60) 기록 전체를 돌려줍니다. ``raw=1``이면 거르기 전 값도 함께 줍니다.
+    """
     out = []
     hz = store.load_settings().filter_hz
-    for run_id in [x for x in ids.split(",") if x][:200]:
+    want = [x for x in ids.split(",") if x][:200]
+    if not want:
+        return {"series": [], "filter_hz": hz}
+    all_runs = store.list_runs()
+    by_id = {r["id"]: r for r in ia.harmonize_pairs(all_runs)}
+    for run_id in want:
+        run = by_id.get(run_id)
+        if run is None:
+            continue
         try:
-            run = store.get(run_id)
             cols = await asyncio.to_thread(store.read_columns, run_id)
         except HTTPException:
             continue
@@ -1009,12 +1190,120 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
         g = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
         idx = [i for i, t in enumerate(cols["t_s"]) if t0 - before <= t <= t0 + after]
         sub = {"t_s": [round(cols["t_s"][i] - t0, 4) for i in idx], "vertical_g": [g[i] for i in idx]}
-        sub = ia.decimate_columns(sub, max(100, min(1500, points)))
+        if raw and hz:
+            sub["raw_g"] = [cols["vertical_g"][i] for i in idx]
+        sub = ia.decimate_columns(sub, max(100, min(3000, points)))
         out.append({"id": run_id, "condition": run["condition"], "aligned_on": "front" if a.get("front_t_s") is not None else "peak",
                     "rear_t_s": None if a.get("rear_t_s") is None or a.get("front_t_s") is None else round(a["rear_t_s"] - a["front_t_s"], 4),
-                    "peak_g": a.get("peak_g"), "speed_mps": a.get("speed_mps"), "bump_detected": a.get("bump_detected"),
-                    "t": sub["t_s"], "g": sub["vertical_g"]})
-    return {"series": out}
+                    "peak_g": a.get("peak_g"), "front_g": a.get("front_g"), "rear_g": a.get("rear_g"),
+                    "speed_mps": a.get("speed_mps"), "bump_detected": a.get("bump_detected"),
+                    "pair_source": a.get("pair_source"), "excluded": run.get("excluded"),
+                    "t": sub["t_s"], "g": sub["vertical_g"], **({"raw": sub["raw_g"]} if "raw_g" in sub else {})})
+    return {"series": out, "filter_hz": hz}
+
+
+@router.get("/ultrasonic/test")
+async def ultrasonic_test(seconds: float = 1.0):
+    """초음파 센서 점검: 정지 상태로 1초 동안 읽어 평균·흩어짐·읽기 속도를 봅니다(차를 벽 앞에 두고)."""
+    ctl = control()
+    seconds = max(0.3, min(5.0, seconds))
+    logger = DistanceLogger(ctl.adapter.read_distance, store.load_settings().ultrasonic_hz)
+    logger.start()
+    await asyncio.sleep(seconds)
+    logger.stop()
+    vals = [d for _, d in logger.samples if d is not None]
+    n = len(logger.samples)
+    mean = sum(vals) / len(vals) if vals else None
+    sd = (sum((x - mean) ** 2 for x in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 and mean is not None else None
+    return {"samples": n, "valid": len(vals), "mean_cm": None if mean is None else round(mean, 2),
+            "sd_cm": None if sd is None else round(sd, 2), "rate_hz": round(n / seconds, 1),
+            "values": [None if d is None else round(d, 1) for _, d in logger.samples][:80],
+            "available": bool(vals), "note": None if vals else "거리값을 읽지 못했습니다(모의 모드이거나 센서 연결·라이브러리 확인)."}
+
+
+@router.get("/export/bump_windows.zip")
+async def export_bump_windows(ids: str = "", before: float = 0.15, after: float = 0.45):
+    """모든(또는 고른) 회차에서 '방지턱 부분'(앞바퀴 −before ~ +after 초)의 가속도만 잘라 한 번에 내보냅니다.
+
+    - bump_windows_long.csv : 한 줄 = 한 표본(회차 정보 + 앞바퀴 기준 시간 + 원래 값 + 거른 값). 피벗·필터용
+    - bump_windows_wide.csv : 1 ms 간격 공통 시간축에 회차별 열(엑셀에서 바로 겹친 그래프)
+    - bump_windows_summary.csv : 회차별 핵심값(속도, 최대 충격, 앞·뒤 바퀴 g, 충격량, 펄스 길이 등)
+    """
+    ctl = control()
+    settings = store.load_settings()
+    hz = settings.filter_hz
+    runs = ia.harmonize_pairs(runs_for_mode(ctl.adapter.mode != "hardware"))
+    want = {x for x in ids.split(",") if x}
+    runs = [r for r in runs if (not want or r["id"] in want) and (r.get("analysis") or {}).get("front_t_s") is not None]
+    if not runs:
+        raise HTTPException(404, "방지턱 통과가 확인된 회차가 없습니다.")
+    runs.sort(key=lambda r: (r["condition"].get("bump_id") or "", r["condition"].get("total_mass_g") or 0,
+                             r["condition"].get("output_mode") or "", r["condition"].get("output_value") or 0, r["condition"].get("trial") or 0))
+    head = ["run_id", "방지턱", "총질량_g", "출력방식", "출력값", "방향", "회차", "목적", "제외"]
+    long_rows: list[list[Any]] = [head + ["t_rel_s", "vertical_g_raw", "vertical_g_filtered"]]
+    grid = [round(-before + i * 0.001, 3) for i in range(int(round((before + after) / 0.001)) + 1)]
+    wide_cols: list[tuple[str, list[Any]]] = []
+    summary: list[list[Any]] = [head + ["통과속도_mps", "최대충격_g", "평소보다더_g", "앞바퀴_g", "뒷바퀴_g", "앞뒤간격_s",
+                                        "충격량_Ns", "펄스길이_s", "위쪽속도변화_mps", "이론_위쪽속도변화_mps", "꼭대기최솟값_g", "이론_꼭대기_g", "Π"]]
+    for r in runs:
+        try:
+            cols = await asyncio.to_thread(store.read_columns, r["id"])
+        except HTTPException:
+            continue
+        a = r["analysis"]
+        c = r["condition"]
+        t0 = a["front_t_s"]
+        f = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
+        info = [r["id"], c.get("bump_id"), c.get("total_mass_g"), c.get("output_mode"), c.get("output_value"),
+                c.get("direction") or "forward", c.get("trial"), c.get("purpose") or "main", "예" if r.get("excluded") else ""]
+        ts, gs, fs = [], [], []
+        for i, t in enumerate(cols["t_s"]):
+            rel = t - t0
+            if -before <= rel <= after:
+                ts.append(rel); gs.append(cols["vertical_g"][i]); fs.append(f[i])
+                long_rows.append(info + [round(rel, 5), cols["vertical_g"][i], round(f[i], 4)])
+        col = []
+        k = 0
+        for x in grid:
+            while k + 1 < len(ts) and ts[k + 1] <= x:
+                k += 1
+            if not ts or x < ts[0] - 0.0015 or x > ts[-1] + 0.0015:
+                col.append("")
+            elif x <= ts[0]:
+                col.append(round(fs[0], 4))
+            elif k + 1 < len(ts) and ts[k + 1] > ts[k]:
+                w = (x - ts[k]) / (ts[k + 1] - ts[k])
+                col.append(round(fs[k] + (fs[k + 1] - fs[k]) * w, 4))
+            else:
+                col.append(round(fs[k], 4))
+        base = f"{c.get('bump_id')}_{int(c.get('total_mass_g') or 0)}g_{c.get('output_mode')}{int(c.get('output_value') or 0)}_t{c.get('trial')}"
+        if (c.get("purpose") or "main") != "main":
+            base += "_" + (c.get("purpose") or "")
+        used = {n for n, _ in wide_cols}
+        label, k2 = base, 2
+        while label in used:
+            label, k2 = f"{base}_{k2}", k2 + 1
+        wide_cols.append((label, col))
+        summary.append(info + [a.get("speed_mps"), a.get("peak_g"), a.get("peak_delta_g"), a.get("front_g"), a.get("rear_g"), a.get("axle_dt_s"),
+                               a.get("impulse_ns"), a.get("pulse_s"), a.get("dvz_mps"), a.get("dvz_theory_mps"), a.get("crest_min_g"), a.get("crest_theory_g"), a.get("pi")])
+    wide = [["t_rel_s"] + [n for n, _ in wide_cols]]
+    for i, x in enumerate(grid):
+        wide.append([x] + [col[i] for _, col in wide_cols])
+
+    def csv_text(rows: list[list[Any]]) -> str:
+        b = io.StringIO()
+        csv.writer(b).writerows(rows)
+        return "\ufeff" + b.getvalue()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("bump_windows_long.csv", csv_text(long_rows))
+        z.writestr("bump_windows_wide.csv", csv_text(wide))
+        z.writestr("bump_windows_summary.csv", csv_text(summary))
+        z.writestr("README.txt", "앞바퀴가 방지턱에 닿은 순간을 0초로 맞춰 방지턱 부분만 잘라낸 가속도입니다.\n"
+                   f"구간: -{before}s ~ +{after}s, 진동 거르기: {'끔' if not hz else f'{hz:g} Hz (피크 주변은 원래 값 유지)'}\n"
+                   "wide 파일은 1 ms 간격으로 보간한 거른 값입니다. long 파일에는 원래 값과 거른 값이 모두 있습니다.\n")
+    return Response(content=buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="picarx_bump_windows.zip"'})
 
 
 @router.get("/runs/{run_id}")
@@ -1028,7 +1317,8 @@ async def get_run(run_id: str, points: int = 1500):
     if hz:
         base["filtered_g"] = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz)
     series = ia.decimate_columns(base, max(200, min(5000, points)))
-    return {**run_summary(run), "series": series, "drive_log": run.get("drive_log")}
+    dseries = dist.series(run["distance"]["t_s"], run["distance"]["cm"], run["condition"].get("direction") or "forward") if run.get("distance") else None
+    return {**run_summary(run), "series": series, "drive_log": run.get("drive_log"), "distance_series": dseries}
 
 
 @router.get("/runs/{run_id}/raw.csv")
@@ -1340,8 +1630,9 @@ async def export_conditions():
     bundle = analysis_bundle(runs_for_mode(ctl.adapter.mode != "hardware"), settings)
     head = ["bump_id", "total_mass_g", "output_mode", "output_value", "n_runs", "n_used", "mean_speed_mps",
             "speed_min_mps", "speed_max_mps", "mean_peak_g", "mean_peak_delta_g", "kept_min_delta_g", "kept_max_delta_g",
-            "dropped_delta_g", "mean_force_n", "mean_pi", "jump_count"]
-    rows: list[list[Any]] = [head]
+            "dropped_delta_g", "sd_peak_delta_g", "mean_force_n", "mean_impulse_ns", "mean_pulse_s", "mean_dvz_mps",
+            "mean_crest_min_g", "mean_avg_force_n", "mean_pi", "jump_count"]
+    rows: list[list[Any]] = [[f"# 이상치 제거 방식: {settings.outlier_method}"], head]
     for g in bundle["groups"]:
         rows.append([g.get(k) if k != "dropped_delta_g" else " / ".join(str(x) for x in g[k]) for k in head])
     rows.append([])

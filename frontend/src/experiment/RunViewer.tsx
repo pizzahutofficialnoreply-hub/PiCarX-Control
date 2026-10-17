@@ -2,7 +2,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ChevronLeft, ChevronRight, Download, Layers, Square, Trash2 } from 'lucide-react';
 import { fmt, outputLabel, PURPOSE_LABEL, type ExperimentSettings, type Purpose, type RunDetail, type RunsResponse, type RunSummary } from '../services/experiment';
-import { MASS_COLORS, RunTraceChart, XYChart } from '../components/ExperimentCharts';
+import { bumpWindowAfter, MASS_COLORS, RunTraceChart, XYChart } from '../components/ExperimentCharts';
+import { usePersistentState } from '../services/persist';
+import { syncToReference, type SyncResult } from './sync';
+import DistanceChart from './DistanceChart';
 
 type Props = {
   runs: RunSummary[]; selectedId: string | null; setSelectedId: (id: string) => void; detail: RunDetail | null;
@@ -13,7 +16,7 @@ type Props = {
   toggleExcluded: (id: string, excluded: boolean) => Promise<void>;
   deleteRun: (id: string) => Promise<void>;
 };
-type Series = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; rear_t_s: number | null; peak_g: number | null; speed_mps: number | null; bump_detected: boolean | null; aligned_on?: 'front' | 'peak' };
+type Series = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; raw?: number[]; rear_t_s: number | null; peak_g: number | null; front_g?: number | null; speed_mps: number | null; bump_detected: boolean | null; aligned_on?: 'front' | 'peak' };
 
 const sameCondition = (a: RunSummary, b: RunSummary) => a.condition.bump_id === b.condition.bump_id && a.condition.total_mass_g === b.condition.total_mass_g
   && a.condition.output_mode === b.condition.output_mode && a.condition.output_value === b.condition.output_value && (a.condition.purpose ?? 'main') === (b.condition.purpose ?? 'main') && (a.condition.direction ?? 'forward') === (b.condition.direction ?? 'forward');
@@ -31,6 +34,12 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
   const [scope, setScopeState] = useState<'condition' | 'all'>(() => readPref('picarx-viewer-scope', ['condition', 'all'], 'condition'));
   const setMode = (m: 'single' | 'overlay') => { setModeState(m); try { localStorage.setItem('picarx-viewer-mode', m); } catch { /* 무시 */ } };
   const setScope = (s: 'condition' | 'all') => { setScopeState(s); try { localStorage.setItem('picarx-viewer-scope', s); } catch { /* 무시 */ } };
+  // 한 회씩 보기와 겹쳐 보기가 같은 보기 설정(방지턱 부분/전체, 시간축)을 쓰고, 마지막 선택을 기억합니다.
+  const [zoom, setZoom] = usePersistentState<'bump' | 'all'>('viewer-zoom', 'bump');
+  const [timeBase, setTimeBase] = usePersistentState<'front' | 'record'>('viewer-timebase', 'front');
+  const [sync, setSync] = usePersistentState('viewer-sync', false);
+  const [showRaw, setShowRaw] = usePersistentState('viewer-raw', false);
+  const [filterHz, setFilterHz] = useState<number>(0);
   const [editing, setEditing] = useState(false);
   const [pick, setPick] = useState<{ front?: number; rear?: number }>({});
   const [pickMode, setPickMode] = useState<'front' | 'rear' | null>(null);
@@ -60,12 +69,13 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
     if (mode !== 'overlay' || !overlayIds) { setOverlay([]); return; }
     let cancelled = false;
     setLoadingOverlay(true);
-    request(`/api/experiment/series?ids=${overlayIds}&before=0.15&after=0.4&points=350`, { timeoutMs: 20000 })
-      .then(r => { if (!cancelled) setOverlay(r.series as Series[]); })
+    const q = zoom === 'all' ? 'before=60&after=60&points=900' : 'before=0.15&after=1.2&points=600';
+    request(`/api/experiment/series?ids=${overlayIds}&${q}&raw=1`, { timeoutMs: 30000 })
+      .then(r => { if (!cancelled) { setOverlay(r.series as Series[]); setFilterHz(Number(r.filter_hz) || 0); } })
       .catch(() => { if (!cancelled) setOverlay([]); })
       .finally(() => { if (!cancelled) setLoadingOverlay(false); });
     return () => { cancelled = true; };
-  }, [mode, overlayIds, request]);
+  }, [mode, overlayIds, request, zoom]);
 
   if (!selected) return <div className="card empty-chart">{runs.length ? '시행을 고르세요.' : '아직 저장된 시행이 없습니다. 조건을 입력하고 자동 측정 주행을 하세요.'}</div>;
 
@@ -82,12 +92,19 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
   // 겹쳐 보기 색: 같은 조건이면 회차별, 전체면 출력값별(질량은 선 모양)
   const outputsAll = Array.from(new Set(overlay.map(s => `${s.condition.output_mode}${s.condition.output_value}`)));
   const massesAll = Array.from(new Set(overlay.map(s => s.condition.total_mass_g))).sort((x, y) => x - y);
+  // 방지턱 부분: 한 회씩 보기와 같은 창(앞바퀴 −0.15 s ~ 뒷바퀴 + 0.3 s, 최소 +0.45 s)
+  const maxRear = Math.max(0, ...overlay.map(s => s.rear_t_s ?? 0));
+  const win: [number, number] = zoom === 'bump' ? [-0.15, bumpWindowAfter(maxRear || null)] : [-Infinity, Infinity];
+  const ref = overlay.find(s => s.id === selected.id) ?? overlay[0];
+  const syncInfo = new Map<string, SyncResult>();
+  if (sync && ref) for (const s of overlay) if (s.aligned_on === 'front' && ref.aligned_on === 'front') syncInfo.set(s.id, syncToReference(ref, s));
+  const shiftOf = (id: string) => syncInfo.get(id)?.applied ? (syncInfo.get(id) as SyncResult).shift_s : 0;
   const overlaySeries = overlay.map((s, i) => ({
     name: scope === 'condition' ? `${s.condition.trial}회차` : `${outputLabel(s.condition.output_mode, s.condition.output_value)} · ${s.condition.total_mass_g}g · ${s.condition.trial}회`,
     color: scope === 'condition' ? TRIAL_COLORS[i % TRIAL_COLORS.length] : MASS_COLORS[outputsAll.indexOf(`${s.condition.output_mode}${s.condition.output_value}`) % MASS_COLORS.length],
     dash: scope === 'all' && massesAll.indexOf(s.condition.total_mass_g) > 0 ? (massesAll.indexOf(s.condition.total_mass_g) === 1 ? '5 3' : '2 3') : undefined,
     line: true, dots: false, width: s.id === selected.id ? 2.6 : 1.3,
-    points: s.t.map((t, k) => ({ x: t, y: s.g[k] })),
+    points: s.t.map((t, k) => ({ x: t - shiftOf(s.id), y: (showRaw && s.raw ? s.raw : s.g)[k] })).filter(p => p.x >= win[0] && p.x <= win[1]),
   }));
 
   const noBump = overlay.filter(s => s.aligned_on !== 'front' || s.bump_detected === false).length;
@@ -98,27 +115,33 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
     <div className="exp-viewer-bar">
       <div className="segmented"><button type="button" className={mode === 'single' ? 'selected' : ''} onClick={() => setMode('single')}><Square size={13} /> 한 회씩</button><button type="button" className={mode === 'overlay' ? 'selected' : ''} onClick={() => setMode('overlay')}><Layers size={13} /> 겹쳐 보기</button></div>
       <div className="segmented"><button type="button" className={scope === 'condition' ? 'selected' : ''} onClick={() => setScope('condition')}>같은 조건만</button><button type="button" className={scope === 'all' ? 'selected' : ''} onClick={() => setScope('all')}>전체 시행</button></div>
+      <div className="segmented" title="한 회씩 보기와 겹쳐 보기에 함께 적용"><button type="button" className={zoom === 'bump' ? 'selected' : ''} onClick={() => setZoom('bump')}>방지턱 부분</button><button type="button" className={zoom === 'all' ? 'selected' : ''} onClick={() => setZoom('all')}>전체 기록</button></div>
+      {mode === 'single' && <div className="segmented" title="0초를 어디로 둘지"><button type="button" className={timeBase === 'front' ? 'selected' : ''} onClick={() => setTimeBase('front')}>앞바퀴 = 0초</button><button type="button" className={timeBase === 'record' ? 'selected' : ''} onClick={() => setTimeBase('record')}>기록 시작 = 0초</button></div>}
+      {mode === 'overlay' && <><label className="exp-check"><input type="checkbox" checked={sync} onChange={e => setSync(e.target.checked)} /> 피크 자동 동기화</label>
+        {filterHz > 0 && <label className="exp-check"><input type="checkbox" checked={showRaw} onChange={e => setShowRaw(e.target.checked)} /> 거르기 전 원래 기록으로</label>}</>}
       {mode === 'single' && <div className="exp-pager"><button type="button" className="secondary" onClick={() => go(-1)} aria-label="이전 시행"><ChevronLeft size={16} /></button><b>{index + 1} / {scoped.length}</b><button type="button" className="secondary" onClick={() => go(1)} aria-label="다음 시행"><ChevronRight size={16} /></button><small>키보드 ← → 로도 넘겨요</small></div>}
     </div>
 
     {mode === 'overlay' ? <>
       <h3>{scope === 'condition' ? `${condLabel(selected)} · ${overlay.length}회 겹쳐 보기` : `전체 시행 ${overlay.length}회 겹쳐 보기${scoped.length > 40 ? ' (최근 40회)' : ''}`}</h3>
       {noBump > 0 && <p className="exp-hint exp-warnline"><AlertTriangle size={13} /> {allNoBump ? '이 회차들은 모두 방지턱을 찾지 못했습니다(평지처럼 주행 진동만 있음).' : `${noBump}개 회차는 방지턱을 찾지 못했습니다.`} 그런 회차는 앞바퀴 대신 <b>가장 큰 봉우리</b>를 0초로 맞췄고, 계산(관계식·평균)에서는 자동으로 빠집니다.</p>}
+      <p className="exp-hint exp-filterline"><span className="exp-badge">{filterHz > 0 ? (showRaw ? `원래 기록 (진동 거르기 ${filterHz} Hz 꺼서 봄)` : `진동 거르기 ${filterHz} Hz 적용 · 한 회씩 보기의 파란 선과 같음`) : '진동 거르기 끔 · 원래 기록'}</span>{sync && <span className="exp-badge real">피크 자동 동기화 켬 · 기준 {ref ? `${ref.condition.trial}회차` : '—'} · {Array.from(syncInfo.values()).filter(r => r.applied).length}개 회차를 조금 옮김</span>}</p>
       <p className="exp-hint">모든 회차를 <b>{allNoBump ? '가장 큰 봉우리' : '앞바퀴가 방지턱에 닿은 순간'}(0초)</b>에 맞춰 겹쳤습니다. 방지턱 충격은 모든 회차에서 같은 자리에 솟아야 하고, 그 사이의 지그재그는 바퀴·기어에서 오는 주행 진동이라 회차마다 모양이 달라도 정상입니다. 선들이 잘 겹치면 측정이 고르게 반복된 것이고, 하나만 튀면 그 회차를 확인해 보세요.{scope === 'all' ? ' 색은 출력, 선 모양은 질량(실선 → 점선 순으로 무거움)입니다.' : ''} 굵은 선은 지금 고른 시행입니다.</p>
       {loadingOverlay ? <div className="empty-chart">불러오는 중…</div> : overlay.length === 0 ? <div className="empty-chart">겹칠 시행이 없습니다(방지턱 통과가 확인된 시행만 맞춰 그릴 수 있습니다).</div> :
         <XYChart name={`overlay_${scope}_${selected.condition.bump_id}`} title={scope === 'condition' ? `회차별 충격 비교 – ${condLabel(selected)}` : '전체 시행 충격 비교'} xLabel={`${zeroLabel} 기준 시간 (s)`} yLabel="위아래 가속도 (g, 정지 = 1)"
           series={overlaySeries} legendMax={scope === 'condition' ? 12 : 8}
           hLines={[{ y: 1, label: '정지 1 g', color: '#9aa3ad' }, ...(aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : [])]}
           vLines={[{ x: 0, label: allNoBump ? '가장 큰 봉우리' : '앞바퀴', color: '#d0782a' }]} />}
-      <div className="experiment-table-wrap"><table className="experiment-table exp-clickable"><thead><tr><th>회차</th><th>조건</th><th>통과 속도 (m/s)</th><th>가장 큰 충격 (g)</th><th>허용 기준</th></tr></thead>
+      <div className="experiment-table-wrap"><table className="experiment-table exp-clickable"><thead><tr><th>회차</th><th>조건</th><th>통과 속도 (m/s)</th><th>가장 큰 충격 (g)</th><th>허용 기준</th>{sync && <th>동기화</th>}</tr></thead>
         <tbody>{overlay.map(s => { const lim = limitFor(runs.find(r => r.id === s.id), data, settings); const o = lim != null && s.peak_g != null && s.peak_g > lim;
-          return <tr key={s.id} className={(s.id === selected?.id ? 'selected ' : '') + (o ? 'over' : '')} onClick={() => { setSelectedId(s.id); setMode('single'); }}><td>{s.condition.trial}</td><td>{condLabel(s)}</td><td>{s.bump_detected === false ? <span className="exp-badge warn">방지턱 못 찾음 · 계산 제외</span> : fmt(s.speed_mps, 3)}</td><td>{fmt(s.peak_g, 2)}</td><td>{lim == null ? '—' : o ? <span className="exp-over">초과</span> : '이내'}</td></tr>; })}</tbody></table></div>
+          return <tr key={s.id} className={(s.id === selected?.id ? 'selected ' : '') + (o ? 'over' : '')} onClick={() => { setSelectedId(s.id); setMode('single'); }}><td>{s.condition.trial}</td><td>{condLabel(s)}</td><td>{s.bump_detected === false ? <span className="exp-badge warn">방지턱 못 찾음 · 계산 제외</span> : fmt(s.speed_mps, 3)}</td><td>{fmt(s.peak_g, 2)}</td><td>{lim == null ? '—' : o ? <span className="exp-over">초과</span> : '이내'}</td>{sync && <td><small>{syncInfo.get(s.id)?.reason ?? '—'}</small></td>}</tr>; })}</tbody></table></div>
       <p className="exp-hint">표의 줄을 누르면 그 시행을 한 회씩 보기로 엽니다.</p>
     </> : <>
       <div className="card-head"><div><h3>{condLabel(selected)} · {selected.condition.trial}회차{selected.excluded ? ' · 집계 제외' : ''}</h3>
         <p><span className={'exp-badge ' + (selected.simulated ? 'sim' : 'real')}>{selected.simulated ? '합성 데이터' : '실제 측정'}</span><span className="exp-badge">{PURPOSE_LABEL[(selected.condition.purpose ?? 'main') as Purpose]}</span>{a.bump_detected === false && <span className="exp-badge warn">방지턱 통과 확인 안 됨</span>}{over && <span className="exp-badge over">허용 기준 초과</span>}{a.pair_source === 'manual' && <span className="exp-badge warn">바퀴 피크 직접 지정</span>}{a.pair_source === 'consistency' && <span className="exp-badge warn">같은 조건 회차에 맞춰 뒷바퀴 다시 고름</span>}{a.pair_source === 'pitch' && <span className="exp-badge real">차 기울기로 앞·뒤 바퀴 확인</span>} {new Date(selected.created_at).toLocaleString()}{selected.battery_v ? ` · 배터리 ${selected.battery_v.toFixed(2)} V` : ''}</p></div>
-        <div className="button-row"><button className="secondary" onClick={() => download(`/api/experiment/runs/${selected.id}/raw.csv`, `run-${selected.id}.csv`)}><Download size={14} /> 원자료 CSV</button><button className="secondary" onClick={() => void toggleExcluded(selected.id, !selected.excluded)}>{selected.excluded ? '집계에 다시 넣기' : '집계에서 빼기'}</button><button className="secondary" onClick={() => void deleteRun(selected.id)}><Trash2 size={14} /> 삭제</button></div></div>
-      {detail && detail.id === selected.id ? <RunTraceChart key={selected.id + (editing ? 'e' : '')} series={detail.series} analysis={a} aLimit={aLimit} showCandidates={editing} pickMode={editing ? pickMode : null} picked={editing ? pick : undefined}
+        <div className="button-row"><button className="secondary" onClick={() => download(`/api/experiment/runs/${selected.id}/raw.csv`, `run-${selected.id}.csv`)}><Download size={14} /> 원자료 CSV</button><button className="secondary" disabled={a.front_t_s == null} onClick={() => download(`/api/experiment/export/bump_windows.zip?ids=${selected.id}`, `bump-${selected.id}.zip`)}><Download size={14} /> 방지턱 구간</button><button className="secondary" onClick={() => void toggleExcluded(selected.id, !selected.excluded)}>{selected.excluded ? '집계에 다시 넣기' : '집계에서 빼기'}</button><button className="secondary" onClick={() => void deleteRun(selected.id)}><Trash2 size={14} /> 삭제</button></div></div>
+      {detail && detail.id === selected.id ? <RunTraceChart key={selected.id + (editing ? 'e' : '')} series={detail.series} analysis={a} aLimit={aLimit} showCandidates={editing} zoom={zoom} onZoom={setZoom} timeBase={timeBase}
+        extraMarks={[...(selected.slowdown?.slowed_at_s != null ? [{ t: selected.slowdown.slowed_at_s, label: `감속 시작 (출력 ${selected.slowdown.output})`, color: '#a04fa0' }] : []), ...(selected.distance_summary?.us_bump_t_s != null ? [{ t: selected.distance_summary.us_bump_t_s, label: '초음파 속력 골', color: '#1f9e9e' }] : [])]} pickMode={editing ? pickMode : null} picked={editing ? pick : undefined}
         onPick={t => { setPick(p => ({ ...p, [pickMode ?? 'front']: t })); setPickMode(m => m === 'front' ? 'rear' : null); }}
         thresholdDelta={Number(a.threshold_used_g ?? a.params?.threshold_delta_g ?? settings.threshold_delta_g)} jumpG={Number(a.params?.jump_g ?? settings.jump_g)}
         title={`위아래 가속도 – ${condLabel(selected)}, ${selected.condition.trial}회차`} name={`trace_${selected.condition.bump_id}_m${selected.condition.total_mass_g}_${selected.condition.output_mode}${selected.condition.output_value}_t${selected.condition.trial}`} />
@@ -131,6 +154,8 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
         <div><small>속도·곡률 지수 Π</small><b>{fmt(a.pi, 2)}</b><span>1을 넘으면 이론상 뜸 · 뜨기 시작하는 속도 {fmt(a.critical_speed_mps, 2, 'm/s')}</span></div>
         <div><small>주행 진동 크기</small><b>{fmt(a.noise_sigma_g, 3, 'g')}</b><span>피크로 인정한 기준 {fmt(a.threshold_used_g, 2, 'g')} 이상{a.standout_ratio ? ` · 바퀴 피크가 진동의 ${a.standout_ratio}배` : ''}{(a.noise_sigma_g ?? 0) > 0.12 ? ' · 진동이 큰 편: 센서 고정·바퀴 상태를 확인하세요' : ''}</span></div>
       </div>
+      {selected.slowdown && <div className="exp-slowcard"><b>감속 제어 시행</b> 출력 {selected.slowdown.output_initial} → {selected.slowdown.needed ? `${selected.slowdown.output} (${{ time: `${selected.slowdown.at_s}초 후`, tape: '감속 테이프에서', distance: `벽까지 ${selected.slowdown.at_cm} cm에서` }[selected.slowdown.trigger]})` : '감속 불필요'} · 예측 v₀ {fmt(selected.slowdown.v0_pred_mps, 3)} → 목표 {fmt(selected.slowdown.target_v_mps, 3)} m/s · 실제 통과 {fmt(selected.slowdown.measured_speed_mps, 3)} m/s · 최대 {fmt(selected.slowdown.measured_peak_g, 2)} g / 기준 {selected.slowdown.a_limit_g.toFixed(2)} g {selected.slowdown.pass == null ? '' : selected.slowdown.pass ? <span className="exp-badge real">기준 이내</span> : <span className="exp-badge over">기준 초과</span>}</div>}
+      {detail && detail.id === selected.id && <DistanceChart run={selected} detail={detail} timeBase={timeBase} />}
       {log.length > 0 && <p className="exp-hint exp-drivelog">{(selected as RunSummary & { bump_passed_s?: number | null; elapsed_s?: number | null }).bump_passed_s != null ? `방지턱을 ${(selected as RunSummary & { bump_passed_s?: number }).bump_passed_s?.toFixed(2)}초에 다 넘어 자동 정지(총 ${(selected as RunSummary & { elapsed_s?: number }).elapsed_s?.toFixed(2)}초 주행) · ` : ''}모터 출력: {outputs.length === 1 ? `처음부터 끝까지 ${outputLabel(selected.condition.output_mode, outputs[0])}로 고정` : `${outputs.join(' → ')} (출발 밀어주기 후 고정)`} · 조향 {Math.min(...steers).toFixed(1)}° ~ {Math.max(...steers).toFixed(1)}°{selected.heading_max_deg != null ? ` · 차 방향이 가장 많이 틀어진 각도 ${selected.heading_max_deg.toFixed(1)}°` : ''}</p>}
       {a.flags.length > 0 && <ul className="exp-flags">{a.flags.map(f => <li key={f}><AlertTriangle size={13} />{f}</li>)}</ul>}
       {speedOff != null && Math.abs(speedOff) > 0.2 && <ul className="exp-flags"><li><AlertTriangle size={13} />이 시행 속도가 같은 조건 평균({fmt(group?.mean_speed_mps, 3)} m/s)과 {(speedOff * 100).toFixed(0)}% 다릅니다. 앞·뒤 바퀴 피크를 맞게 골랐는지 아래에서 확인하세요.</li></ul>}

@@ -23,6 +23,9 @@ BACKWARD_FACTOR = float(os.getenv("FAKE_BACKWARD_FACTOR", "1.0"))
 # 왼쪽 바퀴가 더 센 차를 흉내 내려면 FAKE_LEFT_FACTOR=1.08 처럼 지정(좌우 균형 점검 시험)
 LEFT_FACTOR = float(os.getenv("FAKE_LEFT_FACTOR", "1.0"))
 TRACK = 0.11
+# 초음파 시험용 벽 위치(뒷축 기준 x, m). 앞범퍼는 앞축보다 약 3 cm 앞
+WALL_X = float(os.getenv("FAKE_WALL_X", "1.6"))
+BUMPER = 0.03
 TAPE_OFFSETS = (0.02, 0.0, -0.02)  # 그레이스케일 센서 좌·중·우의 옆 위치(m, 왼쪽 +)
 
 state = {
@@ -52,6 +55,7 @@ def _crossings(x0: float, x1: float, now: float, v: float) -> None:
         if (a - BUMP_X) * (b - BUMP_X) < 0:
             amp = 0.9 * (v / 0.5) ** 1.6 * scale
             state["pulses"].append((now, amp))
+            state["v"] *= 0.9  # 턱을 오르며 잠깐 느려짐(초음파 속력 골 시험)
 
 
 def update(now: float | None = None) -> None:
@@ -103,3 +107,12 @@ def grayscale() -> list[float]:
         d = state["y"] + off
         out.append(1200 - 900 * math.exp(-(d / 0.012) ** 2) + random.gauss(0, 8))
     return out
+
+
+def wall_distance_cm() -> float:
+    """앞범퍼에서 벽까지 거리(초음파 흉내, ±0.5 cm 잡음, 가끔 튀는 값)."""
+    update()
+    d = (WALL_X - (state["x"] + WHEELBASE + BUMPER)) * 100 + random.gauss(0, 0.5)
+    if random.random() < 0.02:
+        d += random.choice((-25, 40))
+    return round(max(2.0, d), 1)
