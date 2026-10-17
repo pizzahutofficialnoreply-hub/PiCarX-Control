@@ -253,7 +253,11 @@ class PiCarXAdapter:
         output = self._clamp(round(max(0.0, value) * max(0.1, trim)), 0, MAX_PWM)
         move = car.forward if direction == "forward" else car.backward
         angle = self._clamp(round(steering), -MAX_STEERING, MAX_STEERING)
-        motor_key = (direction, mapping, output, equal_wheels)
+        tl, tr = getattr(self, "wheel_trim", (1.0, 1.0)) or (1.0, 1.0)
+        # 좌우 배율은 반올림하지 않고 넘깁니다(라이브러리가 듀티로 바꿀 때 정수화). 1% 단위 미세 조정이 사라지지 않게.
+        left = round(min(float(MAX_PWM), output * tl), 2)
+        right = round(min(float(MAX_PWM), output * tr), 2)
+        motor_key = (direction, mapping, output, equal_wheels, left, right)
         if equal_wheels and motor_key == getattr(self, "_last_motor_key", None):
             # 측정 중에는 같은 출력을 다시 쓰지 않습니다(바퀴 출력 고정). 조향만 바뀌었으면 서보만 움직입니다.
             if angle != getattr(self, "_last_angle", None):
@@ -265,13 +269,29 @@ class PiCarXAdapter:
         self._set_steering(angle)
         self._last_angle = angle
         set_speed = getattr(car, "set_motor_speed", None)
-        if mapping == "library" and equal_wheels and callable(set_speed):
-            # 라이브러리 forward()/backward()는 조향각만큼 안쪽 바퀴 출력을 줄입니다(조향 12° → 12% 감속).
-            # 측정 직진에서는 자이로 보정 때문에 조향이 계속 바뀌어 바퀴 출력이 오르내리므로(멈칫),
-            # 두 바퀴에 같은 출력을 직접 줍니다. 라이브러리의 직진(조향 0)과 같은 호출입니다.
-            sign = 1 if direction == "forward" else -1
-            set_speed(1, sign * output)
-            set_speed(2, -sign * output)
+        sign = 1 if direction == "forward" else -1
+        if mapping == "library" and callable(set_speed):
+            # 라이브러리 forward()/backward()와 같은 계산을 직접 하되, 좌·우 바퀴 배율(trim_left/right)을 곱합니다.
+            # 모터 1 = 왼쪽(전진 +), 모터 2 = 오른쪽(전진 −).
+            l_out, r_out = float(left), float(right)
+            if not equal_wheels and angle != 0:
+                # 수동 주행 회전: 라이브러리처럼 조향각만큼 한쪽 바퀴 출력을 줄임(최대 30°)
+                scale = (100 - min(abs(angle), 30)) / 100.0
+                if (angle > 0) == (direction == "forward"):
+                    l_out *= scale
+                else:
+                    r_out *= scale
+            pins = getattr(car, "motor_speed_pins", None)
+            if (tl != 1.0 or tr != 1.0) and pins and len(pins) >= 2 and all(callable(getattr(p, "pulse_width_percent", None)) for p in pins):
+                # 좌우 배율을 쓰면 라이브러리처럼 듀티 = 출력/2 + 50(%)로 계산하되 정수로 자르지 않고 핀에 직접 씁니다
+                # (정수화하면 출력 2 단위마다 1%씩만 바뀌어 1~3% 미세 조정이 사라짐). 방향 핀은 라이브러리 호출로 정합니다.
+                set_speed(1, sign * max(1.0, l_out))
+                set_speed(2, -sign * max(1.0, r_out))
+                pins[0].pulse_width_percent(round(l_out / 2 + 50, 2) if l_out > 0 else 0)
+                pins[1].pulse_width_percent(round(r_out / 2 + 50, 2) if r_out > 0 else 0)
+            else:
+                set_speed(1, sign * l_out)
+                set_speed(2, -sign * r_out)
         elif mapping == "library":
             move(output)
         else:
@@ -279,8 +299,8 @@ class PiCarXAdapter:
             if not pins or not all(callable(getattr(pin, "pulse_width_percent", None)) for pin in pins):
                 raise RuntimeError("설치된 picarx 라이브러리에서 motor_speed_pins를 찾지 못해 직접 듀티 모드를 쓸 수 없습니다. 라이브러리 PWM 모드를 사용하세요.")
             move(1 if output > 0 else 0)  # 방향 핀과 보정 방향을 라이브러리 방식대로 설정
-            for pin in pins:
-                pin.pulse_width_percent(output)
+            pins[0].pulse_width_percent(left)
+            pins[1].pulse_width_percent(right)
         self._last_motor_key = motor_key
         self.last_command = describe_command(direction, mapping, value, trim, steering, car)
 

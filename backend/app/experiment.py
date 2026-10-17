@@ -1519,12 +1519,24 @@ async def _symmetry(body: SymmetryRequest) -> None:
         ratio = result.get("ratio_backward_to_forward")
         if ratio:
             trims = (ctl.drive_settings or {}) if hasattr(ctl, "drive_settings") else {}
+            out = body.output_value
             if ratio > 1.05:
-                result["suggestion"] = {"trim_backward": round(max(0.5, trims.get("trim_backward", 1.0) / ratio), 3),
-                                        "text": f"후진이 전진보다 약 {ratio:.2f}배 빠릅니다. 후진 출력 배율을 낮추세요(적용 후 다시 점검해 0.95~1.05가 될 때까지 2~3번 반복)."}
+                # 후진이 빠름 → 전진(느린 쪽)을 먼저 올림. 출력 상한(100)에 걸리면 후진을 낮춤.
+                tf = trims.get("trim_forward", 1.0) * ratio
+                if tf <= 1.5 and out * tf <= 100:
+                    result["suggestion"] = {"trim_forward": round(tf, 3),
+                                            "text": f"후진이 전진보다 약 {ratio:.2f}배 빠릅니다. 전진 출력 배율을 {tf:.2f}로 올리면 맞춰집니다(오르막을 넘는 힘도 커짐)."}
+                else:
+                    result["suggestion"] = {"trim_backward": round(max(0.5, trims.get("trim_backward", 1.0) / ratio), 3),
+                                            "text": f"후진이 전진보다 약 {ratio:.2f}배 빠릅니다. 전진은 이미 최대라 후진 출력 배율을 낮춥니다."}
             elif ratio < 0.95:
-                result["suggestion"] = {"trim_forward": round(max(0.5, trims.get("trim_forward", 1.0) * ratio), 3),
-                                        "text": f"전진이 후진보다 약 {1 / ratio:.2f}배 빠릅니다. 전진 출력 배율을 낮추세요(적용 후 다시 점검해 0.95~1.05가 될 때까지 2~3번 반복)."}
+                tb = trims.get("trim_backward", 1.0) / ratio
+                if tb <= 1.5 and out * tb <= 100:
+                    result["suggestion"] = {"trim_backward": round(tb, 3),
+                                            "text": f"전진이 후진보다 약 {1 / ratio:.2f}배 빠릅니다. 후진 출력 배율을 {tb:.2f}로 올리면 맞춰집니다."}
+                else:
+                    result["suggestion"] = {"trim_forward": round(max(0.5, trims.get("trim_forward", 1.0) * ratio), 3),
+                                            "text": f"전진이 후진보다 약 {1 / ratio:.2f}배 빠릅니다. 후진은 이미 최대라 전진 출력 배율을 낮춥니다."}
             else:
                 result["suggestion"] = {"text": "전진과 후진 속도 차이가 5% 이내입니다."}
         symmetry_runner.result = result
@@ -1538,10 +1550,157 @@ async def _symmetry(body: SymmetryRequest) -> None:
             await asyncio.to_thread(mpu6050_service.stop_recording)
 
 
+class BalanceRequest(BaseModel):
+    output_mode: Literal["pwm", "duty"] = "pwm"
+    output_value: float = Field(default=70, gt=0, le=100)
+    seconds: float = Field(default=1.5, ge=0.6, le=4)
+    direction: Literal["forward", "backward"] = "forward"
+    auto: bool = False
+    max_tries: int = Field(default=5, ge=1, le=8)
+
+
+class BalanceRunner:
+    def __init__(self) -> None:
+        self.state, self.message = "idle", ""
+        self.result: dict[str, Any] | None = None
+        self.trials: list[dict[str, Any]] = []
+
+    @property
+    def busy(self) -> bool:
+        return self.state == "running"
+
+
+balance_runner = BalanceRunner()
+
+
+def _yaw_rate(log: list[list[float]], seconds: float) -> float | None:
+    """주행 기록 [t, 출력, 조향, 방향°]에서 뒤쪽 60% 구간의 방향 변화율(°/s, 반시계 +)을 최소제곱으로."""
+    pts = [(r[0], r[3]) for r in log if r[3] is not None and r[0] >= 0.4 * seconds]
+    if len(pts) < 5:
+        return None
+    n = len(pts)
+    mt = sum(p[0] for p in pts) / n
+    mh = sum(p[1] for p in pts) / n
+    den = sum((p[0] - mt) ** 2 for p in pts)
+    return sum((p[0] - mt) * (p[1] - mh) for p in pts) / den if den > 0 else None
+
+
+def _balance_to_trims(b: float) -> tuple[float, float]:
+    """균형값 b(+면 왼쪽을 줄임, −면 오른쪽을 줄임) → (왼쪽, 오른쪽) 배율. 빠른 쪽만 낮춰 최대 출력은 그대로 둡니다."""
+    return round(1.0 - max(0.0, b), 3), round(1.0 - max(0.0, -b), 3)
+
+
+async def _balance(body: BalanceRequest) -> None:
+    """직진 보정 없이 조향 0으로 달려 차가 도는 속도(자이로)를 재고, 0이 되도록 좌우 바퀴 배율을 맞춥니다.
+
+    좌우 바퀴 속도가 다르면 차가 돌므로 회전 속도 ω ∝ (오른쪽 − 왼쪽). 할선법으로 ω(b) = 0인 b를 찾습니다(부호 가정 없음).
+    한 번 달릴 때마다 반대 방향으로 같은 시간 돌아와 출발 위치 근처로 복귀합니다.
+    """
+    ctl = control()
+    simulated = ctl.adapter.mode != "hardware"
+    ds = ctl.drive_settings
+    b0 = (1.0 - ds.get("trim_left", 1.0)) - (1.0 - ds.get("trim_right", 1.0))
+    tries = body.max_tries if body.auto else 1
+    hist: list[tuple[float, float]] = []
+    balance_runner.trials = []
+    back = "backward" if body.direction == "forward" else "forward"
+    try:
+        b = b0
+        for i in range(tries):
+            tl, tr = _balance_to_trims(b)
+            ctl.save_drive_settings({"trim_left": tl, "trim_right": tr})
+            balance_runner.message = f"{i + 1}번째 점검: 정지 기록(움직이지 마세요)"
+            gen = ctl.stop_generation
+            await _wait(ctl, 0.8, gen)
+            track = not simulated and mpu6050_service.heading_reset()
+            balance_runner.message = f"{i + 1}번째 점검: 조향 0으로 곧게 주행 (왼쪽 ×{tl}, 오른쪽 ×{tr})"
+            try:
+                info = await _drive_for(ctl, body.output_mode, body.output_value, body.seconds, body.direction, gen, False, 0.0, track=track)
+            finally:
+                await ctl.stop(reason="balance_test")
+            w = _yaw_rate(info.get("drive_log") or [], body.seconds) if track else None
+            trial = {"try": i + 1, "trim_left": tl, "trim_right": tr, "yaw_dps": None if w is None else round(w, 2),
+                     "heading_end_deg": info.get("heading_end_deg")}
+            balance_runner.trials.append(trial)
+            gen = ctl.stop_generation
+            await _wait(ctl, 0.4, gen)
+            balance_runner.message = f"{i + 1}번째 점검: 출발 위치로 돌아가는 중"
+            try:
+                await _drive_for(ctl, body.output_mode, body.output_value, body.seconds, back, gen, False, 0.0, track=False)
+            finally:
+                await ctl.stop(reason="balance_return")
+            if w is None:
+                break
+            hist.append((b, w))
+            if abs(w) <= 1.5:
+                break
+            # 기울기(배율을 바꿨을 때 회전이 얼마나 바뀌는지)는 회전 차이가 뚜렷한 두 점으로만 구합니다(출력 반올림에 따른 흔들림 방지).
+            slope = None
+            for (ba, wa), (bb, wb) in ((hist[j], hist[k]) for j in range(len(hist)) for k in range(j + 1, len(hist))):
+                if abs(wb - wa) >= 2.0 and abs(bb - ba) > 1e-6:
+                    cand = (wb - wa) / (bb - ba)
+                    slope = cand if slope is None or abs(bb - ba) > 0 else slope
+            if slope is None:
+                b_next = b + 0.04  # 첫 걸음: 왼쪽을 4% 줄여 보고 회전이 어떻게 바뀌는지 봄
+            else:
+                step = -w / slope
+                b_next = b + max(-0.08, min(0.08, step))
+            b = max(-0.35, min(0.35, b_next))
+        best = min(hist, key=lambda x: abs(x[1])) if hist else None
+        if best is not None:
+            tl, tr = _balance_to_trims(best[0])
+            ctl.save_drive_settings({"trim_left": tl, "trim_right": tr})
+        last = balance_runner.trials[-1] if balance_runner.trials else {}
+        w = best[1] if best else None
+        side = None if w is None else ("오른쪽 바퀴가 빠름(왼쪽으로 돎)" if w > 0 else "왼쪽 바퀴가 빠름(오른쪽으로 돎)")
+        balance_runner.result = {
+            "trials": balance_runner.trials, "best_yaw_dps": None if w is None else round(w, 2),
+            "trim_left": ctl.drive_settings.get("trim_left"), "trim_right": ctl.drive_settings.get("trim_right"),
+            "text": ("모의 모드라 회전을 잴 수 없습니다." if simulated and not hist else
+                     "자이로 방향을 읽지 못했습니다(센서 보정 확인)." if w is None else
+                     f"회전 {w:+.1f}°/s로 거의 곧게 갑니다." if abs(w) <= 1.5 else
+                     f"회전 {w:+.1f}°/s · {side}. {'자동으로 더 맞추기를 눌러 보세요.' if not body.auto else '최대 횟수까지 맞췄습니다. 조향 중앙(설정 → 조향 보정)도 확인하세요.'}"),
+            "direction": body.direction, "last": last,
+        }
+        balance_runner.state, balance_runner.message = "done", "점검 완료"
+    except Aborted:
+        balance_runner.state, balance_runner.message = "aborted", "정지 명령으로 중단했습니다."
+    except Exception as exc:
+        balance_runner.state, balance_runner.message = "error", f"점검 실패: {exc}"
+    finally:
+        mpu6050_service.heading_stop()
+        try:
+            await ctl.stop(reason="balance_end")
+        except Exception:
+            pass
+
+
+@router.post("/tools/balance")
+async def balance_start(body: BalanceRequest):
+    ctl = control()
+    if auto_runner.busy or symmetry_runner.busy or balance_runner.busy:
+        raise HTTPException(409, "다른 주행이 진행 중입니다.")
+    if not ctl.adapter.connected:
+        raise HTTPException(409, ctl.adapter.connection_error or "PiCar-X가 연결되어 있지 않습니다.")
+    if ctl.adapter.mode == "hardware":
+        st = await asyncio.to_thread(mpu6050_service.status)
+        if not st.get("calibrated"):
+            raise HTTPException(409, "센서 화면에서 MPU-6050 정지 상태 보정을 먼저 하세요.")
+    balance_runner.state, balance_runner.message, balance_runner.result = "running", "시작", None
+    asyncio.create_task(_balance(body))
+    return {"state": balance_runner.state, "message": balance_runner.message}
+
+
+@router.get("/tools/balance")
+async def balance_status():
+    return {"state": balance_runner.state, "message": balance_runner.message, "result": balance_runner.result,
+            "trials": balance_runner.trials}
+
+
 @router.post("/tools/symmetry")
 async def symmetry_start(body: SymmetryRequest):
     ctl = control()
-    if auto_runner.busy or symmetry_runner.busy:
+    if auto_runner.busy or symmetry_runner.busy or balance_runner.busy:
         raise HTTPException(409, "다른 주행이 진행 중입니다.")
     if not ctl.adapter.connected:
         raise HTTPException(409, ctl.adapter.connection_error or "PiCar-X가 연결되어 있지 않습니다.")

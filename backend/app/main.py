@@ -19,7 +19,7 @@ from .experiment import router as experiment_router, bind_control
 
 WATCHDOG_SECONDS = 0.5
 SETTINGS_PATH = Path(os.getenv("PICARX_DATA_DIR") or Path(__file__).resolve().parent.parent / "data") / "settings.json"
-DRIVE_DEFAULTS = {"mapping": "library", "trim_forward": 1.0, "trim_backward": 1.0}
+DRIVE_DEFAULTS = {"mapping": "library", "trim_forward": 1.0, "trim_backward": 1.0, "trim_left": 1.0, "trim_right": 1.0}
 
 class ControlService:
     """Serialize motor operations and enforce command expiry server-side."""
@@ -142,6 +142,7 @@ class ControlService:
                 raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
             try:
                 trim = self.drive_settings["trim_backward" if command.direction == "backward" else "trim_forward"]
+                self.adapter.wheel_trim = (self.drive_settings.get("trim_left", 1.0), self.drive_settings.get("trim_right", 1.0))
                 self.adapter.drive(command.direction, command.speed, command.steering, self.drive_settings["mapping"], trim)
                 self.motion = command.direction
                 self.speed = command.speed
@@ -171,6 +172,7 @@ class ControlService:
                 raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
             try:
                 trim = self.drive_settings["trim_backward" if direction == "backward" else "trim_forward"]
+                self.adapter.wheel_trim = (self.drive_settings.get("trim_left", 1.0), self.drive_settings.get("trim_right", 1.0))
                 self.adapter.drive_experiment(mode, value, direction, steering, trim)
                 self.motion, self.speed, self.steering = direction, int(round(value)), int(round(steering))
                 self.updated_at = time.monotonic()

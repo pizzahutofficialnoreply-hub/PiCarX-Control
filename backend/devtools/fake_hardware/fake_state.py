@@ -20,11 +20,16 @@ GYRO_BIAS_DPS = 0.8
 TAU_S = 0.15  # 모터 속도 응답 시간상수(가속 구간을 흉내)
 # 후진이 전진보다 빠른 차를 흉내 내려면 FAKE_BACKWARD_FACTOR=1.3 처럼 지정
 BACKWARD_FACTOR = float(os.getenv("FAKE_BACKWARD_FACTOR", "1.0"))
+# 왼쪽 바퀴가 더 센 차를 흉내 내려면 FAKE_LEFT_FACTOR=1.08 처럼 지정(좌우 균형 점검 시험)
+LEFT_FACTOR = float(os.getenv("FAKE_LEFT_FACTOR", "1.0"))
+TRACK = 0.11
 TAPE_OFFSETS = (0.02, 0.0, -0.02)  # 그레이스케일 센서 좌·중·우의 옆 위치(m, 왼쪽 +)
 
 state = {
     "motion": "stopped",   # stopped | forward | backward
     "duty": 0.0,
+    "duty_l": 0.0,
+    "duty_r": 0.0,
     "steering": 0.0,
     "x": 0.0,              # 뒷축 위치 (m)
     "y": 0.0,              # 테이프(y=0)에서 옆으로 벗어난 거리 (m)
@@ -71,6 +76,11 @@ def update(now: float | None = None) -> None:
         # 앞으로 갈 때 오른쪽 조향(+) → 시계 방향(−) 회전, 후진이면 반대
         sgn = 1 if state["v"] > 0 else -1 if state["v"] < 0 else 0
         yaw = -sgn * math.degrees(v / WHEELBASE * math.tan(steer)) + (DRIFT_DPS * sgn if v > 0.01 else 0.0)
+        if v > 0.01:
+            # 좌우 바퀴 속도 차이 → 회전(오른쪽이 빠르면 왼쪽으로 돎, 반시계 +)
+            vl = speed_for_duty(state["duty_l"]) * LEFT_FACTOR
+            vr = speed_for_duty(state["duty_r"])
+            yaw += sgn * math.degrees((vr - vl) / TRACK)
         state["yaw_rate"] = yaw
         state["heading"] += yaw * dt
         state["pulses"] = [p for p in state["pulses"] if now - p[0] < 0.1]

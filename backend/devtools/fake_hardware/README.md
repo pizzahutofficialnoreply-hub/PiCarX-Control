@@ -14,3 +14,5 @@ PYTHONPATH=devtools/fake_hardware PICARX_MODE=hardware uvicorn app.main:app --po
 - 그레이스케일 센서는 y = 0을 따라 붙은 검은 테이프를 봅니다(라인 추종 시험). 서버를 다시 켜면 차가 테이프 정중앙에서 시작합니다.
 - `robot_hat.utils.get_battery_voltage`도 흉내 냅니다(8.2 V에서 천천히 감소).
 - 실제 측정값이 아니므로 연구 데이터로 쓰지 마세요. 저장 위치를 분리하려면 `PICARX_DATA_DIR`를 지정하세요.
+
+- `FAKE_LEFT_FACTOR=1.08`이면 왼쪽 바퀴가 8% 빠른 차가 됩니다(좌우 균형 맞추기 시험).

@@ -5,8 +5,9 @@ __version__ = "fake-2.0"
 
 
 class _Pin:
-    def __init__(self):
+    def __init__(self, side=None):
         self._value = 0.0
+        self.side = side
 
     def pulse_width_percent(self, value=None):
         if value is None:
@@ -15,6 +16,8 @@ class _Pin:
         fs.update()
         with fs.LOCK:
             fs.state["duty"] = float(value)
+            if self.side:
+                fs.state["duty_" + self.side] = float(value)
 
 
 class _DirPin:
@@ -32,7 +35,7 @@ class _DirPin:
 
 class Picarx:
     def __init__(self):
-        self.motor_speed_pins = [_Pin(), _Pin()]
+        self.motor_speed_pins = [_Pin("l"), _Pin("r")]
         self.motor_direction_pins = [_DirPin(), _DirPin()]
         self.cali_speed_value = [0, 0]
         self.cali_dir_value = [1, -1]
@@ -48,6 +51,7 @@ class Picarx:
         with fs.LOCK:
             fs.state["motion"] = motion if speed else "stopped"
             fs.state["duty"] = duty
+            fs.state["duty_l"] = fs.state["duty_r"] = duty
 
     def forward(self, speed):
         self._drive("forward", speed)
@@ -66,6 +70,8 @@ class Picarx:
         self.motor_speed_pins[motor - 1]._value = duty
         forward = speed > 0 if motor == 1 else speed < 0
         self.motor_direction_pins[motor - 1]._v = (0 if forward else 1) if motor == 1 else (1 if forward else 0)
+        with fs.LOCK:
+            fs.state["duty_l" if motor == 1 else "duty_r"] = duty
         if motor == 1:
             self._m1 = (forward, duty)
         else:

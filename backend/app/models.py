@@ -22,6 +22,8 @@ class DriveSettingsUpdate(BaseModel):
     mapping: str | None = Field(default=None, pattern="^(library|duty)$", description="library: picarx forward/backward (value/2+50 %), duty: direct duty %")
     trim_forward: float | None = Field(default=None, ge=0.5, le=1.5)
     trim_backward: float | None = Field(default=None, ge=0.5, le=1.5)
+    trim_left: float | None = Field(default=None, ge=0.5, le=1.5, description="왼쪽 바퀴(모터 1) 출력 배율")
+    trim_right: float | None = Field(default=None, ge=0.5, le=1.5, description="오른쪽 바퀴(모터 2) 출력 배율")
 
 class CameraView(BaseModel):
     pan: float | None = Field(default=None, ge=-90, le=90)
