@@ -546,3 +546,38 @@ class BackwardMeasureTests(unittest.TestCase):
             client.put("/api/experiment/settings", json=s)
             data = client.get("/api/experiment/runs").json()
             self.assertFalse(any(g["direction"] == "backward" for g in data["groups"]))
+
+
+class LineFollowSimTests(unittest.TestCase):
+    def _sim(self, reversed_sensors: bool, start_y=0.012, seconds=6.0, v=0.25):
+        import math
+        from app.line_follow import LineSettings, LineTracker
+        st = LineSettings(floor=[900, 900, 900], line=[300, 300, 300], gain=0.8, damping=0.25, max_steer_deg=25)
+        tr = LineTracker(st)
+        y, hdg, t, dt = start_y, 0.0, 0.0, 0.02   # y: 테이프에서 왼쪽(+)으로 벗어난 거리(m)
+        offs = (0.02, 0.0, -0.02)                  # 센서 왼·가운데·오른쪽의 옆 위치
+        if reversed_sensors:
+            offs = offs[::-1]
+        worst = 0.0
+        for _ in range(int(seconds / dt)):
+            raw = [900 - 600 * max(0.0, 1 - abs(y + o) / 0.012) for o in offs]   # 테이프 폭 24 mm
+            steer, ok = tr.update(raw, "forward", now=t)
+            hdg += -v / 0.095 * math.tan(math.radians(steer)) * dt               # 오른쪽 조향(+) → 시계 방향
+            y += v * math.sin(hdg) * dt
+            t += dt
+            worst = max(worst, abs(y)) if t > seconds - 1.5 else worst   # 마지막 1.5초 동안 벗어난 최대 거리
+            if not ok:
+                return None, tr
+        return worst, tr
+
+    def test_follows_line(self):
+        worst, tr = self._sim(False)
+        self.assertIsNotNone(worst)
+        self.assertLess(worst, 0.011)   # 센서 3개라 가운데 센서만 테이프를 볼 때 ±1 cm 안쪽은 구분 못 함
+        self.assertFalse(tr.flipped)
+
+    def test_reversed_sensor_order_is_corrected(self):
+        worst, tr = self._sim(True)
+        self.assertTrue(tr.flipped)
+        self.assertIsNotNone(worst)
+        self.assertLess(worst, 0.011)

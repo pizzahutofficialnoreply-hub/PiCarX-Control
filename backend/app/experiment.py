@@ -673,37 +673,59 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     prev_t = start
     stopped_on_mark = False
     passed_at: float | None = None
-    while loop.time() < end:
-        if ctl.stop_generation != generation:
-            raise Aborted()
-        now = loop.time()
-        steer = 0.0
-        heading = mpu6050_service.heading_deg() if (heading_hold if track is None else track) else None
-        if heading is not None:
-            last = heading
-            worst = max(worst, abs(heading))
-            if controller is not None:
-                steer = controller.update(heading, now - prev_t, sign)
-        if line is not None:
-            raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-            steer, ok = line.update(raw, direction)
-            if not ok:
-                line_lost = True
-                break
-        if bump_watch is not None and passed_at is None and bump_watch.update(mpu6050_service.tilt_deg(), now - start):
-            passed_at = now
-            end = min(end, now + after_bump_s)
-        if stop_when is not None and now - start >= min_s:
-            raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-            if stop_when(raw):
-                stopped_on_mark = True
-                break
-        prev_t = now
-        out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else value
-        if not await ctl.experiment_drive(mode, out, generation, direction, steer):
-            raise Aborted()
-        log.append([round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)])
-        await asyncio.sleep(0.05)
+    mark_seen = asyncio.Event()
+    poller: asyncio.Task | None = None
+    if stop_when is not None:
+        # 정지선(테이프)은 폭이 1.5~2 cm라 0.3 m/s면 약 0.06초만 센서 아래에 있습니다. 주행 루프(0.05초)와 따로
+        # 바닥 센서를 쉬지 않고 읽어(수 ms 간격) 두 번 연속 보이면 표시합니다.
+        async def poll() -> None:
+            hits = 0
+            while not mark_seen.is_set():
+                if loop.time() - start >= min_s:
+                    raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+                    hits = hits + 1 if stop_when(raw) else 0
+                    if hits >= 2:
+                        mark_seen.set()
+                        return
+                    await asyncio.sleep(0.002)
+                else:
+                    await asyncio.sleep(0.01)
+        poller = asyncio.create_task(poll())
+    try:
+      while loop.time() < end:
+          if ctl.stop_generation != generation:
+              raise Aborted()
+          now = loop.time()
+          steer = 0.0
+          heading = mpu6050_service.heading_deg() if (heading_hold if track is None else track) else None
+          if heading is not None:
+              last = heading
+              worst = max(worst, abs(heading))
+              if controller is not None:
+                  steer = controller.update(heading, now - prev_t, sign)
+          if line is not None:
+              raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+              steer, ok = line.update(raw, direction)
+              if not ok:
+                  line_lost = True
+                  break
+          if bump_watch is not None and passed_at is None and bump_watch.update(mpu6050_service.tilt_deg(), now - start):
+              passed_at = now
+              end = min(end, now + after_bump_s)
+          if mark_seen.is_set():
+              stopped_on_mark = True
+              break
+          prev_t = now
+          out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else value
+          if not await ctl.experiment_drive(mode, out, generation, direction, steer):
+              raise Aborted()
+          log.append([round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)])
+          await asyncio.sleep(0.02 if line is not None else 0.05)  # 라인 추종은 50 Hz
+    finally:
+        if poller is not None:
+            mark_seen.set()
+            poller.cancel()
+
     half = [row[2] for row in log if row[0] >= seconds / 2]
     return {"heading_max_deg": round(worst, 2) if last is not None else None,
             "heading_end_deg": round(last, 2) if last is not None else None,
@@ -791,6 +813,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                                           bump_watch=BumpPassWatcher() if (settings.stop_after_bump and track) else None,
                                           after_bump_s=settings.after_bump_s)
             auto_runner.last_forward_s = drive_info.get("elapsed_s")
+            if line is not None and line.flipped:
+                st = store.load_settings()
+                st.line.steer_sign = line.sign
+                store.save_settings(st)
             if hold and not drive_info.get("line_lost"):
                 drive_info["heading_ff_learned"] = _learn_heading(mdir, drive_info.get("steer_mean_late"), drive_info)
         finally:
@@ -1413,7 +1439,12 @@ async def line_start(body: LineRunRequest):
     settings = store.load_settings().line
     if not (settings.floor and settings.line):
         raise HTTPException(409, "바닥과 테이프 위에서 센서 보정을 먼저 하세요.")
-    line_runner.task = asyncio.create_task(line_runner.run(ctl, ctl.adapter.read_grayscale, settings, body.output_mode, body.output_value, body.seconds))
+    def save_sign(sign: int) -> None:
+        st = store.load_settings()
+        st.line.steer_sign = sign
+        store.save_settings(st)
+    line_runner.task = asyncio.create_task(line_runner.run(ctl, ctl.adapter.read_grayscale, settings, body.output_mode, body.output_value,
+                                                           body.seconds, on_flip=save_sign))
     await asyncio.sleep(0)
     return line_runner.snapshot()
 

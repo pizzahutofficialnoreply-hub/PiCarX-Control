@@ -342,3 +342,7 @@ button:focus-visible,input:focus-visible{outline:2px solid #727873;outline-offse
 .exp-explain dt{display:grid;gap:3px;font-size:11px;color:var(--muted)}.exp-explain dt b{font-size:16px;color:var(--text);font-variant-numeric:tabular-nums}
 .exp-explain dd{margin:0;font-size:12px;line-height:1.6}
 @media(max-width:650px){.exp-explain dl>div{grid-template-columns:1fr}}
+.timed-drive{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface2)}
+.timed-drive label{display:grid;gap:2px}.timed-drive label span{display:flex;gap:4px;align-items:center}
+.timed-drive input{width:64px;padding:5px 6px}
+.timed-drive small{color:var(--muted);font-size:10px}

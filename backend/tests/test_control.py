@@ -190,3 +190,16 @@ class ControlSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimedDriveTests(unittest.TestCase):
+    def test_timed_drive_stops_by_itself(self):
+        import time as _t
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with TestClient(app) as client:
+            r = client.post("/api/drive/timed", json={"direction": "forward", "speed": 50, "steering": 0, "seconds": 0.4})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(client.get("/api/status").json()["motion"], "forward")
+            _t.sleep(0.8)
+            self.assertEqual(client.get("/api/status").json()["motion"], "stopped")

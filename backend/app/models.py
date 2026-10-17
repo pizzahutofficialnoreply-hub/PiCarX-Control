@@ -5,6 +5,12 @@ class DriveCommand(BaseModel):
     speed: int = Field(ge=0, le=100, description="Motor output 0-100 (library PWM or direct duty, see drive settings)")
     steering: int = Field(ge=-30, le=30, description="Signed steering angle in degrees")
 
+class TimedDrive(BaseModel):
+    direction: str = Field(pattern="^(forward|backward)$")
+    speed: int = Field(ge=1, le=100)
+    steering: int = Field(default=0, ge=-30, le=30)
+    seconds: float = Field(ge=0.2, le=30, description="이 시간만큼 달린 뒤 자동 정지")
+
 class CalibrationUpdate(BaseModel):
     steering_center: int | None = Field(default=None, ge=-20, le=20)
     pan_center: int | None = Field(default=None, ge=-30, le=30)

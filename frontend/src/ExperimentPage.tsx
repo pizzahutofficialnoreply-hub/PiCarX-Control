@@ -159,7 +159,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     try {
       const body = {
         condition: { ...condition, ...(override ?? {}), total_mass_g: undefined },
-        repeats: runOpts.repeats, return_enabled: runOpts.return_enabled, return_output: runOpts.return_output || null,
+        repeats: runOpts.repeats, run_seconds: runOpts.run_seconds, return_enabled: runOpts.return_enabled, return_output: runOpts.return_output || null,
         return_scale: runOpts.return_scale, return_stop_on_tape: !!runOpts.return_stop_on_tape, rest_s: runOpts.rest_s, steering_source: runOpts.steering_source ?? 'gyro', kick_ms: runOpts.kick_ms ?? 0,
         ...(extra ?? {}),
       };
@@ -305,6 +305,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
           <div className="exp-repeat-head"><Repeat size={14} /><b>반복 측정</b><small>직진하며 측정 → 출발선으로 후진 → 대기를 정해진 횟수만큼 반복합니다. 회차는 자동으로 1씩 늘어납니다.</small></div>
           <div className="experiment-fields">
             <label>반복 횟수<input type="number" min={1} max={20} value={runOpts.repeats} onChange={e => setRunOpts({ repeats: Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1))) })} /></label>
+            <label>주행 시간 (s, 최대)<input type="number" min={0.3} max={6} step={0.1} value={runOpts.run_seconds} onChange={e => setRunOpts({ run_seconds: Math.max(0.3, Math.min(6, Number(e.target.value) || 2.5)) })} /></label>
             <label>회차 사이 대기 (s)<input type="number" min={0.3} max={10} step={0.5} value={runOpts.rest_s} onChange={e => setRunOpts({ rest_s: Math.max(0.3, Number(e.target.value) || 1.5) })} /></label>
             <label className="exp-check"><input type="checkbox" checked={settings?.stop_after_bump ?? true} onChange={e => void patchSettings({ stop_after_bump: e.target.checked })} /> 방지턱을 다 넘으면 자동 정지 (주행 시간은 최대 시간이 됨)</label>
             <label className="exp-check"><input type="checkbox" checked={runOpts.return_enabled} onChange={e => setRunOpts({ return_enabled: e.target.checked })} /> 측정 후 출발선으로 후진 복귀</label>

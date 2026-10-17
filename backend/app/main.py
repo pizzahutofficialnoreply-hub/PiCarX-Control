@@ -10,7 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from .hardware import MAX_PWM, MockAdapter, PiCarXAdapter, UnavailableAdapter
-from .models import AutonomyStart, CalibrationUpdate, CameraView, DriveCommand, DriveSettingsUpdate, SteeringTest
+from .models import AutonomyStart, CalibrationUpdate, CameraView, DriveCommand, DriveSettingsUpdate, SteeringTest, TimedDrive
 from .autonomy.registry import controller_catalog
 from .services.event_log import read_events, record_event
 from .camera import camera_service
@@ -333,6 +333,32 @@ async def drive(command: DriveCommand):
         record_event("motion", "Drive API request failed", level="ERROR", details={"error": str(exc)})
         raise HTTPException(503, f"Drive command failed: {exc}")
     return control.status()
+
+@app.post("/api/drive/timed")
+async def drive_timed(body: TimedDrive):
+    """정해진 시간만큼 달리고 자동으로 멈춥니다(0.1초마다 명령을 다시 보내 안전 정지 타이머를 갱신)."""
+    gen = control.stop_generation
+    cmd = DriveCommand(direction=body.direction, speed=body.speed, steering=body.steering)
+    try:
+        await control.drive(cmd)
+    except Exception as exc:
+        raise HTTPException(503, f"Drive command failed: {exc}")
+
+    async def keep() -> None:
+        end = time.monotonic() + body.seconds
+        try:
+            while time.monotonic() < end and control.stop_generation == gen:
+                await asyncio.sleep(0.1)
+                if control.stop_generation != gen:
+                    return
+                await control.drive(cmd)
+        except Exception as exc:
+            record_event("motion", "Timed drive failed", level="ERROR", details={"error": str(exc)})
+        finally:
+            if control.stop_generation == gen:
+                await control.stop(reason="timed_drive_end")
+    asyncio.create_task(keep())
+    return {"started": True, "seconds": body.seconds, "direction": body.direction, "speed": body.speed}
 
 @app.post("/api/stop")
 async def stop():

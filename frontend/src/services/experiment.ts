@@ -213,7 +213,7 @@ export type ValidationRow = {
 export type ValidationBundle = { rows: ValidationRow[]; summary: { count: number; evaluated: number; mape: number | null; bias_pct: number | null; within_10pct: number; within_20pct: number } };
 export type ProgressCell = { bump_id: string; added_mass_g: number; output_value: number; done: number; need: number };
 export type Progress = { cells: ProgressCell[]; done: number; need: number; next: ProgressCell | null };
-export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number };
+export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number; auto_sign?: boolean; steer_sign?: number };
 export type PeakCandidate = { t_s: number; g: number; landing: boolean };
 
 export function modelPredict(model: { kind: string; coef: Record<string, number> } | null | undefined, v: number, mKg: number): number | null {
