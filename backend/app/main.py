@@ -6,17 +6,20 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from .hardware import MockAdapter, PiCarXAdapter, UnavailableAdapter
-from .models import AutonomyStart, CalibrationUpdate, DriveCommand, SteeringTest
+from .hardware import MAX_PWM, MockAdapter, PiCarXAdapter, UnavailableAdapter
+from .models import AutonomyStart, CalibrationUpdate, CameraView, DriveCommand, DriveSettingsUpdate, SteeringTest, TimedDrive
 from .autonomy.registry import controller_catalog
 from .services.event_log import read_events, record_event
 from .camera import camera_service
+from .mpu6050 import mpu6050_service
+from .experiment import router as experiment_router, bind_control
 
 WATCHDOG_SECONDS = 0.5
-SETTINGS_PATH = Path(__file__).resolve().parent.parent / "data" / "settings.json"
+SETTINGS_PATH = Path(os.getenv("PICARX_DATA_DIR") or Path(__file__).resolve().parent.parent / "data") / "settings.json"
+DRIVE_DEFAULTS = {"mapping": "library", "trim_forward": 1.0, "trim_backward": 1.0, "trim_left": 1.0, "trim_right": 1.0}
 
 class ControlService:
     """Serialize motor operations and enforce command expiry server-side."""
@@ -39,6 +42,8 @@ class ControlService:
         self.steering_center = int(saved.get("steering_center", self.adapter.steering_center))
         self.pan_center = int(saved.get("pan_center", self.adapter.pan_center))
         self.tilt_center = int(saved.get("tilt_center", self.adapter.tilt_center))
+        drive = saved.get("drive") if isinstance(saved.get("drive"), dict) else {}
+        self.drive_settings = {**DRIVE_DEFAULTS, **{k: v for k, v in drive.items() if k in DRIVE_DEFAULTS}}
         if self.adapter.connected:
             try:
                 self.adapter.set_calibration(self.steering_center, self.pan_center, self.tilt_center)
@@ -85,6 +90,7 @@ class ControlService:
             "steering_center": self.steering_center,
             "pan_center": self.pan_center,
             "tilt_center": self.tilt_center,
+            "drive": self.drive_settings,
         }, indent=2), encoding="utf-8")
         temp_path.replace(SETTINGS_PATH)
 
@@ -135,7 +141,9 @@ class ControlService:
             if not self.adapter.connected:
                 raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
             try:
-                self.adapter.drive(command.direction, command.speed, command.steering)
+                trim = self.drive_settings["trim_backward" if command.direction == "backward" else "trim_forward"]
+                self.adapter.wheel_trim = (self.drive_settings.get("trim_left", 1.0), self.drive_settings.get("trim_right", 1.0))
+                self.adapter.drive(command.direction, command.speed, command.steering, self.drive_settings["mapping"], trim)
                 self.motion = command.direction
                 self.speed = command.speed
                 self.steering = command.steering
@@ -150,6 +158,47 @@ class ControlService:
                 except Exception:
                     pass
                 raise
+
+    async def experiment_drive(self, mode: str, value: float, generation: int,
+                               direction: str = "forward", steering: float = 0.0) -> bool:
+        """실험용 직진 명령. 자동 측정 주행이 0.1초마다 호출해 watchdog을 갱신합니다.
+
+        정지 명령으로 generation이 바뀌면 즉시 False를 반환해 주행을 끝냅니다.
+        """
+        async with self.lock:
+            if generation != self.stop_generation:
+                return False
+            if not self.adapter.connected:
+                raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
+            try:
+                trim = self.drive_settings["trim_backward" if direction == "backward" else "trim_forward"]
+                self.adapter.wheel_trim = (self.drive_settings.get("trim_left", 1.0), self.drive_settings.get("trim_right", 1.0))
+                self.adapter.drive_experiment(mode, value, direction, steering, trim)
+                self.motion, self.speed, self.steering = direction, int(round(value)), int(round(steering))
+                self.updated_at = time.monotonic()
+                self.fault = None
+                return True
+            except Exception as exc:
+                self.fault = str(exc)
+                record_event("experiment", "Experiment drive failed; stop will be attempted", level="ERROR",
+                             details={"mode": mode, "value": value, "error": str(exc)})
+                try:
+                    self.stop_now()
+                except Exception:
+                    pass
+                raise
+
+    def save_drive_settings(self, update: dict) -> dict:
+        self.drive_settings = {**self.drive_settings, **{k: v for k, v in update.items() if k in DRIVE_DEFAULTS and v is not None}}
+        self._write_settings()
+        return dict(self.drive_settings)
+
+    async def set_camera_view(self, pan: int, tilt: int) -> dict:
+        # 주행 lock을 잡지 않아 주행 명령과 서로 막지 않습니다(서보만 움직임).
+        if not self.adapter.connected:
+            raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
+        await asyncio.to_thread(self.adapter.set_camera_view, pan, tilt)
+        return dict(getattr(self.adapter, "camera_view", {"pan": pan, "tilt": tilt}))
 
     async def test_steering(self, test: SteeringTest) -> None:
         self.stop_generation += 1
@@ -185,6 +234,10 @@ class ControlService:
             "last_command_age_ms": age,
             "watchdog_ms": int(WATCHDOG_SECONDS * 1000),
             "fault": self.fault,
+            "max_pwm": MAX_PWM,
+            "drive_settings": self.drive_settings,
+            "last_motor_command": getattr(self.adapter, "last_command", None),
+            "camera_view": getattr(self.adapter, "camera_view", None),
         }
 
     def diagnostics(self) -> dict:
@@ -243,10 +296,13 @@ async def lifespan(app: FastAPI):
         try:
             await control.stop(reason="server_shutdown")
         finally:
+            mpu6050_service.close()
             control.adapter.close()
 
 app = FastAPI(title="PiCar X Control API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(experiment_router)
+bind_control(lambda: control)
 
 @app.get("/api/health")
 async def health():
@@ -278,6 +334,32 @@ async def drive(command: DriveCommand):
         raise HTTPException(503, f"Drive command failed: {exc}")
     return control.status()
 
+@app.post("/api/drive/timed")
+async def drive_timed(body: TimedDrive):
+    """정해진 시간만큼 달리고 자동으로 멈춥니다(0.1초마다 명령을 다시 보내 안전 정지 타이머를 갱신)."""
+    gen = control.stop_generation
+    cmd = DriveCommand(direction=body.direction, speed=body.speed, steering=body.steering)
+    try:
+        await control.drive(cmd)
+    except Exception as exc:
+        raise HTTPException(503, f"Drive command failed: {exc}")
+
+    async def keep() -> None:
+        end = time.monotonic() + body.seconds
+        try:
+            while time.monotonic() < end and control.stop_generation == gen:
+                await asyncio.sleep(0.1)
+                if control.stop_generation != gen:
+                    return
+                await control.drive(cmd)
+        except Exception as exc:
+            record_event("motion", "Timed drive failed", level="ERROR", details={"error": str(exc)})
+        finally:
+            if control.stop_generation == gen:
+                await control.stop(reason="timed_drive_end")
+    asyncio.create_task(keep())
+    return {"started": True, "seconds": body.seconds, "direction": body.direction, "speed": body.speed}
+
 @app.post("/api/stop")
 async def stop():
     try:
@@ -307,6 +389,36 @@ async def calibration(update: CalibrationUpdate):
         raise HTTPException(503, f"Calibration failed: {exc}")
     return {"steering_center": control.steering_center, "pan_center": control.pan_center,
             "tilt_center": control.tilt_center, "applied_to_hardware": control.adapter.mode == "hardware" and control.adapter.connected}
+
+@app.get("/api/settings/drive")
+async def get_drive_settings():
+    return {**control.drive_settings, "max_pwm": MAX_PWM}
+
+
+@app.put("/api/settings/drive")
+async def put_drive_settings(update: DriveSettingsUpdate):
+    await control.stop(reason="drive_settings_change")
+    return {**control.save_drive_settings(update.model_dump()), "max_pwm": MAX_PWM}
+
+
+@app.post("/api/camera/view")
+async def camera_view(view: CameraView):
+    """주행 중 방향키로 카메라를 살짝씩 돌립니다. 주행을 멈추지 않습니다."""
+    current = getattr(control.adapter, "camera_view", {"pan": 0, "tilt": 0}) or {"pan": 0, "tilt": 0}
+    pan = view.pan if view.pan is not None else current["pan"] + (view.pan_delta or 0)
+    tilt = view.tilt if view.tilt is not None else current["tilt"] + (view.tilt_delta or 0)
+    try:
+        return await control.set_camera_view(int(round(pan)), int(round(tilt)))
+    except Exception as exc:
+        raise HTTPException(503, f"Camera view failed: {exc}")
+
+
+@app.get("/api/battery")
+async def battery():
+    volts = await asyncio.to_thread(control.adapter.read_battery) if control.adapter.connected else None
+    return {"mode": control.adapter.mode, "voltage": volts,
+            "level": None if volts is None else ("low" if volts < 7.0 else "ok" if volts >= 7.6 else "medium")}
+
 
 @app.get("/api/logs")
 @app.get("/api/autonomy/logs")
@@ -361,6 +473,67 @@ async def websocket_status(websocket: WebSocket):
             await control.stop(reason="websocket_disconnect")
         except Exception:
             pass
+
+
+@app.get("/api/impact/status")
+async def impact_status():
+    if control.adapter.mode != "hardware":
+        return {"mode": "mock", "available": False, "calibrated": False, "latest": None,
+                "samples": [], "peak": None, "sample_rate_target_hz": 1000, "range_g": 8,
+                "error": "시뮬레이션 모드에서는 실제 MPU-6050 측정값을 제공하지 않습니다."}
+    return await asyncio.to_thread(mpu6050_service.status)
+
+
+@app.post("/api/impact/calibrate")
+async def impact_calibrate():
+    if control.adapter.mode != "hardware" or not control.adapter.connected:
+        raise HTTPException(409, "실제 하드웨어 모드에서만 가속도 센서를 보정할 수 있습니다.")
+    result = await asyncio.to_thread(mpu6050_service.calibrate)
+    if not result.get("available") or not result.get("calibrated"):
+        raise HTTPException(503, result.get("error") or "MPU-6050 보정에 실패했습니다.")
+    return result
+
+
+@app.post("/api/impact/start")
+async def impact_start():
+    if control.adapter.mode != "hardware" or not control.adapter.connected:
+        raise HTTPException(409, "실제 하드웨어 모드에서만 측정을 시작할 수 있습니다.")
+    result = await asyncio.to_thread(mpu6050_service.start_recording)
+    if not result.get("available") or not result.get("calibrated") or result.get("error"):
+        raise HTTPException(409, result.get("error") or "MPU-6050 보정 후 측정을 시작하세요.")
+    return result
+
+
+@app.post("/api/impact/stop")
+async def impact_stop():
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 측정을 정지할 수 없습니다.")
+    return await asyncio.to_thread(mpu6050_service.stop_recording)
+
+
+@app.get("/api/impact/recording-data")
+async def impact_recording_data():
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 실제 측정 데이터를 내보낼 수 없습니다.")
+    return await asyncio.to_thread(mpu6050_service.recording_data)
+
+
+@app.get("/api/impact/recording.csv")
+async def impact_recording_csv():
+    """센서 화면에서 기록한 원자료 전체(축소 없음)."""
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 실제 측정 데이터를 내보낼 수 없습니다.")
+    text = await asyncio.to_thread(mpu6050_service.recording_csv)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return Response(content="\ufeff" + text, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="impact_{stamp}.csv"'})
+
+
+@app.post("/api/impact/reset-peak")
+async def impact_reset_peak():
+    if control.adapter.mode != "hardware":
+        raise HTTPException(409, "시뮬레이션 모드에서는 피크를 초기화할 수 없습니다.")
+    return await asyncio.to_thread(mpu6050_service.reset_peak)
 
 @app.get("/api/camera/status")
 def camera_status() -> dict:

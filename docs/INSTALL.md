@@ -97,6 +97,7 @@ For Raspberry Pi OS Lite, install its stated prerequisites first:
 
 ```bash
 sudo apt install git python3-pip python3-setuptools python3-smbus
+# 방지턱 실험(MPU-6050 1 kHz)용: /boot/firmware/config.txt 에 dtparam=i2c_arm_baudrate=400000 추가 후 재부팅
 ```
 
 If the library is missing, follow the linked current official installation guide for the PiCar-X model and OS. Upstream maintains its dependency versions and commands; this project does not pin or assume the installed PiCar-X release.

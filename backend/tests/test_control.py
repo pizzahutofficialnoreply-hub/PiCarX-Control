@@ -85,11 +85,18 @@ class ControlSafetyTests(unittest.TestCase):
         adapter._car = FakePicarx()
         adapter.connected = True
         adapter.steering_center = 0
-        adapter.drive("left", 99, 35)
-        self.assertEqual(adapter._car.calls, [("steer", -30), ("forward", 60)])
+        adapter.drive("left", 130, 35)
+        # 라이브러리 forward(100) + 좌회전 30°와 같은 계산: 왼쪽 100, 오른쪽 100×0.7
+        self.assertEqual(adapter._car.calls, [("steer", -30), ("motor", 1, 100.0), ("motor", 2, -70.0)])
+        self.assertEqual(adapter.last_command["expected_duty_percent"], 100)
         adapter._car.calls.clear()
         adapter.drive("backward", 20, 10)
-        self.assertEqual(adapter._car.calls, [("steer", 10), ("backward", 20)])
+        self.assertEqual(adapter._car.calls, [("steer", 10), ("motor", 1, -20.0), ("motor", 2, 18.0)])
+        adapter._car.calls.clear()
+        adapter.wheel_trim = (0.9, 1.0)   # 왼쪽 바퀴가 빠른 차: 왼쪽 출력 10% 낮춤
+        adapter.drive("forward", 80, 0)
+        self.assertEqual(adapter._car.calls, [("steer", 0), ("motor", 1, 72.0), ("motor", 2, -80.0)])
+        adapter.wheel_trim = (1.0, 1.0)
         adapter._car.calls.clear()
         adapter.set_calibration(4, -12, 9)
         self.assertEqual(adapter._car.calls, [("steer", 4), ("pan", -12), ("tilt", 9)])
@@ -107,7 +114,7 @@ class ControlSafetyTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             DriveCommand(direction="launch", speed=20, steering=10)
         with self.assertRaises(ValidationError):
-            DriveCommand(direction="forward", speed=61, steering=10)
+            DriveCommand(direction="forward", speed=101, steering=10)
 
     def test_motor_exception_attempts_stop_and_preserves_fault(self):
         async def scenario():
@@ -183,3 +190,16 @@ class ControlSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimedDriveTests(unittest.TestCase):
+    def test_timed_drive_stops_by_itself(self):
+        import time as _t
+        from fastapi.testclient import TestClient
+        from app.main import app
+        with TestClient(app) as client:
+            r = client.post("/api/drive/timed", json={"direction": "forward", "speed": 50, "steering": 0, "seconds": 0.4})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(client.get("/api/status").json()["motion"], "forward")
+            _t.sleep(0.8)
+            self.assertEqual(client.get("/api/status").json()["motion"], "stopped")

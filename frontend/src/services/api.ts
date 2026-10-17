@@ -31,6 +31,19 @@ function normalizeBaseUrl(value: string): string {
   return url;
 }
 
+/**
+ * HTTPS로 연 화면에서 http:// 서버를 부르면 브라우저가 요청·다운로드를 막을 수 있습니다(Mixed Content).
+ * 라즈베리파이 주소(http://<IP>:8000)로 화면을 직접 열면 생기지 않습니다.
+ */
+export function mixedContentRisk(): boolean {
+  return window.location.protocol === 'https:' && /^http:/i.test(baseUrl);
+}
+
+/** 화면을 연 주소(http://<IP>:8000)를 그대로 쓰도록 제안할 주소 */
+export function suggestedDirectUrl(): string {
+  return baseUrl;
+}
+
 export function getApiBaseUrl(): string {
   return baseUrl;
 }
@@ -65,15 +78,43 @@ export function getCameraStatusUrl(): string {
   return `${baseUrl}/api/camera/status`;
 }
 
+/** 서버가 만든 파일(CSV 등)을 내려받습니다. */
+export async function apiDownload(path: string, fallbackName: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`);
+  } catch {
+    throw new Error(mixedContentRisk()
+      ? `HTTPS 화면에서 http 서버 파일을 받을 수 없습니다. 브라우저 주소창에 ${baseUrl} 를 직접 열어 다시 시도하세요.`
+      : '파일을 받지 못했습니다. 서버 연결을 확인하세요.');
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(response.status === 404 ? notFoundMessage(path) : body?.detail || `서버 오류 (${response.status})`);
+  }
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = match?.[1] || fallbackName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function notFoundMessage(path: string): string {
+  return `서버에 이 기능이 없습니다(404 ${path.split('?')[0]}). 라즈베리파이의 백엔드가 이전 버전입니다. Pi에서 최신 코드를 받고(git pull) 서버를 재시작하세요.`;
+}
+
 export async function apiRequest(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit & { timeoutMs?: number } = {},
 ): Promise<any> {
   const controller = new AbortController();
 
   const timeout = window.setTimeout(() => {
     controller.abort();
-  }, 3500);
+  }, options.timeoutMs ?? 3500);
 
   let response: Response;
 
@@ -94,9 +135,9 @@ export async function apiRequest(
     }
 
     if (error instanceof TypeError) {
-      throw new Error(
-        '서버에 연결할 수 없습니다. Raspberry Pi 주소와 Wi-Fi 연결을 확인하세요.',
-      );
+      throw new Error(mixedContentRisk()
+        ? `HTTPS로 연 화면이라 브라우저가 http 서버 요청을 막았습니다. 주소창에 ${baseUrl} 를 직접 열어 사용하세요.`
+        : '서버에 연결할 수 없습니다. Raspberry Pi 주소와 Wi-Fi 연결을 확인하세요.');
     }
 
     throw error;
@@ -107,8 +148,11 @@ export async function apiRequest(
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
 
+    if (response.status === 404 && (!body?.detail || body.detail === 'Not Found')) {
+      throw new Error(notFoundMessage(path));
+    }
     throw new Error(
-      body?.detail ||
+      (typeof body?.detail === 'string' ? body.detail : body?.detail?.message) ||
         body?.message ||
         `서버 오류 (${response.status})`,
     );
@@ -155,8 +199,8 @@ export type DriveDirection =
 export interface DriveCommand {
   direction: DriveDirection;
 
-  // 백엔드의 speed는 실제 km/h가 아니라 Motor PWM입니다.
-  // 현재 백엔드 제한: 0 ~ 60
+  // 백엔드의 speed는 실제 km/h가 아니라 모터 출력(0~100)입니다.
+  // 출력 방식(라이브러리 PWM/직접 듀티)과 방향별 배율은 /api/settings/drive에서 정합니다.
   speed: number;
 
   // -30 = 최대 좌회전
@@ -170,7 +214,7 @@ export async function drive(command: DriveCommand) {
     method: 'POST',
     body: JSON.stringify({
       direction: command.direction,
-      speed: Math.max(0, Math.min(60, Math.round(command.speed))),
+      speed: Math.max(0, Math.min(100, Math.round(command.speed))),
       steering: Math.max(-30, Math.min(30, Math.round(command.steering))),
     }),
   });

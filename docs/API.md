@@ -19,7 +19,7 @@
 {"direction":"forward","speed":35,"steering":25}
 ```
 
-`direction` accepts `forward`, `backward`, `left`, or `right`. Speed is an integer from 0 to 60; steering is a signed integer from -30 to 30 degrees. Out-of-range and unknown values return 422.
+`direction` accepts `forward`, `backward`, `left`, or `right`. Speed is an integer from 0 to 100 (output mapping and per-direction trim: `GET/PUT /api/settings/drive`); steering is a signed integer from -30 to 30 degrees. Out-of-range and unknown values return 422.
 
 `POST /api/stop`은 `{ "motion":"stopped", "speed":0, "steering":0 }` 상태를 반환합니다. 하드웨어 오류 시 503과 오류 설명을 반환하며 가능한 한 정지 상태로 복귀합니다.
 
@@ -52,5 +52,7 @@ Steering test JSON: `{"direction":"left","angle":15}`. Direction accepts `left`,
 
 `POST /api/drive`의 `steering`은 -30..30의 부호 있는 각도입니다. 음수는 왼쪽, 양수는 오른쪽이며 어댑터에서 다시 제한됩니다. 기존 방향값 `forward`, `backward`, `left`, `right`도 허용됩니다.
 
+## 방지턱 충격 실험 API
 
-##
+`/api/impact/*`(MPU-6050 실시간 상태·보정·수동 기록)과 `/api/experiment/*`(설정, 자동 측정 주행, 저장, 분석, CSV 내보내기)는 [EXPERIMENT.md](EXPERIMENT.md)에 정리했습니다. `/api/impact/status`의 표본은 피크를 보존하도록 다운샘플링되며, 각 표본에는 정지 보정 자세 기준 수직 가속도 `vertical_g`(정지 1 g)가 추가되었습니다.
+
