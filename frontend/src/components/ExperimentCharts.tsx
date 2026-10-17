@@ -33,6 +33,7 @@ function niceRange(values: number[], padRatio = 0.08, includeZero = false): [num
 }
 // 선 위 글자가 묻히지 않도록 흰 테두리를 두릅니다.
 const HALO = { stroke: '#ffffff', strokeWidth: 3.5, paintOrder: 'stroke' as const, strokeLinejoin: 'round' as const };
+const tickFmt = (v: number) => Math.abs(v) >= 100 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(3) : v.toPrecision(3);
 const tickLabel = (v: number) => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1).replace(/\.0$/, '') : Number(v.toPrecision(3)).toString();
 
 function Axes({ x, y, xLabel, yLabel, title }: { x: [number, number]; y: [number, number]; xLabel: string; yLabel: string; title: string }) {
@@ -86,10 +87,52 @@ export function Figure({ name, caption, tools, children }: { name: string; capti
   </figure>;
 }
 
+
+/* ------------------------------------------------------------------ 마우스 툴팁 */
+// 그래프 위에 마우스를 올리면 가장 가까운 값(또는 같은 시각의 각 선 값)을 보여 줍니다.
+// 그림 저장(PNG/SVG)에는 마우스가 버튼 위에 있으므로 툴팁이 들어가지 않습니다.
+export type Tip = { px: number; py?: number; title: string; rows: { color?: string; text: string }[]; dots?: { px: number; py: number; color: string }[] };
+function HoverLayer({ getTip, onClick, cursor }: { getTip: (px: number, py: number) => Tip | null; onClick?: (px: number, py: number) => void; cursor?: string }) {
+  const [tip, setTip] = useState<Tip | null>(null);
+  const toLocal = (e: React.MouseEvent<SVGRectElement>) => {
+    const svg = e.currentTarget.ownerSVGElement; const m = svg?.getScreenCTM();
+    if (!svg || !m) return null;
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const p = pt.matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
+  };
+  const rows = tip ? tip.rows.slice(0, 12) : [];
+  const more = tip ? tip.rows.length - rows.length : 0;
+  const lineH = 14, boxW = tip ? Math.min(300, Math.max(110, ...[tip.title, ...rows.map(r => r.text)].map(t => t.length * 6.6 + (t === tip.title ? 0 : 14))) + 14) : 0;
+  const boxH = (rows.length + (more > 0 ? 1 : 0)) * lineH + 26;
+  const bx = tip ? (tip.px + 14 + boxW > W - 4 ? tip.px - 14 - boxW : tip.px + 14) : 0;
+  const by = tip ? Math.max(M.t, Math.min(M.t + PH - boxH, (tip.py ?? M.t + 10) - boxH / 2)) : 0;
+  return <g fontFamily={FONT} className="exp-hover">
+    {tip && <g pointerEvents="none">
+      <line x1={tip.px} x2={tip.px} y1={M.t} y2={M.t + PH} stroke="#6a737d" strokeWidth={0.8} strokeDasharray="2 2" />
+      {(tip.dots ?? []).map((d, i) => <circle key={i} cx={d.px} cy={d.py} r={4} fill={d.color} stroke="#fff" strokeWidth={1.5} />)}
+      <rect x={bx} y={by} width={boxW} height={boxH} rx={6} fill="#ffffff" stroke="#c9ced4" opacity={0.96} />
+      <text x={bx + 8} y={by + 16} fontSize={11} fontWeight={700} fill={INK}>{tip.title}</text>
+      {rows.map((r, i) => <g key={i} transform={`translate(${bx + 8} ${by + 16 + (i + 1) * lineH})`}>{r.color && <rect x={0} y={-8} width={8} height={8} rx={2} fill={r.color} />}<text x={r.color ? 13 : 0} y={0} fontSize={10.5} fill={INK}>{r.text}</text></g>)}
+      {more > 0 && <text x={bx + 8} y={by + 16 + (rows.length + 1) * lineH} fontSize={10} fill={MUTED}>외 {more}개</text>}
+    </g>}
+    <rect x={M.l} y={M.t} width={PW} height={PH} fill="transparent" style={{ cursor: cursor ?? 'crosshair' }}
+      onMouseMove={e => { const p = toLocal(e); setTip(p ? getTip(p.x, p.y) : null); }} onMouseLeave={() => setTip(null)}
+      onClick={e => { const p = toLocal(e); if (p && onClick) onClick(p.x, p.y); }} />
+  </g>;
+}
+const nearestIdx = (arr: number[], v: number) => { let lo = 0, hi = arr.length - 1; if (hi < 0) return -1; while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (arr[mid] < v) lo = mid; else hi = mid; } return Math.abs(arr[lo] - v) <= Math.abs(arr[hi] - v) ? lo : hi; };
+function nearestPoint<T>(items: T[], px: number, py: number, pos: (t: T) => [number, number], maxDist = 28): T | null {
+  let best: T | null = null, bd = maxDist * maxDist;
+  for (const it of items) { const [x, y] = pos(it); const d = (x - px) ** 2 + (y - py) ** 2; if (d < bd) { bd = d; best = it; } }
+  return best;
+}
+
 /* ------------------------------------------------------------------ 시행 원자료 */
-export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, name, showCandidates = false, aLimit = null }: {
+export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, name, showCandidates = false, aLimit = null, pickMode = null, onPick, picked }: {
   series: { t_s: number[]; vertical_g: number[]; filtered_g?: number[] }; analysis: RunAnalysis; thresholdDelta: number; jumpG: number; title: string; name: string;
   showCandidates?: boolean; aLimit?: number | null;
+  pickMode?: 'front' | 'rear' | null; onPick?: (t: number) => void; picked?: { front?: number; rear?: number };
 }) {
   const hasPair = analysis.front_t_s != null && analysis.rear_t_s != null;
   const [zoom, setZoom] = useState<'bump' | 'all'>(hasPair ? 'bump' : 'all');
@@ -143,6 +186,19 @@ export function RunTraceChart({ series, analysis, thresholdDelta, jumpG, title, 
         const yy = sy(1) + (sy(Math.max(y[0], jumpG)) - sy(1)) * 0.55, x1 = sx(analysis.front_t_s as number), x2 = sx(analysis.rear_t_s as number);
         return <g fontFamily={FONT}><line x1={x1} x2={x2} y1={yy} y2={yy} stroke={INK} markerStart="url(#arr)" markerEnd="url(#arr)" /><text x={(x1 + x2) / 2} y={yy - 6} fontSize={11} textAnchor="middle" fill={INK} {...HALO}>{(analysis.axle_dt_s * 1000).toFixed(0)} ms 사이에 바퀴 간격만큼 이동{analysis.speed_mps ? ` → ${analysis.speed_mps.toFixed(3)} m/s` : ''}</text></g>;
       })()}
+      {analysis.pair_source === 'manual' && analysis.auto_pair && <g opacity={0.75}>{[['자동 앞', analysis.auto_pair.front_t_s, analysis.auto_pair.front_g], ['자동 뒤', analysis.auto_pair.rear_t_s, analysis.auto_pair.rear_g]].map(([l, t, g]) => (t as number) < x[0] || (t as number) > x[1] ? null :
+        <g key={l as string} fontFamily={FONT}><circle cx={sx(t as number)} cy={sy(Math.min(g as number, y[1]))} r={5} fill="none" stroke="#6a737d" strokeWidth={1.5} strokeDasharray="2 2" /><text x={sx(t as number) - 6} y={sy(Math.min(g as number, y[1])) + 16} fontSize={10} textAnchor="end" fill={MUTED} {...HALO}>{l as string}</text></g>)}</g>}
+      {picked && ([['front', '#d0782a', '고른 앞'], ['rear', '#3c9a5f', '고른 뒤']] as const).map(([k, c, l]) => { const t = picked[k]; if (t == null || t < x[0] || t > x[1]) return null;
+        return <g key={k} fontFamily={FONT}><line x1={sx(t)} x2={sx(t)} y1={M.t} y2={M.t + PH} stroke={c} strokeWidth={2} /><rect x={sx(t) - 24} y={M.t + PH - 18} width={48} height={15} rx={4} fill={c} /><text x={sx(t)} y={M.t + PH - 7} fontSize={10} textAnchor="middle" fill="#fff" fontWeight={700}>{l}</text></g>; })}
+      <HoverLayer cursor={pickMode ? 'pointer' : undefined}
+        onClick={pickMode && onPick ? (px) => { const t = x[0] + (px - M.l) / PW * (x[1] - x[0]); const i = nearestIdx(series.t_s, t); if (i >= 0) onPick(series.t_s[i]); } : undefined}
+        getTip={(px) => { const t = x[0] + (px - M.l) / PW * (x[1] - x[0]); const i = nearestIdx(series.t_s, t); if (i < 0) return null;
+          const tt = series.t_s[i], g = main[i], rows: Tip['rows'] = [{ color: '#2f6fb0', text: `${filtered ? '거른 값' : '가속도'} ${g.toFixed(3)} g (Δa ${(g - 1 >= 0 ? '+' : '')}${(g - 1).toFixed(3)} g)` }];
+          if (filtered) rows.push({ color: '#9aa3ad', text: `원래 기록 ${series.vertical_g[i].toFixed(3)} g` });
+          if (analysis.front_t_s != null) rows.push({ text: `앞바퀴로부터 ${((tt - analysis.front_t_s) * 1000).toFixed(0)} ms` });
+          const c = (analysis.candidates ?? []).findIndex(c => Math.abs(c.t_s - tt) < 0.006); if (c >= 0) rows.push({ text: `후보 ${c + 1} 근처${(analysis.candidates ?? [])[c].landing ? ' (착지)' : ''}` });
+          if (pickMode) rows.push({ text: `클릭 → 여기를 ${pickMode === 'front' ? '앞바퀴' : '뒷바퀴'}로` });
+          return { px: sx(tt), py: sy(Math.max(y[0], Math.min(y[1], g))), title: `${tt.toFixed(3)} 초`, rows, dots: [{ px: sx(tt), py: sy(Math.max(y[0], Math.min(y[1], g))), color: '#2f6fb0' }] }; }} />
       <defs><marker id="arr" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill={INK} /></marker></defs>
     </svg>}
   </Figure>;
@@ -195,6 +251,17 @@ export function SpeedImpactChart({ runs, groups, fit, model: chosen, aLimit, tit
         <circle cx={sx(g.mean_speed_mps as number)} cy={sy(g.mean_peak_delta_g as number)} r={5} fill="#fff" stroke={color(g.total_mass_g)} strokeWidth={2} />
       </g>)}
       {aLimit && masses.map((m, i) => { const v = vmaxOf(m); const lo = Math.min(...groups.filter(g => g.mean_speed_mps).map(g => g.mean_speed_mps as number)); if (v == null || v < 0.5 * lo || v < x[0] || v > x[1] || aLimit - 1 > y[1]) return null; return <g key={'v' + m} fontFamily={FONT}><line x1={sx(v)} x2={sx(v)} y1={sy(aLimit - 1)} y2={M.t + PH} stroke={color(m)} strokeDasharray="2 3" /><path d={`M${sx(v)},${sy(aLimit - 1) - 7} l5,7 l-5,7 l-5,-7 z`} fill={color(m)} /><text x={sx(v)} y={M.t + PH - 6 - i * 13} fontSize={10} textAnchor="middle" fill={color(m)} fontWeight={600} {...HALO}>v_max {v.toFixed(3)}</text></g>; })}
+      <HoverLayer getTip={(px, py) => {
+        type It = { kind: 'run'; r: RunSummary } | { kind: 'grp'; g: ConditionGroup };
+        const items: It[] = [...groups.filter(g => g.mean_speed_mps && g.mean_peak_delta_g != null).map(g => ({ kind: 'grp' as const, g })), ...pts.map(r => ({ kind: 'run' as const, r }))];
+        const hit = nearestPoint(items, px, py, it => it.kind === 'grp' ? [sx(it.g.mean_speed_mps as number), sy(it.g.mean_peak_delta_g as number)] : [sx(it.r.analysis.speed_mps as number), sy(it.r.analysis.peak_delta_g as number)]);
+        if (!hit) return null;
+        if (hit.kind === 'grp') { const g = hit.g; const X = sx(g.mean_speed_mps as number), Y = sy(g.mean_peak_delta_g as number);
+          return { px: X, py: Y, title: `평균 · ${g.total_mass_g.toLocaleString()} g · 출력 ${g.output_value}`, rows: [{ color: color(g.total_mass_g), text: `속도 ${(g.mean_speed_mps as number).toFixed(3)} m/s` }, { text: `Δa 평균 +${(g.mean_peak_delta_g as number).toFixed(3)} g (범위 ${g.kept_min_delta_g.toFixed(2)}~${g.kept_max_delta_g.toFixed(2)})` }, { text: `${g.run_ids.length}회 측정` }], dots: [{ px: X, py: Y, color: color(g.total_mass_g) }] }; }
+        const r = hit.r, X = sx(r.analysis.speed_mps as number), Y = sy(r.analysis.peak_delta_g as number), m = Math.round(r.condition.total_mass_g / 5) * 5;
+        const pred = model(m)?.(r.analysis.speed_mps as number);
+        return { px: X, py: Y, title: `${r.condition.trial}회차 · ${r.condition.total_mass_g.toLocaleString()} g · 출력 ${r.condition.output_value}`, rows: [{ color: color(m), text: `속도 ${(r.analysis.speed_mps as number).toFixed(3)} m/s` }, { text: `Δa +${(r.analysis.peak_delta_g as number).toFixed(3)} g (최대 ${r.analysis.peak_g?.toFixed(2)} g)` }, ...(pred != null ? [{ text: `식 예측 +${pred.toFixed(3)} g` }] : [])], dots: [{ px: X, py: Y, color: color(m) }] };
+      }} />
       <g fontFamily={FONT} fontSize={10.5}>{masses.map((m, i) => <g key={'l' + m} transform={`translate(${M.l + 10} ${M.t + 14 + i * 16})`}><circle r={4.5} cx={0} cy={-3.5} fill="#fff" stroke={color(m)} strokeWidth={2} /><text x={10} y={0} fill={INK}>{m.toLocaleString()} g</text></g>)}</g>
     </svg>}
   </Figure>;
@@ -225,6 +292,9 @@ export function PiChart({ runs, title, name }: { runs: RunSummary[]; title: stri
       <Axes x={x} y={y} xLabel="무차원수 Π = v² / (g · R_eff)" yLabel="최대 수직 가속도 a_peak (g)" title={title} />
       {x[1] >= 1 && <><line x1={sx(1)} x2={sx(1)} y1={M.t} y2={M.t + PH} stroke="#c33" strokeDasharray="6 4" /><text x={sx(1) + 5} y={M.t + PH - 8} fontSize={10.5} fill="#b22" fontFamily={FONT} {...HALO}>Π = 1 (점프 경계)</text></>}
       {shown.map(r => <Mark key={r.id} shape={SHAPES[bumps.indexOf(r.condition.bump_id) % SHAPES.length]} x={sx(r.analysis.pi as number)} y={sy(r.analysis.peak_g as number)} color={MASS_COLORS[bumps.indexOf(r.condition.bump_id) % MASS_COLORS.length]} hollow={!!r.analysis.jump} />)}
+      <HoverLayer getTip={(px, py) => { const r = nearestPoint(shown, px, py, r => [sx(r.analysis.pi as number), sy(r.analysis.peak_g as number)]); if (!r) return null;
+        const X = sx(r.analysis.pi as number), Y = sy(r.analysis.peak_g as number), c = MASS_COLORS[bumps.indexOf(r.condition.bump_id) % MASS_COLORS.length];
+        return { px: X, py: Y, title: `방지턱 ${r.condition.bump_id} · ${r.condition.trial}회차`, rows: [{ color: c, text: `Π = ${(r.analysis.pi as number).toFixed(3)}` }, { text: `최대 ${(r.analysis.peak_g as number).toFixed(3)} g` }, { text: `${r.condition.total_mass_g.toLocaleString()} g · 출력 ${r.condition.output_value} · ${r.analysis.speed_mps?.toFixed(3) ?? '—'} m/s` }, ...(r.analysis.jump ? [{ text: '점프함' }] : [])], dots: [{ px: X, py: Y, color: c }] }; }} />
       <g fontFamily={FONT} fontSize={10.5}>{bumps.map((b, i) => <g key={b} transform={`translate(${M.l + PW - 80 * (bumps.length - i)} 18)`}><Mark shape={SHAPES[i % SHAPES.length]} x={0} y={-3.5} color={MASS_COLORS[i % MASS_COLORS.length]} /><text x={10} y={0} fill={INK}>방지턱 {b}</text></g>)}</g>
     </svg>}
   </Figure>;
@@ -256,6 +326,23 @@ export function XYChart({ series, title, name, xLabel, yLabel, identity, band, z
         {s.line && s.points.length > 1 && <path d={s.points.map((p, i) => `${i ? 'L' : 'M'}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join('')} fill="none" stroke={s.color} strokeWidth={s.width ?? 1.6} strokeDasharray={s.dash} opacity={s.width && s.width < 2 ? 0.8 : 1} />}
         {(s.dots ?? !s.line) && s.points.map((p, i) => <g key={i}><circle cx={sx(p.x)} cy={sy(p.y)} r={4} fill="#fff" stroke={s.color} strokeWidth={2} />{p.label && <text x={sx(p.x) + 6} y={sy(p.y) - 6} fontSize={9.5} fill={MUTED} fontFamily={FONT} {...HALO}>{p.label}</text>}</g>)}
       </g>)}
+      <HoverLayer getTip={(px, py) => {
+        const xv = x[0] + (px - M.l) / PW * (x[1] - x[0]);
+        const dense = series.some(s => s.line && s.points.length > 30);
+        if (dense) {
+          const rows: Tip['rows'] = [], dots: NonNullable<Tip['dots']> = [];
+          for (const s of series) { if (!s.points.length) continue; const i = nearestIdx(s.points.map(p => p.x), xv); const p = s.points[i]; if (!p || Math.abs(sx(p.x) - px) > 12) continue;
+            rows.push({ color: s.color, text: `${s.name}: ${tickFmt(p.y)}` }); dots.push({ px: sx(p.x), py: sy(Math.max(y[0], Math.min(y[1], p.y))), color: s.color }); }
+          if (!rows.length) return null;
+          rows.sort((a, b) => Number(b.text.split(': ').pop()) - Number(a.text.split(': ').pop()));
+          return { px, py, title: `${xLabel.replace(/\s*\(.*$/, '')} ${tickFmt(xv)}`, rows, dots };
+        }
+        const all = series.flatMap(s => s.points.map(p => ({ s, p })));
+        const hit = nearestPoint(all, px, py, it => [sx(it.p.x), sy(it.p.y)]);
+        if (!hit) return null;
+        const X = sx(hit.p.x), Y = sy(hit.p.y);
+        return { px: X, py: Y, title: hit.p.label ?? hit.s.name, rows: [...(hit.p.label ? [{ color: hit.s.color, text: hit.s.name }] : []), { text: `${xLabel}: ${tickFmt(hit.p.x)}` }, { text: `${yLabel}: ${tickFmt(hit.p.y)}` }], dots: [{ px: X, py: Y, color: hit.s.color }] };
+      }} />
       <g fontFamily={FONT} fontSize={10.5}>{series.length > 1 && series.length <= legendMax && series.map((s, i) => <g key={'l' + s.name + i} transform={`translate(${M.l + 10} ${M.t + 14 + i * 15})`}><line x1={-5} x2={7} y1={-4} y2={-4} stroke={s.color} strokeWidth={2.5} strokeDasharray={s.dash} /><text x={12} y={0} fill={INK} {...HALO}>{s.name}</text></g>)}</g>
     </svg>}
   </Figure>;

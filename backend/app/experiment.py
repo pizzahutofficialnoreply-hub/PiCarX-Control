@@ -978,7 +978,8 @@ async def list_runs():
     settings = store.load_settings()
     runs = runs_for_mode(simulated)
     # 평지 오검출 판정(bump_detected)이 생기기 전에 분석된 시행은 저장된 원자료로 한 번 다시 분석합니다.
-    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {})]
+    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {})
+             or ((r.get("analysis") or {}).get("params") or {}).get("filter_hz") and not r["analysis"]["params"].get("peak_keep")]
     for run in stale:
         try:
             cols = await asyncio.to_thread(store.read_columns, run["id"])
@@ -995,7 +996,7 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
     """여러 시행을 앞바퀴 피크(없으면 최대 피크) 시각에 맞춰 겹쳐 보기 위한 시계열."""
     out = []
     hz = store.load_settings().filter_hz
-    for run_id in [x for x in ids.split(",") if x][:60]:
+    for run_id in [x for x in ids.split(",") if x][:200]:
         try:
             run = store.get(run_id)
             cols = await asyncio.to_thread(store.read_columns, run_id)
@@ -1005,7 +1006,7 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
         t0 = a.get("front_t_s") if a.get("front_t_s") is not None else a.get("peak_t_s")
         if t0 is None:
             continue
-        g = ia.lowpass(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
+        g = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
         idx = [i for i, t in enumerate(cols["t_s"]) if t0 - before <= t <= t0 + after]
         sub = {"t_s": [round(cols["t_s"][i] - t0, 4) for i in idx], "vertical_g": [g[i] for i in idx]}
         sub = ia.decimate_columns(sub, max(100, min(1500, points)))
@@ -1025,7 +1026,7 @@ async def get_run(run_id: str, points: int = 1500):
     base = {k: cols[k] for k in ("t_s", "vertical_g", "dynamic_g")}
     hz = store.load_settings().filter_hz
     if hz:
-        base["filtered_g"] = ia.lowpass(cols["t_s"], cols["vertical_g"], hz)
+        base["filtered_g"] = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz)
     series = ia.decimate_columns(base, max(200, min(5000, points)))
     return {**run_summary(run), "series": series, "drive_log": run.get("drive_log")}
 

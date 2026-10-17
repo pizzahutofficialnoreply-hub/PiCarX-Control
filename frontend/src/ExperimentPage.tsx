@@ -8,6 +8,7 @@ import {
 } from './services/experiment';
 import { PiChart, SpeedImpactChart, XYChart } from './components/ExperimentCharts';
 import RunViewer, { limitFor } from './experiment/RunViewer';
+import PlanCompare, { cellId, type CellKey } from './experiment/PlanCompare';
 import ModelExplain from './experiment/ModelExplain';
 import ValidationTab from './experiment/ValidationTab';
 import LineTab from './experiment/LineTab';
@@ -41,6 +42,9 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const [condition, setConditionState] = useState<ExperimentCondition>(readCondition);
   const [data, setData] = useState<RunsResponse | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [compareCells, setCompareCells] = useState<CellKey[]>([]);
+  const toggleCells = (list: CellKey[]) => setCompareCells(cur => { const ids = new Set(cur.map(cellId)); const allIn = list.every(c => ids.has(cellId(c)));
+    return allIn ? cur.filter(c => !list.some(l => cellId(l) === cellId(c))) : [...cur, ...list.filter(c => !ids.has(cellId(c)))]; });
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [auto, setAuto] = useState<AutoRunState | null>(null);
   const [analysisBump, setAnalysisBump] = useState<string>('');
@@ -351,11 +355,12 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     </section>
 
     {progress && progress.cells.length > 0 && <section className="card experiment-card exp-progress">
-      <div className="card-head"><div><h2>실험 진행표 · {progress.done}/{progress.need}회</h2><p>계획(방지턱 × 추가 질량 × 출력 × 반복)에 대비해 본 실험이 몇 회 끝났는지 보여 줍니다. 칸을 누르면 그 조건이 입력됩니다.{progress.next ? ` 다음 추천: 방지턱 ${progress.next.bump_id}, +${progress.next.added_mass_g} g, 출력 ${progress.next.output_value}` : ' 계획을 모두 마쳤습니다.'}</p></div>
+      <div className="card-head"><div><h2>실험 진행표 · {progress.done}/{progress.need}회</h2><p>계획(방지턱 × 추가 질량 × 출력 × 반복)에 대비해 본 실험이 몇 회 끝났는지 보여 줍니다. 칸을 누르면 그 조건이 입력되고 아래에 그래프가 나옵니다(여러 칸을 누르면 겹쳐 비교, 다시 누르면 빠짐).{progress.next ? ` 다음 추천: 방지턱 ${progress.next.bump_id}, +${progress.next.added_mass_g} g, 출력 ${progress.next.output_value}` : ' 계획을 모두 마쳤습니다.'}</p></div>
         {progress.next && <button className="secondary" onClick={() => progress.next && setCondition({ bump_id: progress.next.bump_id, added_mass_g: progress.next.added_mass_g, output_value: progress.next.output_value, purpose: 'main' })}>다음 조건 입력</button>}</div>
       {Array.from(new Set(progress.cells.map(c => c.bump_id))).map(b => { const cells = progress.cells.filter(c => c.bump_id === b); const outs = Array.from(new Set(cells.map(c => c.output_value))); const ms = Array.from(new Set(cells.map(c => c.added_mass_g)));
-        return <div className="experiment-table-wrap" key={b}><table className="experiment-table exp-progress-table"><thead><tr><th>방지턱 {b}</th>{outs.map(o => <th key={o}>출력 {o}</th>)}</tr></thead><tbody>{ms.map(m => <tr key={m}><td>+{m} g</td>{outs.map(o => { const c = cells.find(x => x.added_mass_g === m && x.output_value === o)!; const cls = c.done >= c.need ? 'full' : c.done > 0 ? 'part' : 'none';
-          return <td key={o}><button type="button" className={'exp-cell ' + cls + (condition.bump_id === b && condition.added_mass_g === m && condition.output_value === o ? ' current' : '')} onClick={() => setCondition({ bump_id: b, added_mass_g: m, output_value: o, purpose: 'main' })}>{c.done}/{c.need}</button></td>; })}</tr>)}</tbody></table></div>; })}
+        return <div className="experiment-table-wrap" key={b}><table className="experiment-table exp-progress-table"><thead><tr><th>방지턱 {b}</th>{outs.map(o => <th key={o}><button type="button" className="exp-headbtn" title="이 출력의 모든 질량 고르기" onClick={() => toggleCells(ms.map(m => ({ bump_id: b, added_mass_g: m, output_value: o })))}>출력 {o}</button></th>)}</tr></thead><tbody>{ms.map(m => <tr key={m}><td><button type="button" className="exp-headbtn" title="이 질량의 모든 출력 고르기" onClick={() => toggleCells(outs.map(o => ({ bump_id: b, added_mass_g: m, output_value: o })))}>+{m} g</button></td>{outs.map(o => { const c = cells.find(x => x.added_mass_g === m && x.output_value === o)!; const cls = c.done >= c.need ? 'full' : c.done > 0 ? 'part' : 'none';
+          return <td key={o}><button type="button" className={'exp-cell ' + cls + (condition.bump_id === b && condition.added_mass_g === m && condition.output_value === o ? ' current' : '') + (compareCells.some(x => cellId(x) === cellId({ bump_id: b, added_mass_g: m, output_value: o })) ? ' picked' : '')} onClick={() => { setCondition({ bump_id: b, added_mass_g: m, output_value: o, purpose: 'main' }); toggleCells([{ bump_id: b, added_mass_g: m, output_value: o }]); }}>{c.done}/{c.need}</button></td>; })}</tr>)}</tbody></table></div>; })}
+      <PlanCompare cells={compareCells} runs={runs} settings={settings ?? DEFAULT_SETTINGS} aLimit={aLimit} request={request} onClear={() => setCompareCells([])} onRemove={c => setCompareCells(cur => cur.filter(x => cellId(x) !== cellId(c)))} />
       <details className="exp-plan-edit"><summary>계획 바꾸기</summary>
         <div className="exp-learn"><span>실험할 방지턱:</span>{(settings?.bumps ?? []).map(b => { const sel = settings?.plan_bumps?.length ? settings.plan_bumps.includes(b.id) : true;
           return <label key={b.id}><input type="checkbox" checked={sel} onChange={e => { const cur = settings?.plan_bumps?.length ? settings.plan_bumps : (settings?.bumps ?? []).map(x => x.id); const next = e.target.checked ? Array.from(new Set([...cur, b.id])) : cur.filter(x => x !== b.id); void patchSettings({ plan_bumps: next.length ? next : null }); }} /> {b.id}{b.name ? ` (${b.name})` : ''}</label>; })}</div>

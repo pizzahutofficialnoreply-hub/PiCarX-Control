@@ -317,6 +317,38 @@ def lowpass(t: Sequence[float], v: Sequence[float], cutoff_hz: float) -> list[fl
     return run(fwd[::-1])[::-1]
 
 
+def peak_preserving_filter(t: Sequence[float], v: Sequence[float], cutoff_hz: float, k: float = 4.0) -> list[float]:
+    """진동만 거르고 충격 봉우리는 원래 높이 그대로 남기는 필터.
+
+    1) 저역 통과 필터로 주행 진동을 거른 뒤, 2) 거른 신호에서 진동(σ)보다 k배 이상 솟은 충격 자리를 찾고,
+    3) 그 주변(±w)은 거르기 전 원래 값으로 되돌립니다(가장자리는 부드럽게 이어 붙임).
+    그래서 진동 지그재그는 줄지만 방지턱 충격의 최대값은 거의 깎이지 않습니다.
+    """
+    n = min(len(t), len(v))
+    f = lowpass(t, v, cutoff_hz)
+    if not cutoff_hz or n < 8 or f == list(v[:n]):
+        return f
+    sigma = _robust_sigma([x - 1.0 for x in f])
+    peaks = find_peaks(t[:n], f, max(0.06, k * sigma), 0.03)
+    if not peaks:
+        return f
+    w = 0.01  # 봉우리 앞뒤 10 ms만 원래 값으로(그 밖 10 ms는 부드럽게 이어 붙임) – 옆의 진동 마루까지 되살리지 않게
+    weight = [0.0] * n
+    for p in peaks:
+        i = p.index
+        j = i
+        while j >= 0 and t[i] - t[j] <= 2 * w:
+            d = t[i] - t[j]
+            weight[j] = max(weight[j], 1.0 if d <= w else 1.0 - (d - w) / w)
+            j -= 1
+        j = i + 1
+        while j < n and t[j] - t[i] <= 2 * w:
+            d = t[j] - t[i]
+            weight[j] = max(weight[j], 1.0 if d <= w else 1.0 - (d - w) / w)
+            j += 1
+    return [weight[i] * v[i] + (1.0 - weight[i]) * f[i] for i in range(n)]
+
+
 def _robust_sigma(values: list[float]) -> float:
     """중앙값 절대편차(MAD)로 구한 표준편차. 큰 피크 몇 개에 흔들리지 않습니다."""
     if not values:
@@ -339,6 +371,42 @@ def _manual_pair(t: Sequence[float], v: Sequence[float], front: float, rear: flo
     if a is None or b is None or b.t_s <= a.t_s:
         return None
     return a, b
+
+
+def _restore_peak_heights(result: dict[str, Any], t: Sequence[float], raw: Sequence[float],
+                          lo: float | None, hi: float | None, w: float = 0.01) -> None:
+    """진동을 거르면 충격 봉우리도 낮아지므로, 찾은 피크 시각 ±10 ms 안의 '거르기 전' 최댓값으로 높이를 되돌립니다.
+
+    피크 시각(속도 계산에 쓰는 앞·뒤 바퀴 간격)은 거른 신호의 값을 그대로 둡니다.
+    """
+    n = min(len(t), len(raw))
+
+    def peak_at(tc: float | None) -> float | None:
+        if tc is None:
+            return None
+        vals = [raw[i] for i in range(n) if abs(t[i] - tc) <= w and (lo is None or t[i] >= lo) and (hi is None or t[i] <= hi)]
+        return max(vals) if vals else None
+
+    for tk, gk in (("front_t_s", "front_g"), ("rear_t_s", "rear_g"), ("landing_t_s", "landing_g"), ("peak_t_s", "peak_g")):
+        g = peak_at(result.get(tk))
+        if g is not None and result.get(gk) is not None:
+            result[gk] = round(max(g, result[gk]), 4)
+    # 가장 큰 충격은 고른 바퀴 피크들 중 큰 값과도 비교(거른 신호의 최댓값 위치가 조금 다를 수 있음)
+    cands = [result.get(k) for k in ("peak_g", "front_g", "rear_g", "landing_g") if result.get(k) is not None]
+    if cands:
+        result["peak_g"] = round(max(cands), 4)
+        result["peak_delta_g"] = round(result["peak_g"] - 1.0, 4)
+    for c in result.get("candidates") or []:
+        g = peak_at(c.get("t_s"))
+        if g is not None:
+            c["g"] = round(max(g, c["g"]), 4)
+    ap = result.get("auto_pair")
+    if ap:
+        for tk, gk in (("front_t_s", "front_g"), ("rear_t_s", "rear_g")):
+            g = peak_at(ap.get(tk))
+            if g is not None:
+                ap[gk] = round(max(g, ap[gk]), 4)
+    result["params"]["peak_keep"] = True
 
 
 # --------------------------------------------------------------------------- 시행 분석
@@ -368,7 +436,9 @@ def analyze_run(
     """
     t_all = list(columns.get("t_s") or [])
     v_all = list(columns.get("vertical_g") or [])
+    v_raw_all = list(v_all)
     if filter_hz:
+        # 시각·짝 찾기는 진동을 거른 값으로 하고, 피크 높이는 아래에서 원래 기록으로 되돌립니다(피크는 깎지 않음).
         v_all = lowpass(t_all, v_all, filter_hz)
     noise_k, standout_min, floor_scale = DETECT_LEVELS.get(detect_level, DETECT_LEVELS["normal"])
     dyn_all = list(columns.get("dynamic_g") or [])
@@ -393,7 +463,7 @@ def analyze_run(
         "bump_detected": None, "noise_sigma_g": None, "threshold_used_g": None, "standout_ratio": None,
         "params": {"threshold_delta_g": threshold_delta_g, "min_gap_s": min_gap_s, "jump_g": jump_g,
                    "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius,
-                   "filter_hz": filter_hz, "detect_level": detect_level},
+                   "filter_hz": filter_hz, "detect_level": detect_level, "peak_keep": True},
     }
     if len(v) < 3:
         flags.append("표본이 너무 적습니다.")
@@ -486,6 +556,10 @@ def analyze_run(
     else:
         pair = pick_axle_pair([p for p in peaks if p not in landing], wheelbase_mm)
         result["pair_source"] = "auto" if pair else None
+    if pair is not None:
+        result["auto_pair"] = {"front_t_s": round(pair[0].t_s, 4), "front_g": round(pair[0].value_g, 4),
+                               "rear_t_s": round(pair[1].t_s, 4), "rear_g": round(pair[1].value_g, 4),
+                               "source": result["pair_source"]}
     if override and override.get("front_t_s") is not None and override.get("rear_t_s") is not None:
         manual = _manual_pair(t, v, float(override["front_t_s"]), float(override["rear_t_s"]))
         if manual:
@@ -545,6 +619,9 @@ def analyze_run(
             result["jump"] = any(end >= lo_t and start <= hi_t for start, end, _ in segments)
     if landing and not any("겹쳐" in f for f in flags):
         flags.append(f"지면 이탈 후 착지 피크 {result['landing_g']:.2f} g를 앞·뒤 바퀴 피크에서 제외했습니다.")
+
+    if filter_hz:
+        _restore_peak_heights(result, t_all, v_raw_all, window[0], window[1])
 
     if mass_g and mass_g > 0 and result["peak_g"] is not None:
         m = mass_g / 1000.0

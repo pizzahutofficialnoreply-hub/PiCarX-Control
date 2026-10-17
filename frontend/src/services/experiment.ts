@@ -82,7 +82,7 @@ export type RunAnalysis = {
   front_t_s: number | null; front_g: number | null; rear_t_s: number | null; rear_g: number | null;
   axle_dt_s: number | null; speed_mps: number | null; min_g: number | null; jump: boolean | null;
   airborne_s?: number | null; landing_t_s?: number | null; landing_g?: number | null;
-  candidates?: PeakCandidate[]; pair_source?: 'auto' | 'manual' | 'consistency' | 'pattern' | 'pitch' | null;
+  candidates?: PeakCandidate[]; auto_pair?: { front_t_s: number; front_g: number; rear_t_s: number; rear_g: number; source: string | null } | null; pair_source?: 'auto' | 'manual' | 'consistency' | 'pattern' | 'pitch' | null;
   peak_force_n: number | null; dynamic_force_n: number | null; pi: number | null; r_eff_m: number | null;
   critical_speed_mps: number | null; peak_count: number; flags: string[];
   bump_detected?: boolean | null; noise_sigma_g?: number | null; threshold_used_g?: number | null; standout_ratio?: number | null;

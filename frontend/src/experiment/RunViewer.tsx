@@ -33,6 +33,7 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
   const setScope = (s: 'condition' | 'all') => { setScopeState(s); try { localStorage.setItem('picarx-viewer-scope', s); } catch { /* 무시 */ } };
   const [editing, setEditing] = useState(false);
   const [pick, setPick] = useState<{ front?: number; rear?: number }>({});
+  const [pickMode, setPickMode] = useState<'front' | 'rear' | null>(null);
   const [overlay, setOverlay] = useState<Series[]>([]);
   const [loadingOverlay, setLoadingOverlay] = useState(false);
 
@@ -41,7 +42,7 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
   const ordered = useMemo(() => [...runs].sort((a, b) => a.created_at.localeCompare(b.created_at)), [runs]);
   const scoped = useMemo(() => selected && scope === 'condition' ? ordered.filter(r => sameCondition(r, selected)) : ordered, [ordered, selected, scope]);
   const index = selected ? scoped.findIndex(r => r.id === selected.id) : -1;
-  const go = (step: number) => { if (!scoped.length) return; const next = scoped[(index + step + scoped.length) % scoped.length]; setSelectedId(next.id); setPick({}); };
+  const go = (step: number) => { if (!scoped.length) return; const next = scoped[(index + step + scoped.length) % scoped.length]; setSelectedId(next.id); setPick({}); setPickMode(null); };
 
   useEffect(() => {
     if (mode !== 'single') return;
@@ -117,7 +118,8 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
       <div className="card-head"><div><h3>{condLabel(selected)} · {selected.condition.trial}회차{selected.excluded ? ' · 집계 제외' : ''}</h3>
         <p><span className={'exp-badge ' + (selected.simulated ? 'sim' : 'real')}>{selected.simulated ? '합성 데이터' : '실제 측정'}</span><span className="exp-badge">{PURPOSE_LABEL[(selected.condition.purpose ?? 'main') as Purpose]}</span>{a.bump_detected === false && <span className="exp-badge warn">방지턱 통과 확인 안 됨</span>}{over && <span className="exp-badge over">허용 기준 초과</span>}{a.pair_source === 'manual' && <span className="exp-badge warn">바퀴 피크 직접 지정</span>}{a.pair_source === 'consistency' && <span className="exp-badge warn">같은 조건 회차에 맞춰 뒷바퀴 다시 고름</span>}{a.pair_source === 'pitch' && <span className="exp-badge real">차 기울기로 앞·뒤 바퀴 확인</span>} {new Date(selected.created_at).toLocaleString()}{selected.battery_v ? ` · 배터리 ${selected.battery_v.toFixed(2)} V` : ''}</p></div>
         <div className="button-row"><button className="secondary" onClick={() => download(`/api/experiment/runs/${selected.id}/raw.csv`, `run-${selected.id}.csv`)}><Download size={14} /> 원자료 CSV</button><button className="secondary" onClick={() => void toggleExcluded(selected.id, !selected.excluded)}>{selected.excluded ? '집계에 다시 넣기' : '집계에서 빼기'}</button><button className="secondary" onClick={() => void deleteRun(selected.id)}><Trash2 size={14} /> 삭제</button></div></div>
-      {detail && detail.id === selected.id ? <RunTraceChart key={selected.id + (editing ? 'e' : '')} series={detail.series} analysis={a} aLimit={aLimit} showCandidates={editing}
+      {detail && detail.id === selected.id ? <RunTraceChart key={selected.id + (editing ? 'e' : '')} series={detail.series} analysis={a} aLimit={aLimit} showCandidates={editing} pickMode={editing ? pickMode : null} picked={editing ? pick : undefined}
+        onPick={t => { setPick(p => ({ ...p, [pickMode ?? 'front']: t })); setPickMode(m => m === 'front' ? 'rear' : null); }}
         thresholdDelta={Number(a.threshold_used_g ?? a.params?.threshold_delta_g ?? settings.threshold_delta_g)} jumpG={Number(a.params?.jump_g ?? settings.jump_g)}
         title={`위아래 가속도 – ${condLabel(selected)}, ${selected.condition.trial}회차`} name={`trace_${selected.condition.bump_id}_m${selected.condition.total_mass_g}_${selected.condition.output_mode}${selected.condition.output_value}_t${selected.condition.trial}`} />
         : <div className="empty-chart">그래프 불러오는 중…</div>}
@@ -135,6 +137,13 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
       <details className="exp-peaks" open={editing} onToggle={e => setEditing((e.target as HTMLDetailsElement).open)}>
         <summary>앞·뒤 바퀴 피크 확인·직접 고르기</summary>
         <p className="exp-hint">차는 앞으로 가니까 <b>먼저 튄 것이 앞바퀴, 나중 것이 뒷바퀴</b>입니다. 이 칸을 열면 그래프에 회색 점선으로 <b>후보 1, 2, 3…</b>이 표시됩니다(아래 목록과 번호가 같습니다). 앞바퀴·뒷바퀴로 쓸 후보를 하나씩 고르고 '이걸로 계산'을 누르세요.</p>
+        <div className="button-row exp-pickbar">
+          <button type="button" className={pickMode === 'front' ? 'secondary selected' : 'secondary'} onClick={() => setPickMode(m => m === 'front' ? null : 'front')}>그래프에서 앞바퀴 찍기</button>
+          <button type="button" className={pickMode === 'rear' ? 'secondary selected' : 'secondary'} onClick={() => setPickMode(m => m === 'rear' ? null : 'rear')}>그래프에서 뒷바퀴 찍기</button>
+          {(pick.front != null || pick.rear != null) && <button type="button" className="secondary" onClick={() => { setPick({}); setPickMode(null); }}>고른 것 지우기</button>}
+          <span className="exp-hint">{pickMode ? `그래프에서 ${pickMode === 'front' ? '앞바퀴' : '뒷바퀴'} 충격 봉우리를 누르세요(누른 곳 ±15 ms 안의 가장 큰 값으로 맞춥니다).` : '후보 번호 대신 그래프의 아무 곳이나 직접 찍을 수도 있습니다.'}</span>
+        </div>
+        {a.pair_source === 'manual' && a.auto_pair && <p className="exp-hint">자동으로 골랐던 값: 앞바퀴 {a.auto_pair.front_t_s.toFixed(3)}초({a.auto_pair.front_g.toFixed(2)} g), 뒷바퀴 {a.auto_pair.rear_t_s.toFixed(3)}초({a.auto_pair.rear_g.toFixed(2)} g){settings.wheelbase_mm ? ` → ${(settings.wheelbase_mm / 1000 / (a.auto_pair.rear_t_s - a.auto_pair.front_t_s)).toFixed(3)} m/s` : ''}. 그래프의 회색 점선 원이 자동 위치입니다. '자동으로 되돌리기'를 누르면 이 값으로 돌아갑니다.</p>}
         <div className="exp-cand-list">{(a.candidates ?? []).map((c, i) => { const isF = c.t_s === a.front_t_s, isR = c.t_s === a.rear_t_s;
           return <div key={i} className={'exp-cand' + (isF ? ' front' : isR ? ' rear' : '')}><b>후보 {i + 1}</b><span>{c.t_s.toFixed(3)}초 · {c.g.toFixed(2)} g{c.landing ? ' · 착지' : ''}{isF ? ' · 지금 앞바퀴' : isR ? ' · 지금 뒷바퀴' : ''}</span>
             <button type="button" className={pick.front === c.t_s ? 'secondary selected' : 'secondary'} onClick={() => setPick(p => ({ ...p, front: c.t_s }))}>앞바퀴로</button>
@@ -142,7 +151,7 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
           {(a.candidates ?? []).length === 0 && <span className="exp-hint">진동보다 뚜렷한 피크가 없습니다.</span>}</div>
         <div className="button-row">
           <span className="exp-hint">{pick.front != null && pick.rear != null ? `간격 ${((pick.rear - pick.front) * 1000).toFixed(0)} ms → 속도 ${settings.wheelbase_mm ? (settings.wheelbase_mm / 1000 / (pick.rear - pick.front)).toFixed(3) + ' m/s' : '축간거리 필요'}` : '앞바퀴와 뒷바퀴 후보를 하나씩 고르세요.'}</span>
-          <button className="primary" disabled={pick.front == null || pick.rear == null || (pick.rear ?? 0) <= (pick.front ?? 0)} onClick={() => void patchRun(selected.id, { peak_override: { front_t_s: pick.front, rear_t_s: pick.rear } }, '고른 피크로 다시 계산했습니다.').then(() => setPick({}))}>이걸로 계산</button>
+          <button className="primary" disabled={pick.front == null || pick.rear == null || (pick.rear ?? 0) <= (pick.front ?? 0)} onClick={() => void patchRun(selected.id, { peak_override: { front_t_s: pick.front, rear_t_s: pick.rear } }, '고른 피크로 다시 계산했습니다. 언제든 자동으로 되돌릴 수 있습니다.').then(() => { setPick({}); setPickMode(null); })}>이걸로 계산</button>
           {a.pair_source === 'manual' && <button className="secondary" onClick={() => void patchRun(selected.id, { clear_peak_override: true }, '자동 선택으로 되돌렸습니다.')}>자동으로 되돌리기</button>}
           <select aria-label="측정 목적" value={selected.condition.purpose ?? 'main'} onChange={e => void patchRun(selected.id, { purpose: e.target.value }, '측정 목적을 바꿨습니다.')}>{(['main', 'validation', 'pilot'] as Purpose[]).map(p => <option key={p} value={p}>{PURPOSE_LABEL[p]}</option>)}</select>
         </div>
