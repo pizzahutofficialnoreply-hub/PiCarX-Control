@@ -16,7 +16,7 @@ type Props = {
 type Series = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; rear_t_s: number | null; peak_g: number | null; speed_mps: number | null; bump_detected: boolean | null; aligned_on?: 'front' | 'peak' };
 
 const sameCondition = (a: RunSummary, b: RunSummary) => a.condition.bump_id === b.condition.bump_id && a.condition.total_mass_g === b.condition.total_mass_g
-  && a.condition.output_mode === b.condition.output_mode && a.condition.output_value === b.condition.output_value && (a.condition.purpose ?? 'main') === (b.condition.purpose ?? 'main');
+  && a.condition.output_mode === b.condition.output_mode && a.condition.output_value === b.condition.output_value && (a.condition.purpose ?? 'main') === (b.condition.purpose ?? 'main') && (a.condition.direction ?? 'forward') === (b.condition.direction ?? 'forward');
 const readPref = <T extends string>(key: string, allowed: T[], fallback: T): T => { try { const v = localStorage.getItem(key) as T; return allowed.includes(v) ? v : fallback; } catch { return fallback; } };
 const TRIAL_COLORS = ['#2f6fb0', '#d0782a', '#3c9a5f', '#a04fa0', '#b33a3a', '#5d6b7a', '#1f9e9e', '#8c6d1f'];
 
@@ -76,7 +76,7 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
   const log = detail && detail.id === selected.id ? detail.drive_log ?? [] : [];
   const outputs = Array.from(new Set(log.map(r => r[1])));
   const steers = log.map(r => r[2]);
-  const condLabel = (r: RunSummary | Series) => `${r.condition.bump_id} · ${r.condition.total_mass_g.toLocaleString()} g · ${outputLabel(r.condition.output_mode, r.condition.output_value)}`;
+  const condLabel = (r: RunSummary | Series) => `${r.condition.bump_id} · ${r.condition.total_mass_g.toLocaleString()} g · ${outputLabel(r.condition.output_mode, r.condition.output_value)}${r.condition.direction === 'backward' ? ' · 후진' : ''}`;
 
   // 겹쳐 보기 색: 같은 조건이면 회차별, 전체면 출력값별(질량은 선 모양)
   const outputsAll = Array.from(new Set(overlay.map(s => `${s.condition.output_mode}${s.condition.output_value}`)));

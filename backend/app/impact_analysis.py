@@ -577,7 +577,7 @@ def _mean(values: Iterable[float]) -> float | None:
 def group_key(run: dict[str, Any]) -> tuple:
     c = run.get("condition", {})
     return (c.get("bump_id") or "-", round(float(c.get("total_mass_g") or 0) / 5) * 5,
-            c.get("output_mode") or "pwm", int(round(float(c.get("output_value") or 0))))
+            c.get("output_mode") or "pwm", int(round(float(c.get("output_value") or 0))), c.get("direction") or "forward")
 
 
 def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[dict[str, Any]]:
@@ -651,7 +651,7 @@ def aggregate(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         mean_delta = _mean(kept)
         mass_g = key[1]
         rows.append({
-            "bump_id": key[0], "total_mass_g": mass_g, "output_mode": key[2], "output_value": key[3],
+            "bump_id": key[0], "total_mass_g": mass_g, "output_mode": key[2], "output_value": key[3], "direction": key[4],
             "n_runs": len(items), "n_used": len(kept),
             "mean_speed_mps": round(_mean(speeds), 4) if speeds else None,
             "speed_min_mps": round(min(speeds), 4) if speeds else None,

@@ -518,3 +518,31 @@ class BumpPassWatcherTests(unittest.TestCase):
         t, w = self._feed(lambda t: -5.0 if 1.0 <= t < 1.3 else (5.0 if 1.5 <= t < 1.8 else 0.0))
         self.assertIsNotNone(t)
         self.assertEqual(w.sign, -1.0)
+
+
+class BackwardMeasureTests(unittest.TestCase):
+    def test_backward_runs_are_analyzed_separately(self):
+        from app.main import app
+        import time as _t
+        with TestClient(app) as client:
+            s = client.get("/api/experiment/settings").json()
+            s.update(wheelbase_mm=95, wheel_radius_mm=25, base_mass_g=600, analysis_direction="backward")
+            client.put("/api/experiment/settings", json=s)
+            for out in (50, 90):
+                body = {"condition": {"trial": 1, "bump_id": "A", "base_mass_g": 600, "added_mass_g": 0, "output_mode": "pwm",
+                                      "output_value": out, "direction": "backward"},
+                        "pre_roll_s": 0.3, "run_seconds": 0.3, "tail_s": 0.1, "repeats": 1, "return_enabled": True}
+                self.assertEqual(client.post("/api/experiment/auto-run", json=body).status_code, 200)
+                for _ in range(200):
+                    st = client.get("/api/experiment/auto-run").json()
+                    if st["state"] in ("done", "error", "aborted"):
+                        break
+                    _t.sleep(0.05)
+                self.assertEqual(st["state"], "done", st["message"])
+            data = client.get("/api/experiment/runs").json()
+            self.assertTrue(data["groups"])
+            self.assertTrue(all(g["direction"] == "backward" for g in data["groups"]))
+            s["analysis_direction"] = "forward"
+            client.put("/api/experiment/settings", json=s)
+            data = client.get("/api/experiment/runs").json()
+            self.assertFalse(any(g["direction"] == "backward" for g in data["groups"]))

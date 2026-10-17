@@ -102,6 +102,7 @@ class ExperimentSettings(BaseModel):
     plan_added_masses: list[float] = Field(default_factory=lambda: [0.0, 150.0, 300.0])
     plan_outputs: list[float] = Field(default_factory=lambda: [40.0, 55.0, 70.0, 85.0, 100.0])
     plan_repeats: int = Field(default=5, ge=1, le=20)
+    analysis_direction: Literal["forward", "backward"] = Field(default="forward", description="분석·관계식에 쓸 측정 방향(전진·후진 결과는 섞지 않음)")
     plan_bumps: list[str] | None = Field(default=None, description="진행표에 넣을 방지턱 ID(비우면 전체)")
     line: LineSettings = Field(default_factory=LineSettings)
     bumps: list[BumpProfile] = Field(default_factory=lambda: [
@@ -117,6 +118,7 @@ class ExperimentCondition(BaseModel):
     added_mass_g: float = Field(default=0, ge=0, le=5000)
     output_mode: Literal["pwm", "duty"] = "pwm"
     output_value: float = Field(ge=0, le=100)
+    direction: Literal["forward", "backward"] = Field(default="forward", description="측정 주행 방향(후진이면 구동 바퀴가 먼저 턱을 오름)")
     video_speed_mps: float | None = Field(default=None, ge=0, le=10, description="영상으로 잰 속도(교차 검증용)")
     purpose: Literal["main", "validation", "pilot"] = Field(default="main", description="main: 식 도출, validation: 식 검증(회귀에서 제외), pilot: 예비")
     note: str = Field(default="", max_length=200)
@@ -475,6 +477,8 @@ def plan_progress(runs: list[dict[str, Any]], settings: ExperimentSettings) -> d
 
 
 def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) -> dict[str, Any]:
+    want = settings.analysis_direction
+    runs = [r for r in runs if (r.get("condition", {}).get("direction") or "forward") == want]
     main_runs = [r for r in runs if purpose_of(r) == "main"]
     groups = ia.aggregate(main_runs)
     bump_ids = sorted({g["bump_id"] for g in groups})
@@ -772,17 +776,23 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         if opts["steering_source"] == "line" and line is None:
             raise RuntimeError("라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 하세요.")
         run["heading_hold"] = hold
-        auto_runner._phase("driving", opts["run_seconds"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · 직진 측정 중 · {cond.output_mode.upper()} {cond.output_value:g}{' · 직진 보정' if hold else ''}")
+        auto_runner._phase("driving", opts["run_seconds"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · {'후진' if cond.direction == 'backward' else '직진'} 측정 중 · {cond.output_mode.upper()} {cond.output_value:g}{' · 직진 보정' if hold else ''}")
         try:
-            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], "forward", gen, hold,
+            mdir = cond.direction
+            if mdir == "backward":
+                line = None  # 테이프 센서는 차 앞쪽에 있어 후진 측정에서는 자이로로 방향을 유지합니다.
+                hold = bool(opts["steering_source"] in ("gyro", "line") and track)
+                run["heading_hold"] = hold
+            ff_key = "heading_ff_forward" if mdir == "forward" else "heading_ff_backward"
+            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], mdir, gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
-                                          ki=settings.heading_ki, ff=store.load_settings().heading_ff_forward if hold else 0.0,
+                                          ki=settings.heading_ki, ff=getattr(store.load_settings(), ff_key) if hold else 0.0,
                                           polarity=store.load_settings().heading_sign,
                                           bump_watch=BumpPassWatcher() if (settings.stop_after_bump and track) else None,
                                           after_bump_s=settings.after_bump_s)
             auto_runner.last_forward_s = drive_info.get("elapsed_s")
             if hold and not drive_info.get("line_lost"):
-                drive_info["heading_ff_learned"] = _learn_heading("forward", drive_info.get("steer_mean_late"), drive_info)
+                drive_info["heading_ff_learned"] = _learn_heading(mdir, drive_info.get("steer_mean_late"), drive_info)
         finally:
             await ctl.stop(reason="experiment_auto_run_end")
         gen = ctl.stop_generation
@@ -853,7 +863,7 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
             if opts["return_enabled"]:
                 gen = ctl.stop_generation
                 auto_runner._phase("returning", opts["run_seconds"] * opts["return_scale"] + 0.3,
-                                   f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선으로 후진 복귀 중")
+                                   f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선으로 {'전진' if cond.direction == 'backward' else '후진'} 복귀 중")
                 await _wait(ctl, 0.3, gen)
                 try:
                     # 복귀(후진)는 테이프 센서가 앞쪽에 있어 라인 대신 자이로로 방향을 유지합니다.
@@ -862,9 +872,11 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                     fwd = getattr(auto_runner, "last_forward_s", None) or opts["run_seconds"]
                     planned = fwd * opts["return_scale"]
                     tape = _tape_detector(settings) if opts["return_stop_on_tape"] and not simulated else None
+                    rdir = "forward" if cond.direction == "backward" else "backward"
                     back = await _drive_for(ctl, cond.output_mode, opts["return_output"], planned * (1.6 if tape else 1.0),
-                                            "backward", gen, hold, settings.heading_gain,
-                                            ki=settings.heading_ki, ff=store.load_settings().heading_ff_backward if hold else 0.0,
+                                            rdir, gen, hold, settings.heading_gain,
+                                            ki=settings.heading_ki,
+                                            ff=getattr(store.load_settings(), "heading_ff_" + rdir) if hold else 0.0,
                                             polarity=store.load_settings().heading_sign,
                                             stop_when=tape, min_s=planned * 0.4)
                     if tape is not None:
@@ -872,7 +884,7 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                                                if back.get("stopped_on_mark") else
                                                f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선 테이프를 못 찾아 최대 시간에서 정지")
                     if hold:
-                        _learn_heading("backward", back.get("steer_mean_late"), back)
+                        _learn_heading(rdir, back.get("steer_mean_late"), back)
                 finally:
                     await ctl.stop(reason="experiment_return_end")
             if not last_cycle:
@@ -1236,7 +1248,7 @@ async def export_summary():
     runs = ia.harmonize_pairs(runs_for_mode(ctl.adapter.mode != "hardware"))
     bundle = analysis_bundle(runs, settings)
     crit = bundle.get("criteria") or {}
-    head = ["방지턱", "총질량(g)", "출력", "회차", "계산에 포함", "통과 속도(m/s)", "앞·뒤 바퀴 간격(ms)", "가장 큰 충격(g)",
+    head = ["방지턱", "총질량(g)", "출력", "방향", "회차", "계산에 포함", "통과 속도(m/s)", "앞·뒤 바퀴 간격(ms)", "가장 큰 충격(g)",
             "평소보다 더(Δa, g)", "허용 기준 초과", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)", "확인할 점"]
     rows: list[list[Any]] = [head]
     key = lambda r: (r["condition"].get("bump_id") or "", r["condition"].get("total_mass_g") or 0,
@@ -1245,7 +1257,8 @@ async def export_summary():
         c, a = r["condition"], r.get("analysis") or {}
         lim = (crit.get(c.get("bump_id")) or {}).get("a_limit_g")
         used = not r.get("excluded") and not r.get("aborted") and a.get("bump_detected") is not False and (c.get("purpose") or "main") == "main"
-        rows.append([c.get("bump_id"), c.get("total_mass_g"), f"{(c.get('output_mode') or 'pwm').upper()} {c.get('output_value')}", c.get("trial"),
+        rows.append([c.get("bump_id"), c.get("total_mass_g"), f"{(c.get('output_mode') or 'pwm').upper()} {c.get('output_value')}",
+                     "후진" if c.get("direction") == "backward" else "전진", c.get("trial"),
                      "예" if used else "아니오", a.get("speed_mps"), None if a.get("axle_dt_s") is None else round(a["axle_dt_s"] * 1000),
                      a.get("peak_g"), a.get("peak_delta_g"),
                      "" if lim is None or a.get("peak_g") is None else ("초과" if a["peak_g"] > lim else "이내"),
@@ -1254,10 +1267,11 @@ async def export_summary():
                      a.get("sample_rate_hz"), " / ".join(a.get("flags") or [])])
     rows.append([])
     rows.append(["# 조건별 평균 (가장 큰 값·작은 값 1개씩 뺀 평균)"])
-    rows.append(["방지턱", "총질량(g)", "출력", "회차 수(계산에 쓴 수)", "평균 속도(m/s)", "속도 범위(m/s)", "평균 최대 충격(g)",
+    rows.append(["방지턱", "총질량(g)", "출력", "방향", "회차 수(계산에 쓴 수)", "평균 속도(m/s)", "속도 범위(m/s)", "평균 최대 충격(g)",
                  "평균 Δa(g)", "Δa 범위(g)", "바퀴 뜬 회차"])
     for g in bundle["groups"]:
-        rows.append([g["bump_id"], g["total_mass_g"], f"{g['output_mode'].upper()} {g['output_value']}", f"{g['n_runs']} ({g['n_used']})",
+        rows.append([g["bump_id"], g["total_mass_g"], f"{g['output_mode'].upper()} {g['output_value']}",
+                     "후진" if g.get("direction") == "backward" else "전진", f"{g['n_runs']} ({g['n_used']})",
                      g.get("mean_speed_mps"), f"{g.get('speed_min_mps')}–{g.get('speed_max_mps')}", g.get("mean_peak_g"),
                      g.get("mean_peak_delta_g"), f"{g.get('kept_min_delta_g')}–{g.get('kept_max_delta_g')}", f"{g['jump_count']}/{g['n_runs']}"])
     for bump_id, lines in (bundle.get("interpretation") or {}).items():

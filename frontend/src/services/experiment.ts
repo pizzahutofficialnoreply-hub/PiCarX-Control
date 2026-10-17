@@ -43,6 +43,7 @@ export type ExperimentSettings = {
   plan_outputs?: number[];
   plan_repeats?: number;
   plan_bumps?: string[] | null;
+  analysis_direction?: 'forward' | 'backward';
   line?: LineSettings;
   bumps: BumpProfile[];
   max_output?: number;
@@ -68,6 +69,7 @@ export type ExperimentCondition = {
   added_mass_g: number;
   output_mode: OutputMode;
   output_value: number;
+  direction?: 'forward' | 'backward';
   video_speed_mps: number | null;
   purpose?: Purpose;
   note: string;
