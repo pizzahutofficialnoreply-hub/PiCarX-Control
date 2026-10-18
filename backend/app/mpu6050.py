@@ -152,6 +152,18 @@ class MPU6050Service:
         self._fifo_k = 0
         self._fifo_t0 = time.monotonic()
         self._fifo_prev_words = None
+        if len(self._realign_times) > 5 and self._fifo_dt < 0.0015:
+            # 1 kHz에서 자주 밀리면 먼저 500 Hz로 낮춤(통신량 절반, 버퍼에 170 ms까지 담김)
+            try:
+                with self._i2c_lock:
+                    self._bus.write_byte_data(self.ADDRESS, 0x19, 0x01)
+                    self._bus.write_byte_data(self.ADDRESS, 0x6A, 0x44)
+            except Exception:
+                pass
+            self._fifo_dt = 0.002
+            self._realign_times = []
+            self.fifo_note = f"센서 버퍼 칸이 자주 밀려({why}) 500 Hz로 낮췄습니다."
+            return
         if len(self._realign_times) > 5:
             self._fifo = False
             self.fifo_note = f"센서 버퍼 칸이 자주 밀려({why}) 한 표본씩 직접 읽기로 바꿨습니다. I²C 배선·속도를 확인하세요."

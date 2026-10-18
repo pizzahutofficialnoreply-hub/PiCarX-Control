@@ -145,7 +145,12 @@ def test_fifo_misaligned_frames_trigger_realign():
         air += w(0) + w(0) + w(100) + w(5) + w(-7) + w(65)
     m._bus = Bus(good + air)
     assert len(m._fifo_read()) == 40 and len(m._fifo_read()) == 20 and m.fifo_realigns == 1
+    m._fifo_dt = 0.001
     for _ in range(6):
         m._bus = Bus(shifted)
         m._fifo_read()
-    assert m._fifo is False                     # 너무 자주 밀리면 직접 읽기로
+    assert m._fifo is True and m._fifo_dt == 0.002   # 1 kHz에서 자주 밀리면 먼저 500 Hz로
+    for _ in range(6):
+        m._bus = Bus(shifted)
+        m._fifo_read()
+    assert m._fifo is False                     # 500 Hz에서도 계속 밀리면 직접 읽기로
