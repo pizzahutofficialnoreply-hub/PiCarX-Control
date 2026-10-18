@@ -92,3 +92,112 @@ class BumpCamera:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+
+
+# --------------------------------------------------------------------------- 카메라로 바닥 테이프 보기
+class LineCamSettings(BaseModel):
+    tilt_deg: float = Field(default=-30, ge=-45, le=20, description="코스 주행 중 카메라 틸트(아래로 −). 바닥 테이프가 화면 아래쪽에 보이게")
+    roi_top: float = Field(default=0.45, ge=0.0, le=0.9, description="화면에서 바닥으로 볼 영역 위쪽(높이 비율)")
+    flip: bool = Field(default=False, description="화면 좌우가 반대로 찍히면 켬")
+    min_contrast: float = Field(default=40, ge=10, le=200, description="밝은 바닥과 검은 테이프 밝기 차이가 이보다 작으면 판단 안 함")
+    cross_frac: float = Field(default=0.55, ge=0.3, le=0.95, description="한 줄(띠)에서 검은 부분이 화면 너비의 이 비율 넘으면 가로선")
+    cross_wait_s: float = Field(default=0.5, ge=0.1, le=2.0, description="가로선이 화면 아래로 사라진 뒤 바닥 센서가 이 시간 안에 못 보면 카메라 판단으로 정지선 처리")
+
+
+def line_scan(arr: Any, s: LineCamSettings) -> dict[str, Any] | None:
+    """밝은 바닥 + 검은 테이프 화면에서 유도선 위치(−1 왼쪽 ~ +1 오른쪽)와 가로선 위치(0 위 ~ 1 아래)를 찾습니다."""
+    import numpy as np
+    if arr is None:
+        return None
+    a = np.asarray(arr, dtype=float)
+    gray = a[..., :3].mean(axis=2) if a.ndim == 3 else a
+    if s.flip:
+        gray = gray[:, ::-1]
+    h, w = gray.shape
+    roi = gray[int(h * s.roi_top):, :]
+    if roi.size == 0:
+        return None
+    lo, hi = np.percentile(roi, 5), np.percentile(roi, 90)
+    if hi - lo < s.min_contrast:
+        return {"guide": None, "guide_far": None, "cross_y": None, "contrast": round(float(hi - lo), 1)}
+    dark = roi < (lo + hi) / 2
+    nb = 8
+    bands = np.array_split(np.arange(dark.shape[0]), nb)
+    cross_y = None
+    guide_rows = []
+    for i, rows in enumerate(bands):
+        if not len(rows):
+            continue
+        frac = dark[rows].mean()
+        if frac >= s.cross_frac:
+            cross_y = (i + 0.5) / nb       # 가장 아래쪽(가까운) 가로선 위치가 남음
+        else:
+            guide_rows.append(i)
+
+    def centroid(idx: list[int]) -> float | None:
+        if not idx:
+            return None
+        rows = np.concatenate([bands[i] for i in idx])
+        col = dark[rows].mean(axis=0)            # 열마다 검은 비율
+        cols = np.where(col > 0.5)[0]
+        if len(cols) < max(1, w * 0.01) or len(cols) > w * 0.4:
+            return None
+        return float(cols.mean() / max(1, w - 1) * 2 - 1)
+
+    near = [i for i in guide_rows if i >= nb // 2]
+    far = [i for i in guide_rows if i < nb // 2]
+    return {"guide": centroid(near), "guide_far": centroid(far), "cross_y": cross_y, "contrast": round(float(hi - lo), 1)}
+
+
+class LineCam:
+    """주행 중 별도 스레드에서 프레임을 보고(약 10번/초) 유도선 위치와 가로선 지나감을 기록합니다."""
+
+    def __init__(self, capture, s: LineCamSettings, hz: float = 12.0) -> None:
+        self.capture, self.s, self.period = capture, s, 1.0 / hz
+        self.latest: dict[str, Any] | None = None
+        self.latest_t = 0.0
+        self.cross_near_t: float | None = None     # 가로선이 화면 아래쪽(가까움)에 있었던 마지막 시각
+        self.cross_passed_at: float | None = None  # 가로선이 화면 아래로 사라진(차 밑으로 들어간) 시각
+        self.frames = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "LineCam":
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="line-camera")
+        self._thread.start()
+        return self
+
+    def feed(self, res: dict[str, Any] | None, t: float) -> None:
+        if res is None:
+            return
+        self.latest, self.latest_t = res, t
+        self.frames += 1
+        cy = res.get("cross_y")
+        if cy is not None and cy >= 0.7:
+            self.cross_near_t = t
+        elif self.cross_near_t is not None and cy is None and t - self.cross_near_t < 0.6:
+            self.cross_passed_at = t
+            self.cross_near_t = None
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            t = time.monotonic()
+            try:
+                self.feed(line_scan(self.capture(), self.s), t)
+            except Exception:
+                pass
+            self._stop.wait(max(0.0, self.period - (time.monotonic() - t)))
+
+    def guide(self, now: float | None = None) -> float | None:
+        now = time.monotonic() if now is None else now
+        if self.latest is None or now - self.latest_t > 0.4:
+            return None
+        return self.latest.get("guide")
+
+    def reset_cross(self) -> None:
+        self.cross_near_t = self.cross_passed_at = None
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)

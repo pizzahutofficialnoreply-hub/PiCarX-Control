@@ -29,7 +29,7 @@ class HardwareAdapter(Protocol):
     mode: str
     connected: bool
     connection_error: str | None
-    steering_center: int
+    steering_center: float
     pan_center: int
     tilt_center: int
     def stop(self) -> None: ...
@@ -41,7 +41,7 @@ class HardwareAdapter(Protocol):
     def spin(self, direction: str, power: float, steer: float = 30.0) -> None: ...
     def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None: ...
     def test_steering(self, direction: str, angle: int) -> None: ...
-    def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None: ...
+    def set_calibration(self, steering_center: float, pan_center: int, tilt_center: int) -> None: ...
     def close(self) -> None: ...
     def diagnostics(self) -> dict: ...
     def read_sensors(self) -> dict: ...
@@ -90,7 +90,7 @@ class MockAdapter:
         self.last_command = {"direction": "spin_" + direction, "power": power, "at": time.time()}
     def test_steering(self, direction: str, angle: int) -> None:
         pass
-    def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
+    def set_calibration(self, steering_center: float, pan_center: int, tilt_center: int) -> None:
         self.steering_center, self.pan_center, self.tilt_center = steering_center, pan_center, tilt_center
     def diagnostics(self) -> dict:
         return {
@@ -145,7 +145,7 @@ class UnavailableAdapter:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def test_steering(self, direction: str, angle: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
-    def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
+    def set_calibration(self, steering_center: float, pan_center: int, tilt_center: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def diagnostics(self) -> dict:
         return {
@@ -235,10 +235,14 @@ class PiCarXAdapter:
             raise RuntimeError(self.connection_error or "PiCar-X driver is not initialized.")
         return self._car
 
-    def _set_steering(self, angle: int) -> None:
+    @staticmethod
+    def _clamp_f(value: float, low: float, high: float) -> float:
+        return max(low, min(high, float(value)))
+
+    def _set_steering(self, angle: float) -> None:
         car = self._require_car()
-        # Include app calibration, then constrain the value before calling the servo API.
-        car.set_dir_servo_angle(self._clamp(angle + self.steering_center, -MAX_STEERING, MAX_STEERING))
+        # 0.1° 단위까지 보냅니다(서보 라이브러리는 실수 각도를 펄스 폭으로 바꿈). 보정 중심값도 소수 가능.
+        car.set_dir_servo_angle(round(self._clamp_f(angle + self.steering_center, -MAX_STEERING, MAX_STEERING), 1))
 
     def stop(self) -> None:
         car = self._require_car()
@@ -263,7 +267,7 @@ class PiCarXAdapter:
             raise ValueError(f"Unsupported output mapping: {mapping}")
         output = self._clamp(round(max(0.0, value) * max(0.1, trim)), 0, MAX_PWM)
         move = car.forward if direction == "forward" else car.backward
-        angle = self._clamp(round(steering), -MAX_STEERING, MAX_STEERING)
+        angle = round(self._clamp_f(steering, -MAX_STEERING, MAX_STEERING), 1)
         tl, tr = getattr(self, "wheel_trim", (1.0, 1.0)) or (1.0, 1.0)
         # 좌우 배율은 반올림하지 않고 넘깁니다(라이브러리가 듀티로 바꿀 때 정수화). 1% 단위 미세 조정이 사라지지 않게.
         left = round(min(float(MAX_PWM), output * tl), 2)
@@ -368,7 +372,7 @@ class PiCarXAdapter:
         car = self._require_car()
         p = float(self._clamp(round(power), 0, MAX_PWM))
         angle = -abs(steer) if direction == "left" else abs(steer)
-        self._set_steering(int(round(angle)))
+        self._set_steering(angle)
         set_speed = getattr(car, "set_motor_speed", None)
         if not callable(set_speed):
             raise RuntimeError("설치된 picarx 라이브러리에 set_motor_speed가 없어 제자리 회전을 할 수 없습니다.")
@@ -398,7 +402,7 @@ class PiCarXAdapter:
         car.stop()
         self._set_steering(sign * self._clamp(angle, 0, MAX_STEERING))
 
-    def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
+    def set_calibration(self, steering_center: float, pan_center: int, tilt_center: int) -> None:
         car = self._require_car()
         self.camera_view = {"pan": 0, "tilt": 0}
         steering = self._clamp(steering_center, -20, 20)

@@ -1,7 +1,7 @@
 // 이론·예측 탭: 목표 1(질량·속도 → 충격 예측식과 역계산), 이론식 ①②③으로 데이터 분석,
 // 직접 만드는 관계식, 목표 2(방지턱 앞 감속 제어), 초음파 거리·속력 분석.
 import { useMemo, useState } from 'react';
-import { Calculator, Footprints, FlaskConical, PencilRuler, Gauge, Radar } from 'lucide-react';
+import { Calculator, Footprints, FlaskConical, Gauge, Radar } from 'lucide-react';
 import { fmt, G, outputFromSpeed, outputLabel, paramText, speedFromOutput, type ModelResult, type OutputMode } from '../services/experiment';
 import { XYChart, MASS_COLORS } from '../components/ExperimentCharts';
 import NumInput from '../components/NumInput';
@@ -14,14 +14,13 @@ import ControlLab from './ControlLab';
 import EventsLab from './EventsLab';
 import HelpBox from '../components/HelpBox';
 
-type Section = 'predict' | 'theory' | 'events' | 'formula' | 'control' | 'ultra';
+type Section = 'predict' | 'events' | 'control' | 'ultra' | 'report';
 const SECTIONS: { id: Section; label: string; icon: typeof Calculator }[] = [
-  { id: 'predict', label: '① 예측식·계산기', icon: Calculator },
-  { id: 'theory', label: '② 이론 분석', icon: FlaskConical },
-  { id: 'events', label: '③ 단계별 충격', icon: Footprints },
-  { id: 'formula', label: '④ 내 관계식', icon: PencilRuler },
-  { id: 'control', label: '⑤ 감속 제어', icon: Gauge },
-  { id: 'ultra', label: '⑥ 초음파·카메라 거리', icon: Radar },
+  { id: 'predict', label: '예측 계산기', icon: Calculator },
+  { id: 'events', label: '단계별 충격', icon: Footprints },
+  { id: 'control', label: '감속 제어', icon: Gauge },
+  { id: 'ultra', label: '초음파·카메라', icon: Radar },
+  { id: 'report', label: '보고서용 (이론식·내 관계식)', icon: FlaskConical },
 ];
 
 const num = (x: number, d = 3) => (Math.abs(x) >= 100 ? x.toFixed(1) : Math.abs(x) >= 1 ? x.toFixed(d) : x.toPrecision(d));
@@ -72,9 +71,6 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
   const v = inMode === 'mps' ? inVal : speedFromOutput(models, bump, outMode, inVal, massG);
   const P = inMode === 'pwm' ? inVal : outputFromSpeed(models, bump, outMode, inVal, massG);
   const dA = pred && v != null && v > 0 ? pred.delta(v, mKg, P) : null;
-  const pi = v != null && c.R ? v * v / (G * c.R) : null;
-  const impPts = runs.filter(r => r.analysis.impulse_ns && r.analysis.momentum_nsx).map(r => ({ x: r.analysis.momentum_nsx as number, y: r.analysis.impulse_ns as number }));
-  const impFit = slopeThroughOrigin(impPts);
   const speeds = groups.map(g => g.mean_speed_mps).filter((x): x is number => x != null);
   const masses = Array.from(new Set(groups.map(g => g.total_mass_g)));
   const warn: string[] = [];
@@ -91,16 +87,14 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
 
   return <div className="exp-theory">
     <div className="exp-theory-top">
-      <HelpBox id="theory-intro" title="이 탭은 이런 순서로 보세요">
+      <HelpBox id="theory-intro2" title="이 탭은 이런 순서로 보세요" defaultOpen={false}>
         <ul>
-          <li><b>① 예측식·계산기</b>: 측정·분석 탭에서 고른 관계식으로 '질량·속도(PWM) → 충격(g, N)'과 거꾸로 '허용 충격 → 최대 속도·PWM'을 계산합니다.</li>
-          <li><b>② 이론 분석</b>: 계획서 이론 ①F=ma ②충격량 ③원운동을 데이터에 대 보고, 맞는 점과 벗어나는 이유를 봅니다(보고서 토의용).</li>
-          <li><b>③ 단계별 충격</b>: 앞바퀴 오름·내림, 뒷바퀴 오름·내림 네 순간을 따로 모아 단계마다 식과 한계 속도를 구합니다.</li>
-          <li><b>④ 내 관계식</b>: 직접 식을 만들어 맞추고, 예측식으로 쓸 수 있습니다.</li>
-          <li><b>⑤ 감속 제어</b>: ①·③의 식으로 방지턱 앞에서 얼마나 줄일지 계산해 실제로 달려 확인합니다(시간·거리·초음파·카메라로 방지턱 감지).</li>
-          <li><b>⑥ 초음파·카메라 거리</b>: 벽까지 거리로 속력을 재고, 방지턱 감지용 센서를 시험합니다.</li>
+          <li><b>예측 계산기</b>: 질량·PWM(또는 속도) → 충격(g, N), 거꾸로 허용 충격 → 최대 속도·PWM.</li>
+          <li><b>단계별 충격</b>: 앞·뒤 바퀴가 오를 때·내려올 때 네 순간의 충격과 순간마다의 한계 속도.</li>
+          <li><b>감속 제어</b>: 위 식으로 방지턱 앞에서 얼마나 줄일지 정해 실제로 달려 확인.</li>
+          <li><b>초음파·카메라</b>: 벽까지 거리로 속력 재기, 방지턱 미리 보기 센서 시험.</li>
+          <li><b>보고서용</b>: 계획서 이론식(F=ma, 충격량, 원운동)과 데이터 비교, 직접 만드는 관계식. 계산·제어에는 필요 없습니다.</li>
         </ul>
-        <p>위의 방지턱 선택은 모든 칸에 함께 적용됩니다. 데이터가 바뀌면(측정·제외·재분석) 모든 칸이 자동으로 새로 계산됩니다.</p>
       </HelpBox>
       <div className="exp-theory-bar">
         {bumpIds.length > 1 && <div className="segmented">{bumpIds.map(id => <button key={id} type="button" className={id === bump ? 'selected' : ''} onClick={() => setBump(id)}>방지턱 {id}</button>)}</div>}
@@ -117,10 +111,8 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
           {builtin && <option value="builtin">측정·분석 탭에서 고른 식: {builtin.name}</option>}
           {customs.map(x => <option key={x.p.id} value={x.p.id}>직접 만든 식: {x.f.name}</option>)}</select></label>
         <div className="exp-formula-box">
-          <div><small>① 충격(가속도)</small><b>Δa = {formulaLine}</b><span>{pred.source === 'builtin' && chosen ? chosen.params.map(p => paramText(p)).join(' · ') : predF ? `직접 만든 식 · 목표값 ${predF.target}` : ''}</span></div>
-          <div><small>② 최대 수직 가속도</small><b>a_peak = 1 + Δa  (g)</b><span>가만히 있을 때 1 g에 충격만큼 더해짐</span></div>
-          <div><small>③ 충격력 (F = m·a)</small><b>F = m × {G.toFixed(2)} × (1 + {formulaLine})  (N)</b><span>m은 kg, v는 m/s</span></div>
-          <div><small>④ PWM → 속도 ({outMode === 'duty' ? '듀티' : 'PWM'})</small><b>{speedLine ?? '— (출력 2단계 이상 측정 필요)'}</b><span>{sm ? `측정 ${sm.n}개 조건으로 맞춤 · R² ${sm.r2?.toFixed(3)}${sm.uses_mass ? ' · 무거우면 느려지는 정도까지 반영' : ''}` : ''}</span></div>
+          <div><small>충격(가속도) · a_peak = 1 + Δa, F = m·g·a_peak</small><b>Δa = {formulaLine}</b><span>{pred.source === 'builtin' && chosen ? chosen.params.map(p => paramText(p)).join(' · ') : predF ? `직접 만든 식 · 목표값 ${predF.target}` : ''}</span></div>
+          <div><small>PWM → 속도 ({outMode === 'duty' ? '듀티' : 'PWM'})</small><b>{speedLine ?? '— (출력 2단계 이상 측정 필요)'}</b><span>{sm ? `측정 ${sm.n}개 조건으로 맞춤 · R² ${sm.r2?.toFixed(3)}${sm.uses_mass ? ' · 무거우면 느려지는 정도까지 반영' : ''}` : ''}</span></div>
         </div>
         <div className="exp-calc">
           <div className="experiment-fields">
@@ -139,8 +131,6 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
           <div className="exp-stats">
             <div className={aLimit != null && dA != null && 1 + dA > aLimit ? 'over' : ''}><small>허용 기준과 비교</small><b>{aLimit == null || dA == null ? '—' : 1 + dA > aLimit ? '기준 초과' : '기준 이내'}</b><span>기준 {aLimit?.toFixed(2) ?? '—'} g</span></div>
             <div><small>무게보다 더 받은 힘 F_dyn</small><b>{dA == null ? '—' : (mKg * G * dA).toFixed(2) + ' N'}</b><span>= m·g·Δa</span></div>
-            <div><small>충격량 I (이론 ②)</small><b>{v != null && c.s != null ? (mKg * v * c.s).toFixed(4) + ' N·s' : '—'}</b><span>I = m·v·sin α (sin α = {fmt(c.s, 3)}){impFit ? ` · 실측 맞춤 I = ${impFit.k.toFixed(3)}·m·v → ${v != null ? (impFit.k * mKg * v).toFixed(4) : '—'} N·s` : ''}</span></div>
-            <div><small>원운동 지수 Π (이론 ③)</small><b>{fmt(pi, 3)}</b><span>Π = v²/(g·R_eff){pi != null ? ` · 꼭대기에서 a ≈ ${(1 - pi).toFixed(2)} g${pi > 1 ? ' · 1을 넘어 점프 예상' : ''}` : ''}</span></div>
           </div>
           {warn.length > 0 && <ul className="exp-flags">{warn.map(w => <li key={w}>{w}</li>)}</ul>}
           <div className="exp-inverse">
@@ -156,9 +146,9 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
       </>}
     </section>}
 
-    {sec === 'theory' && <TheoryCharts ctx={ctx} bump={bump} chosen={chosen} />}
     {sec === 'events' && <EventsLab ctx={ctx} bump={bump} />}
-    {sec === 'formula' && <FormulaLab ctx={ctx} bump={bump} env={env} formulas={formulas} setFormulas={list => setFormulas(list)} onUse={id => { setPredId(id); setSec('predict'); }} chosen={chosen} />}
+    {sec === 'report' && <><TheoryCharts ctx={ctx} bump={bump} chosen={chosen} />
+      <FormulaLab ctx={ctx} bump={bump} env={env} formulas={formulas} setFormulas={list => setFormulas(list)} onUse={id => { setPredId(id); setSec('predict'); }} chosen={chosen} /></>}
     {sec === 'control' && <ControlLab ctx={ctx} bump={bump} part="control" />}
     {sec === 'ultra' && <ControlLab ctx={ctx} bump={bump} part="ultra" />}
   </div>;

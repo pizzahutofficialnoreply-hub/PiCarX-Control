@@ -39,7 +39,7 @@ class ControlService:
             record_event("hardware", "PiCar-X initialization unavailable", level="ERROR", details={"error": self.adapter.connection_error})
 
         saved = self._load_settings()
-        self.steering_center = int(saved.get("steering_center", self.adapter.steering_center))
+        self.steering_center = round(float(saved.get("steering_center", self.adapter.steering_center)), 1)
         self.pan_center = int(saved.get("pan_center", self.adapter.pan_center))
         self.tilt_center = int(saved.get("tilt_center", self.adapter.tilt_center))
         drive = saved.get("drive") if isinstance(saved.get("drive"), dict) else {}
@@ -195,7 +195,7 @@ class ControlService:
                 trim = self.drive_settings["trim_backward" if direction == "backward" else "trim_forward"]
                 self.adapter.wheel_trim = (self.drive_settings.get("trim_left", 1.0), self.drive_settings.get("trim_right", 1.0))
                 self.adapter.drive_experiment(mode, value, direction, steering, trim)
-                self.motion, self.speed, self.steering = direction, int(round(value)), int(round(steering))
+                self.motion, self.speed, self.steering = direction, int(round(value)), round(float(steering), 1)
                 self.updated_at = time.monotonic()
                 self.fault = None
                 return True

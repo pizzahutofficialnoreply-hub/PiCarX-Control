@@ -55,6 +55,7 @@ export type ExperimentSettings = {
   line?: LineSettings;
   vision?: VisionSettings;
   course_spin_lead_deg?: number;
+  linecam?: LineCamSettings;
   /** 반복 측정: 끝내기(time = 시간·방지턱 통과 자동 정지, stop_line = 정지선 테이프에서 서서히 정지) */
   end_mode?: 'time' | 'stop_line';
   accel_mode?: 'instant' | 'ramp';
@@ -158,7 +159,8 @@ export type RunSummary = {
   /** 정지선 코스로 잰 회차: 구간(A→B/B→A), 정지선 인식 시각 */
   course?: { leg?: string | null; end_mode?: string | null; accel?: string | null; detected?: boolean | null; detect_s?: number | null } | null;
   /** 유도선+자이로 조향 요약: 방지턱 위 방향 유지 시간, 유도선 복귀 시간, 최대 방향 차이 */
-  guided?: { bump_hold_s: number; recover_s: number; max_offset_deg: number; ref_deg?: number | null } | null;
+  guided?: { bump_hold_s: number; recover_s: number; max_offset_deg: number; ref_deg?: number | null; steer_ff_deg?: number; steer_calm_mean?: number | null; camera_used?: number } | null;
+  camera_line?: { frames: number; stop_by_camera: boolean } | null; steer_ff_learned?: number | null;
 };
 
 export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[]; filtered_g?: number[] }; drive_log?: [number, number, number, number | null][] | null;
@@ -287,7 +289,9 @@ export type ValidationRow = {
 export type ValidationBundle = { rows: ValidationRow[]; summary: { count: number; evaluated: number; mape: number | null; bias_pct: number | null; within_10pct: number; within_20pct: number } };
 export type ProgressCell = { bump_id: string; added_mass_g: number; output_value: number; done: number; need: number };
 export type Progress = { cells: ProgressCell[]; done: number; need: number; next: ProgressCell | null };
-export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number; auto_sign?: boolean; steer_sign?: number; mode?: 'gentle' | 'normal'; deadband?: number; gentle_max_deg?: number; rate_limit_dps?: number };
+export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number; auto_sign?: boolean; steer_sign?: number; mode?: 'gentle' | 'normal'; deadband?: number; gentle_max_deg?: number; rate_limit_dps?: number;
+  /** 학습된 직진 조향(0.1° 단위) */ steer_ff_deg?: number; learn_steer?: boolean; bump_steer?: 'straight' | 'hold'; camera_assist?: boolean };
+export type LineCamSettings = { tilt_deg: number; roi_top: number; flip: boolean; min_contrast: number; cross_frac: number; cross_wait_s: number };
 export type PeakCandidate = { t_s: number; g: number; landing: boolean };
 
 export function modelPredict(model: { kind: string; coef: Record<string, number> } | null | undefined, v: number, mKg: number): number | null {

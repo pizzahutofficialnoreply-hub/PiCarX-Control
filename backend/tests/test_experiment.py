@@ -196,7 +196,7 @@ class DutyModeTests(unittest.TestCase):
         adapter.drive_experiment("pwm", 40, "backward", 5.4)
         car.set_motor_speed.assert_any_call(1, -40)
         car.set_motor_speed.assert_any_call(2, 40)
-        car.set_dir_servo_angle.assert_called_with(5)
+        car.set_dir_servo_angle.assert_called_with(5.4)   # 0.1° 단위 조향
         # 전진과 후진은 같은 출력 경로: 같은 값이면 예상 듀티도 같아야 합니다.
         adapter.drive("forward", 100, 0); fwd = adapter.last_command["expected_duty_percent"]
         adapter.drive("backward", 100, 0); back = adapter.last_command["expected_duty_percent"]

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from typing import Any, Literal
 
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import experiment as ex
 from . import impact_analysis as ia
-from .line_follow import LineSettings, LineTracker, TiltGate, weights
+from .line_follow import LineSettings, LineTracker, TiltGate, position, weights
 from .mpu6050 import mpu6050_service
 
 
@@ -117,7 +118,8 @@ class CrossWatcher:
     arm(): 지금 가로 테이프 위에 있으면 일단 벗어난 뒤(연속 3번 안 보임)부터 판정합니다.
     """
 
-    def __init__(self, ctl, line: LineSettings, thr: float, tilt_limit: float, skip: int = 0) -> None:
+    def __init__(self, ctl, line: LineSettings, thr: float, tilt_limit: float, skip: int = 0,
+                 cam: Any = None, cam_wait_s: float = 0.5) -> None:
         self.ctl, self.line, self.thr, self.tilt_limit = ctl, line, thr, tilt_limit
         self.skip = skip  # 이만큼의 가로 테이프는 지나쳐 감(후진 복귀 때 방금 지나친 정지선)
         self.raw: Any = None
@@ -130,6 +132,9 @@ class CrossWatcher:
         self.blocked = 0
         self.gate = TiltGate(tilt_limit)
         self.prev_partial = False
+        self.cam, self.cam_wait_s = cam, cam_wait_s
+        self.bump_seen = False      # 이번 구간에서 방지턱(기울어짐)을 지났는지: 그 뒤의 가로선이 정지선
+        self.by_camera = False
 
     def start(self, ready_after: float) -> None:
         self.ready_after = ready_after
@@ -141,6 +146,16 @@ class CrossWatcher:
             self.raw = raw
             c = is_cross(raw, self.line, self.thr)
             bumpy = self.gate.update(mpu6050_service.tilt_deg())  # 방지턱 위(기울기 흐름은 빼고 판단)
+            if bumpy:
+                self.bump_seen = True
+                if self.cam is not None:
+                    self.cam.reset_cross()   # 방지턱 앞의 띠 모양(턱 자체)을 가로선으로 착각한 것은 버림
+            if (self.armed and self.cam is not None and self.bump_seen and self.skip == 0
+                    and self.cam.cross_passed_at is not None and time.monotonic() - self.cam.cross_passed_at > self.cam_wait_s):
+                # 카메라: 방지턱을 지난 뒤 가로선이 화면 아래(차 밑)로 들어갔는데 바닥 센서가 시간 안에 못 봤으면 정지선으로 처리
+                self.by_camera = True
+                self.seen.set()
+                return
             if not self.armed:
                 # 출발할 때 센서가 가로 테이프 위에 있으므로, 테이프에서 확실히 벗어난 뒤부터 봅니다:
                 # 세 센서 중 하나라도 바닥 쪽(테이프 정도 < 기준의 절반)인 상태가 25번(약 50~100 ms) 연속이어야 함.
@@ -350,31 +365,39 @@ async def _spin(ctl, gen: int, req: CourseRequest, degrees: float, direction: st
     return turned
 
 
-async def _find_guide(ctl, gen: int, req: CourseRequest, line: LineSettings) -> bool:
-    """제자리 회전 뒤 바닥 센서가 유도선을 보는지 확인하고, 안 보이면 좌우로 조금만(±12°) 돌려 찾습니다.
+async def _find_guide(ctl, gen: int, req: CourseRequest, line: LineSettings, cam: Any = None) -> tuple[bool, float | None]:
+    """제자리 회전 뒤 유도선이 센서(또는 카메라) 기준 어느 쪽에 있는지 알아냅니다.
 
-    크게 돌리면 차가 비스듬해져 뒤로 가로 테이프를 찾을 때 빗나가므로, 못 찾으면 유도선 방향(목표 각)으로 되돌려 둡니다.
-    가로 테이프는 유도선보다 훨씬 길어서 옆으로 1~3 cm 어긋나도 찾을 수 있고, 다음 구간에서 유도선으로 돌아갑니다.
+    돌려 본 뒤에는 항상 유도선 방향(목표 각)으로 되돌려 두고, (찾았는지, 유도선이 왼쪽으로 몇 m 떨어져 있는지)를 돌려줍니다.
+    회전으로는 옆으로 어긋난 것을 고칠 수 없으므로, 이 값으로 가로선을 찾으러 후진할 때 비스듬히 가서 옆으로 옮깁니다.
     """
-    def seen(raw: Any) -> bool:
+    def side(raw: Any) -> float | None:
         w = weights(list(raw or []), line)
-        return bool(w) and max(w) >= 0.5
+        p = position(w, line) if w else None
+        return None if p is None else -0.02 * (line.steer_sign if line.steer_sign else 1) * p   # 왼쪽 + (m)
     raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-    if seen(raw):
-        return True
-    found = False
-    for direction, limit in (("left", 12.0), ("right", 24.0)):
+    off = side(raw)
+    if off is not None:
+        return True, off
+    if cam is not None and cam.guide() is not None:
+        return True, -0.03 * cam.guide()
+    found: float | None = None
+    h_start = mpu6050_service.heading_deg()
+    for direction, limit in (("left", 15.0), ("right", 30.0)):
         h0 = mpu6050_service.heading_deg()
         if h0 is None:
-            return False
+            return False, None
         t0 = time.monotonic()
         try:
             while time.monotonic() - t0 < 1.5:
                 if ctl.stop_generation != runner.gen:
                     raise Stopped()
                 raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-                if seen(raw):
-                    found = True
+                o = side(raw)
+                if o is not None:
+                    turned = (mpu6050_service.heading_deg() or h0) - (h_start or h0)   # 왼쪽으로 돈 각(+)
+                    # 뒷축을 중심으로 돌았으므로 센서는 13.5 cm × sin(돈 각)만큼 옆으로 움직였음
+                    found = o + 0.135 * math.sin(math.radians(turned))
                     break
                 if abs((mpu6050_service.heading_deg() or h0) - h0) >= limit:
                     break
@@ -384,10 +407,10 @@ async def _find_guide(ctl, gen: int, req: CourseRequest, line: LineSettings) -> 
         finally:
             await _halt(ctl, "course_find_line")
         await asyncio.sleep(0.12)
-        if found:
-            return True
+        if found is not None:
+            break
     await _face_target(ctl, req)
-    return False
+    return found is not None, found
 
 
 async def _face_target(ctl, req: CourseRequest, tol: float = 4.0) -> None:

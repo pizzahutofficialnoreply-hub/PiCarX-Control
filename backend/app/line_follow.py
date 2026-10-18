@@ -33,6 +33,10 @@ class LineSettings(BaseModel):
     deadband: float = Field(default=0.35, ge=0, le=0.9, description="이 위치(−1~1) 안쪽이면 조향하지 않음(gentle)")
     gentle_max_deg: float = Field(default=8, ge=2, le=30, description="gentle 모드 최대 조향각")
     rate_limit_dps: float = Field(default=60, ge=10, le=600, description="조향각이 1초에 바뀔 수 있는 최대치(급하게 꺾지 않게)")
+    steer_ff_deg: float = Field(default=0.0, ge=-10, le=10, description="학습된 직진 조향(°, 0.1° 단위): 유도선 가운데로 곧게 갈 때 평균 조향")
+    learn_steer: bool = Field(default=True, description="측정할 때마다 직진 조향을 학습")
+    bump_steer: str = Field(default="straight", description="방지턱 위 조향: straight = 바퀴를 직진(학습된 직진 조향)으로 고정, hold = 자이로로 방향 유지")
+    camera_assist: bool = Field(default=False, description="카메라로 앞쪽 테이프(유도선·가로선)를 함께 봄")
 
 
 def weights(raw: list[float], s: LineSettings) -> list[float] | None:
@@ -42,6 +46,29 @@ def weights(raw: list[float], s: LineSettings) -> list[float] | None:
     for value, floor, line in zip(raw[:3], s.floor[:3], s.line[:3]):
         span = line - floor
         out.append(0.0 if abs(span) < 1e-6 else max(0.0, min(1.0, (value - floor) / span)))
+    return out
+
+
+SIDE_NAMES = ("왼쪽", "가운데", "오른쪽")
+
+
+def calibration_check(s: LineSettings) -> list[str]:
+    """보정값 점검: 어느 센서가 테이프를 본 적이 없으면(바닥·테이프 값 차이가 작음) 그 센서는 위치·가로선 판정에 못 씀.
+
+    흔한 실수: 좁은 유도선 위에서 '테이프 위' 보정을 하면 가운데 센서만 테이프를 보고 양옆 센서는 바닥값을 저장합니다.
+    그러면 가로선(세 센서 모두 검게)을 절대 못 알아보고, 테이프가 왼쪽/오른쪽에 있어도 모릅니다.
+    """
+    if not s.floor or not s.line:
+        return ["보정 전입니다."]
+    spans = [abs(l - f) for f, l in zip(s.floor[:3], s.line[:3])]
+    big = max(spans) if spans else 0.0
+    out = []
+    if big < 50:
+        out.append("바닥과 테이프 값 차이가 너무 작습니다(센서 높이·밝기 확인).")
+    for i, sp in enumerate(spans):
+        if big > 0 and sp < 0.35 * big:
+            out.append(f"{SIDE_NAMES[i]} 센서가 테이프를 본 적이 없습니다(차이 {sp:.0f}, 가장 큰 센서 {big:.0f}). "
+                       "'자동 보정'을 쓰거나, 세 센서가 모두 가로선(출발선) 위에 오게 놓고 '테이프 위' 보정을 다시 하세요.")
     return out
 
 
@@ -190,7 +217,7 @@ class GuidedSteer:
 
     def __init__(self, settings: LineSettings, polarity: int = 1, kp: float = 1.4, max_heading_deg: float = 15.0,
                  recover_steer_deg: float = 22.0, tilt_block_deg: float = 1.5, settle_s: float = 0.25, lost_s: float = 1.5,
-                 speed_mps: float = 0.4, ref_deg: float | None = None) -> None:
+                 speed_mps: float = 0.4, ref_deg: float | None = None, cam: Any = None) -> None:
         self.s = settings
         self.sign = -1 if settings.steer_sign < 0 else 1
         self.polarity = -1 if polarity < 0 else 1
@@ -214,6 +241,11 @@ class GuidedSteer:
         self.recover_time = 0.0
         self.max_offset_deg = 0.0
         self.last: dict[str, Any] = {}
+        self.cam = cam                    # 카메라 유도선 보조(있으면 테이프를 놓쳤을 때 위치를 알려 줌)
+        self.ff = settings.steer_ff_deg   # 학습된 직진 조향
+        self.calm_sum = 0.0
+        self.calm_n = 0
+        self.cam_used = 0
 
     def update(self, raw: list[float] | None, heading: float, tilt: tuple[float, float] | None,
                now: float | None = None) -> tuple[float, bool]:
@@ -250,6 +282,12 @@ class GuidedSteer:
             self.lost_since = self.lost_since or now
             # 테이프가 있을 쪽(추정 위치)으로 비스듬히 다가감. 추정이 0 근처면 유도선 방향으로 곧게.
             est = self.y_est if self.y_est is not None else self.SENSOR_HALF_M * self.last_dir
+            g = self.cam.guide(now) if self.cam is not None else None
+            if g is not None:
+                # 카메라가 앞쪽 유도선을 보고 있으면 그 위치를 믿음(−1 왼쪽 ~ +1 오른쪽 → 약 ±3 cm)
+                est = 0.03 * g
+                self.y_est = est
+                self.cam_used += 1
             theta = max(-1.0, min(1.0, est / 0.03)) * self.max_heading
             ok = now - self.lost_since < self.lost_s
         else:
@@ -278,13 +316,22 @@ class GuidedSteer:
         calm = centered and abs(err) < 6.0   # 테이프 가운데 + 방향도 거의 맞음 → 조향 최소
         lim = gentle if calm else min(self.recover_steer, self.s.max_steer_deg + 5)
         target = max(-lim, min(lim, self.kp * err * self.polarity))
-        if calm and abs(target) < 1.0:
+        if calm and abs(target) < 0.5:
             target = 0.0
-        # 되돌아오던 큰 조향은 빨리 풀어야 반대쪽으로 넘어가지 않음
-        rate = self.s.rate_limit_dps if (calm and abs(self.steer_prev) <= gentle) else max(self.s.rate_limit_dps, 200.0)
-        step = rate * dt
-        steer = self.steer_prev + max(-step, min(step, target - self.steer_prev))
+        target += self.ff                 # 이 차가 곧게 가려면 필요한 조향(학습값)
+        if self.mode == "bump" and self.s.bump_steer == "straight":
+            # 방지턱 위: 좌우로 꺾지 않고 바퀴를 '직진' 조향에 고정(충격 피크·진동이 조향에 흔들리지 않게).
+            # 틀어진 방향·옆으로 밀린 거리는 계속 추정해 두었다가 턱을 다 지난 뒤 바로잡습니다.
+            steer = self.ff
+        else:
+            # 되돌아오던 큰 조향은 빨리 풀어야 반대쪽으로 넘어가지 않음
+            rate = self.s.rate_limit_dps if (calm and abs(self.steer_prev - self.ff) <= gentle) else max(self.s.rate_limit_dps, 200.0)
+            step = rate * dt
+            steer = self.steer_prev + max(-step, min(step, target - self.steer_prev))
         self.steer_prev = steer
+        if calm and self.centered_since is not None and now - self.centered_since >= 0.4 and abs(err) < 2.0:
+            self.calm_sum += steer
+            self.calm_n += 1
         self.last = {"raw": raw, "weights": w, "position": pos, "steer_deg": round(steer, 2), "lost": pos is None,
                      "mode": self.mode, "ref_deg": round(self.ref, 2), "heading_deg": round(heading, 2),
                      "y_est_mm": None if self.y_est is None else round(self.y_est * 1000, 1)}
@@ -292,7 +339,10 @@ class GuidedSteer:
 
     def summary(self) -> dict[str, Any]:
         return {"bump_hold_s": round(self.bump_time, 2), "recover_s": round(self.recover_time, 2),
-                "max_offset_deg": round(self.max_offset_deg, 1), "ref_deg": None if self.ref is None else round(self.ref, 2)}
+                "max_offset_deg": round(self.max_offset_deg, 1), "ref_deg": None if self.ref is None else round(self.ref, 2),
+                "steer_ff_deg": round(self.ff, 2),
+                "steer_calm_mean": round(self.calm_sum / self.calm_n, 2) if self.calm_n >= 10 else None,
+                "camera_used": self.cam_used}
 
 
 class LineRunner:
@@ -303,6 +353,7 @@ class LineRunner:
         self.message = ""
         self.task: asyncio.Task | None = None
         self.tracker: LineTracker | None = None
+        self.guided: "GuidedSteer | None" = None
         self.started: float | None = None
         self.log: list[dict[str, Any]] = []
 
@@ -311,14 +362,17 @@ class LineRunner:
         return self.state == "running"
 
     def snapshot(self) -> dict[str, Any]:
+        last = self.guided.last if getattr(self, "guided", None) is not None else (self.tracker.last if self.tracker else None)
         return {"state": self.state, "message": self.message,
                 "elapsed_s": round(time.monotonic() - self.started, 2) if self.started and self.busy else None,
-                "last": self.tracker.last if self.tracker else None,
+                "last": last,
                 "log": self.log[-200:]}
 
     async def run(self, ctl, read: Callable[[], Any], settings: LineSettings, output_mode: str, output: float,
-                  seconds: float, on_flip: Callable[[int], None] | None = None) -> None:
+                  seconds: float, on_flip: Callable[[int], None] | None = None, guided: "GuidedSteer | None" = None,
+                  on_learn: Callable[[float], None] | None = None) -> None:
         self.tracker = LineTracker(settings)
+        self.guided = guided
         self.state, self.message, self.started, self.log = "running", "라인 추종 중", time.monotonic(), []
         gen = ctl.stop_generation
         try:
@@ -328,8 +382,18 @@ class LineRunner:
                     self.state, self.message = "stopped", "정지 명령으로 멈췄습니다."
                     return
                 raw = await asyncio.to_thread(read)
-                steer, ok = self.tracker.update(raw)
-                self.log.append({"t": round(time.monotonic() - self.started, 3), **{k: self.tracker.last.get(k) for k in ("position", "steer_deg", "lost")}})
+                heading = None
+                if self.guided is not None:
+                    from .mpu6050 import mpu6050_service
+                    heading = mpu6050_service.heading_deg()
+                if self.guided is not None and heading is not None:
+                    from .mpu6050 import mpu6050_service
+                    steer, ok = self.guided.update(raw, heading, mpu6050_service.tilt_deg())
+                    last = self.guided.last
+                else:
+                    steer, ok = self.tracker.update(raw)
+                    last = self.tracker.last
+                self.log.append({"t": round(time.monotonic() - self.started, 3), **{k: last.get(k) for k in ("position", "steer_deg", "lost", "mode")}})
                 if not ok:
                     self.state, self.message = "lost", "테이프를 놓쳐 정지했습니다. 센서 보정과 테이프 폭을 확인하세요."
                     return
@@ -337,7 +401,9 @@ class LineRunner:
                     self.state, self.message = "stopped", "정지 명령으로 멈췄습니다."
                     return
                 await asyncio.sleep(0.02)  # 50 Hz: 조향 반응을 빠르게
-            self.state, self.message = "done", f"{seconds:g}초 주행 완료" + (" · 조향 방향을 반대로 바꿨습니다(센서 순서 반대)" if self.tracker.flipped else "")
+            g = self.guided.summary() if self.guided is not None else None
+            self.state, self.message = "done", f"{seconds:g}초 주행 완료" + (" · 조향 방향을 반대로 바꿨습니다(센서 순서 반대)" if self.tracker.flipped else "") \
+                + (f" · 곧게 갈 때 평균 조향 {g['steer_calm_mean']:+.1f}°" if g and g.get("steer_calm_mean") is not None else "")
         except Exception as exc:
             self.state, self.message = "error", f"라인 추종 오류: {exc}"
         finally:
@@ -347,6 +413,10 @@ class LineRunner:
                 pass
             if self.tracker and self.tracker.flipped and on_flip:
                 on_flip(self.tracker.sign)
+            if self.guided is not None and on_learn and settings.learn_steer:
+                m = self.guided.summary().get("steer_calm_mean")
+                if m is not None:
+                    on_learn(m)
 
 
 line_runner = LineRunner()

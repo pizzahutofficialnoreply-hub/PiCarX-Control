@@ -30,10 +30,10 @@ from pydantic import BaseModel, Field
 from . import impact_analysis as ia
 from . import model_fit as mf
 from .distance import DistanceLogger
-from .vision import BumpCamera, VisionSettings
+from .vision import BumpCamera, LineCam, LineCamSettings, VisionSettings
 from . import vision as vis
 from . import distance as dist
-from .line_follow import GuidedSteer, LineSettings, LineTracker
+from .line_follow import GuidedSteer, LineSettings, LineTracker, calibration_check
 from .mpu6050 import mpu6050_service
 from .services.event_log import record_event
 
@@ -107,6 +107,7 @@ class ExperimentSettings(BaseModel):
     ultrasonic_hz: float = Field(default=20.0, ge=5, le=40)
     wall_stop_cm: float = Field(default=0.0, ge=0, le=200, description="벽까지 이 거리(cm)보다 가까워지면 정지(0 = 끔)")
     vision: "VisionSettings" = Field(default_factory=lambda: VisionSettings())
+    linecam: "LineCamSettings" = Field(default_factory=lambda: LineCamSettings())
     course_spin_lead_deg: float = Field(default=12.0, ge=0, le=60, description="코스 제자리 회전에서 배운 '일찍 끄는 각'")
     # 반복 측정의 '끝내기·복귀' 방식(바닥 테이프 코스)
     end_mode: Literal["time", "stop_line"] = Field(default="time", description="time: 주행 시간(또는 방지턱 통과 자동 정지), stop_line: 정지선(가로 테이프)을 보면 서서히 멈춤")
@@ -456,7 +457,8 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
-                                    "slowdown", "distance_summary", "stopped_by_wall", "course", "guided")}
+                                    "slowdown", "distance_summary", "stopped_by_wall", "course", "guided",
+                                    "camera_line", "steer_ff_learned")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -1081,14 +1083,31 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             # 유도선 + 자이로: 방지턱 위에서는 테이프 대신 자이로로 방향을 유지하고, 벗어나면 정해진 각도로 되돌아감
             # 속도 추정(테이프를 놓쳤을 때 옆으로 밀린 양 계산용): 같은 반복의 지난 회차 실측, 없으면 0.4 m/s
             last_v = ((auto_runner.last_result or {}).get("analysis") or {}).get("speed_mps") if auto_runner.cycle > 1 else None
-            guided = GuidedSteer(settings.line, polarity=store.load_settings().heading_sign, speed_mps=float(last_v or 0.4),
+            fresh = store.load_settings()   # 직전 회차에서 배운 직진 조향을 바로 씀
+            guided = GuidedSteer(fresh.line, polarity=fresh.heading_sign, speed_mps=float(last_v or 0.4),
                                  ref_deg=opts.pop("ref_offset", None))
             line = None
         stop_line = opts.get("end_mode") == "stop_line" and not simulated
+        lcam = opts.get("lcam")
+        own_cam = False
+        if lcam is None and settings.line.camera_assist and not simulated and (guided is not None or stop_line):
+            own_cam = True
+            # 카메라 보조: 앞쪽 바닥의 검은 테이프(유도선 위치, 가로선)를 함께 봄. 카메라를 아래로 숙임.
+            from .camera import camera_service
+            try:
+                ctl.adapter.set_camera_view(0, int(round(settings.linecam.tilt_deg)))
+            except Exception:
+                pass
+            lcam = LineCam(lambda: camera_service.capture_array(step=4), settings.linecam).start()
+        if lcam is not None:
+            lcam.reset_cross()
+            if guided is not None:
+                guided.cam = lcam
         cross = None
         if stop_line:
             from .course import CrossWatcher
-            cross = CrossWatcher(ctl, settings.line, opts["cross_threshold"], 2.0)
+            cross = CrossWatcher(ctl, settings.line, opts["cross_threshold"], 2.0, cam=lcam,
+                                 cam_wait_s=settings.linecam.cross_wait_s)
         ramp_s = opts["accel_s"] if opts.get("accel_mode") == "ramp" else 0.0
         if opts["steering_source"] == "line" and line is None and guided is None:
             raise RuntimeError("라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 하세요.")
@@ -1129,6 +1148,19 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             if cam is not None:
                 cam.stop()
                 drive_info["camera_scores"] = cam.scores[-80:]
+            if lcam is not None:
+                if own_cam:
+                    lcam.stop()
+                drive_info["camera_line"] = {"frames": lcam.frames, "last": lcam.latest,
+                                             "stop_by_camera": bool(cross is not None and cross.by_camera)}
+            if guided is not None and settings.line.learn_steer and not drive_info.get("line_lost"):
+                # 직진 조향 학습: 유도선 가운데로 곧게 가던 동안의 평균 조향을 다음 회차부터 기본 조향으로(반씩 반영)
+                gm = guided.summary().get("steer_calm_mean")
+                if gm is not None:
+                    st = store.load_settings()
+                    st.line.steer_ff_deg = round(max(-10.0, min(10.0, 0.5 * st.line.steer_ff_deg + 0.5 * gm)), 2)
+                    store.save_settings(st)
+                    drive_info["steer_ff_learned"] = st.line.steer_ff_deg
             auto_runner.last_forward_s = drive_info.get("elapsed_s")
             if stop_line or ramp_s or opts.get("leg_label"):
                 run["course"] = {"leg": opts.get("leg_label"), "end_mode": opts.get("end_mode"), "accel": opts.get("accel_mode"),
@@ -1222,7 +1254,7 @@ def _next_ref_offset(target: float) -> float | None:
     return None if h is None else round((target - h + 180.0) % 360.0 - 180.0, 2)
 
 
-async def _turn_around(ctl, creq: Any, line: LineSettings, cycle: int, cycles: int) -> None:
+async def _turn_around(ctl, creq: Any, line: LineSettings, cycle: int, cycles: int, cam: Any = None) -> None:
     """정지선(또는 출발선) 위에서 제자리 180° 회전 → 유도선 찾기 → 가로 테이프가 센서 밑에 올 때까지 후진."""
     from . import course as co
     co.runner.gen = ctl.stop_generation
@@ -1238,11 +1270,20 @@ async def _turn_around(ctl, creq: Any, line: LineSettings, cycle: int, cycles: i
         st.course_spin_lead_deg = round(creq.spin_lead_deg, 1)
         store.save_settings(st)
     auto_runner.message = f"{cycle}/{cycles}회 · {turned or 0:.0f}° 회전 → 유도선 찾기"
-    await co._find_guide(ctl, 0, creq, line)
+    line_dir = co.runner.target_deg
+    found, off = await co._find_guide(ctl, 0, creq, line, cam)
     if await co._on_cross(ctl, creq, line):
         return
-    # 뒷축 근처를 중심으로 돌았으므로 가로 테이프는 대개 센서 뒤쪽(차 길이만큼)에 있습니다: 조금 빠르게 후진해 찾고 맞춤
-    auto_runner._phase("aligning", None, f"{cycle}/{cycles}회 · 가로 테이프가 센서 밑에 올 때까지 후진")
+    # 뒷축 근처를 중심으로 돌았으므로 가로 테이프는 대개 센서 뒤쪽(차 길이만큼)에 있습니다.
+    # 유도선이 옆에 있으면, 후진하는 동안 코를 반대쪽으로 조금 틀어 차가 옆으로 유도선 쪽으로 옮겨 가게 합니다
+    # (왼쪽으로 옮기려면 코를 오른쪽으로: 뒤로 가면서 왼쪽으로 감). 약 27 cm 후진하는 동안 최대 7 cm.
+    tilt_deg = 0.0
+    if off is not None and abs(off) > 0.008:
+        tilt_deg = max(-15.0, min(15.0, math.degrees(math.asin(max(-0.95, min(0.95, off / 0.27))))))
+        co.runner.target_deg = line_dir - tilt_deg
+        await co._face_target(ctl, creq, tol=3.0)
+    auto_runner._phase("aligning", None, f"{cycle}/{cycles}회 · 가로 테이프가 센서 밑에 올 때까지 후진"
+                       + (f" (유도선이 {'왼' if off and off > 0 else '오른'}쪽 {abs(off or 0) * 100:.0f} cm → 비스듬히)" if tilt_deg else ""))
     duty_req = creq.model_copy(update={"condition": creq.condition.model_copy(update={"output_mode": "duty"})})
     pol = store.load_settings().heading_sign
     duty = min(100.0, creq.creep_duty * 1.25)
@@ -1253,6 +1294,9 @@ async def _turn_around(ctl, creq: Any, line: LineSettings, cycle: int, cycles: i
         auto_runner.message = f"{cycle}/{cycles}회 · 뒤에 없어 앞으로 가로 테이프를 찾습니다"
         fwd = await co._drive_until_cross(ctl, 0, duty_req, line, "forward", duty, 0.15, 0.12, 3.0, 0.0, "gyro", polarity=pol, skip=0)
         first = "backward" if fwd["detected"] else "forward"
+    if tilt_deg:
+        co.runner.target_deg = line_dir          # 가로선에서 다시 유도선 방향으로 곧게
+        await co._face_target(ctl, creq, tol=3.0)
     # 감속하며 조금 지나쳤을 수 있으므로 반대로 천천히 맞춤
     if not await co._align_on_cross(ctl, creq, line, first, 2.0):
         raise RuntimeError("회전 뒤 가로 테이프를 다시 찾지 못했습니다(회전하며 많이 밀렸거나 유도선에서 벗어남).")
@@ -1321,6 +1365,13 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
             # 감속 제어 시행은 관계식을 만드는 데 쓰지 않고 '검증'으로 저장합니다(관계식 → 제어 → 실측 비교).
             opts["slowdown_plan"] = slowdown_plan(cond, settings, request.slowdown, simulated)
             cond = cond.model_copy(update={"purpose": "validation", "note": (cond.note + " · " if cond.note else "") + "감속 제어"})
+        if stop_line and settings.line.camera_assist:
+            from .camera import camera_service
+            try:
+                ctl.adapter.set_camera_view(0, int(round(settings.linecam.tilt_deg)))
+            except Exception:
+                pass
+            opts["lcam"] = LineCam(lambda: camera_service.capture_array(step=4), settings.linecam).start()
         if stop_line:
             # 출발선 위에서 자이로 영점을 한 번 잡고(이후에는 방향만 0으로), 센서가 출발선 위에 오게 맞춥니다.
             co.runner.gen = ctl.stop_generation
@@ -1369,7 +1420,7 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                     raise RuntimeError("출발선 위에 차를 맞추지 못했습니다.")
                 opts["ref_offset"] = _next_ref_offset(co.runner.target_deg)
             elif stop_line and rm == "uturn":
-                await _turn_around(ctl, creq, line, i + 1, opts["repeats"])
+                await _turn_around(ctl, creq, line, i + 1, opts["repeats"], opts.get("lcam"))
                 opts["ref_offset"] = _next_ref_offset(co.runner.target_deg)
             elif opts["return_enabled"]:
                 gen = ctl.stop_generation
@@ -1419,6 +1470,8 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
         record_event("experiment", "Auto run failed", level="ERROR", details={"error": str(exc)})
     finally:
         mpu6050_service.heading_stop()
+        if opts.get("lcam") is not None:
+            opts["lcam"].stop()
         from .camera import camera_service
         camera_service.paused = False
 
@@ -2035,8 +2088,12 @@ async def line_status():
     except Exception as exc:
         error = str(exc)
     w = weights(raw or [], settings)
+    from .course import is_cross
     return {"raw": raw, "weights": w, "position": position(w, settings), "settings": settings.model_dump(),
-            "calibrated": bool(settings.floor and settings.line), "error": error, "runner": line_runner.snapshot()}
+            "calibrated": bool(settings.floor and settings.line), "error": error, "runner": line_runner.snapshot(),
+            "cross": is_cross(raw, settings, store.load_settings().cross_threshold) if w else None,
+            "check": calibration_check(settings) if settings.floor and settings.line else [],
+            "auto_cal": dict(auto_cal_state)}
 
 
 class LineCalibrate(BaseModel):
@@ -2058,7 +2115,68 @@ async def line_calibrate(body: LineCalibrate):
     settings = store.load_settings()
     setattr(settings.line, body.target, mean)
     store.save_settings(settings)
-    return {"target": body.target, "values": mean, "settings": settings.line.model_dump()}
+    return {"target": body.target, "values": mean, "settings": settings.line.model_dump(),
+            "check": calibration_check(settings.line) if settings.line.floor and settings.line.line else []}
+
+
+auto_cal_state: dict[str, Any] = {"state": "idle", "message": ""}
+
+
+@router.post("/line/auto_calibrate")
+async def line_auto_calibrate():
+    """자동 보정: 바닥 센서를 유도선 위에 두면, 차가 제자리에서 왼쪽 25° → 오른쪽 25° → 가운데로 천천히 돌며
+    센서 3개가 각각 테이프와 바닥을 지나가게 하고, 센서마다 가장 어두운 값(테이프)과 가장 밝은 값(바닥)을 저장합니다."""
+    from .course import Stopped, runner as crun, _face_target, CourseRequest
+    ctl = control()
+    if ctl.adapter.mode != "hardware":
+        raise HTTPException(409, "자동 보정은 실제 차량에서만 됩니다.")
+    if auto_runner.busy or any(f() for f in extra_busy):
+        raise HTTPException(409, "다른 주행이 진행 중입니다.")
+    mpu6050_service.heading_stop()
+    await asyncio.sleep(0.5)
+    if not mpu6050_service.heading_reset():
+        raise HTTPException(409, "자동 보정은 자이로가 필요합니다. 센서 화면에서 MPU-6050 정지 보정을 먼저 하세요.")
+    auto_cal_state.update(state="running", message="제자리에서 좌우로 돌며 센서값을 모읍니다")
+    lo, hi = [1e9] * 3, [-1e9] * 3
+    crun.gen = ctl.stop_generation
+    crun.target_deg = 0.0
+    try:
+        for direction, goal in (("left", 25.0), ("right", -25.0)):
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 3.0:
+                h = mpu6050_service.heading_deg() or 0.0
+                if (direction == "left" and h >= goal) or (direction == "right" and h <= goal):
+                    break
+                if not await ctl.experiment_spin(direction, 60, crun.gen):
+                    raise Stopped()
+                for _ in range(4):
+                    raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+                    if raw:
+                        for i in range(3):
+                            lo[i], hi[i] = min(lo[i], raw[i]), max(hi[i], raw[i])
+                    await asyncio.sleep(0.002)
+            await ctl.stop(reason="line_auto_cal")
+            crun.gen = ctl.stop_generation
+            await asyncio.sleep(0.2)
+        await _face_target(ctl, CourseRequest(condition=ExperimentCondition(bump_id="A", base_mass_g=1, output_value=1)))
+    except Stopped:
+        auto_cal_state.update(state="error", message="정지 명령으로 멈췄습니다.")
+        raise HTTPException(409, "정지 명령으로 멈췄습니다.")
+    finally:
+        await ctl.stop(reason="line_auto_cal_end")
+        mpu6050_service.heading_stop()
+    if min(hi) < 0 or max(lo) > 1e8:
+        auto_cal_state.update(state="error", message="센서값을 읽지 못했습니다.")
+        raise HTTPException(503, "그레이스케일 센서값을 읽지 못했습니다.")
+    settings = store.load_settings()
+    # 밝은 바닥에 검은 테이프: 바닥 = 가장 밝은 값, 테이프 = 가장 어두운 값(조금 안쪽으로: 잡음 여유 5%)
+    settings.line.floor = [round(h - 0.05 * (h - l), 1) for h, l in zip(hi, lo)]
+    settings.line.line = [round(l + 0.05 * (h - l), 1) for h, l in zip(hi, lo)]
+    check = calibration_check(settings.line)
+    store.save_settings(settings)
+    auto_cal_state.update(state="done" if not check else "warn",
+                          message="자동 보정 완료" if not check else "자동 보정했지만 확인이 필요합니다: " + " ".join(check))
+    return {"floor": settings.line.floor, "line": settings.line.line, "check": check, "settings": settings.line.model_dump()}
 
 
 @router.put("/line/settings")
@@ -2088,8 +2206,16 @@ async def line_start(body: LineRunRequest):
         st = store.load_settings()
         st.line.steer_sign = sign
         store.save_settings(st)
+    def learn_ff(mean: float) -> None:
+        st = store.load_settings()
+        st.line.steer_ff_deg = round(max(-10.0, min(10.0, 0.5 * st.line.steer_ff_deg + 0.5 * mean)), 2)
+        store.save_settings(st)
+    guided = None
+    if ctl.adapter.mode == "hardware" and mpu6050_service.heading_reset():
+        # 자이로가 있으면 측정 주행과 같은 '유도선 + 자이로' 조향(방지턱 위 직진 고정, 학습된 직진 조향)으로 시험
+        guided = GuidedSteer(settings, polarity=store.load_settings().heading_sign)
     line_runner.task = asyncio.create_task(line_runner.run(ctl, ctl.adapter.read_grayscale, settings, body.output_mode, body.output_value,
-                                                           body.seconds, on_flip=save_sign))
+                                                           body.seconds, on_flip=save_sign, guided=guided, on_learn=learn_ff))
     await asyncio.sleep(0)
     return line_runner.snapshot()
 

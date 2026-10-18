@@ -29,18 +29,69 @@ def test_tape_on_right_steers_right_and_left_steers_left():
     assert steer < -3
 
 
-def test_bump_ignores_tape_and_holds_heading():
-    g = GuidedSteer(S, ref_deg=0.0)
-    _run(g, ON, 0.0)
-    # 방지턱 위(기울기 5°): 센서가 오른쪽 테이프를 보는 것처럼 읽혀도 무시하고,
-    # 턱에 부딪혀 왼쪽으로 8° 틀어진 것만 되돌림(오른쪽 조향 +)
-    steer, ok, _ = _run(g, RIGHT, 8.0, tilt=(5.0, 0.0), n=15)
+def test_bump_keeps_wheels_straight_by_default():
+    # 기본(straight): 방지턱 위에서는 좌우로 꺾지 않고 학습된 직진 조향에 고정 → 충격 피크가 조향에 흔들리지 않음
+    s2 = S.model_copy(update={"steer_ff_deg": 1.3})
+    g = GuidedSteer(s2, ref_deg=0.0)
+    _, _, t = _run(g, ON, 0.0)
+    steer, ok, t = _run(g, RIGHT, 8.0, tilt=(5.0, 0.0), n=15, t0=t)
+    assert ok and g.mode == "bump" and steer == 1.3
+    # 턱을 지나면(0.25초 뒤) 틀어진 방향을 바로잡음(왼쪽으로 8° 틀어짐 → 오른쪽 조향)
+    steer, _, _ = _run(g, ON, 8.0, n=30, t0=t)
+    assert g.mode != "bump" and steer > 3
+
+
+def test_bump_hold_mode_steers_back_on_bump():
+    s2 = S.model_copy(update={"bump_steer": "hold"})
+    g = GuidedSteer(s2, ref_deg=0.0)
+    _, _, t = _run(g, ON, 0.0)
+    steer, ok, _ = _run(g, RIGHT, 8.0, tilt=(5.0, 0.0), n=15, t0=t)
     assert ok and g.mode == "bump" and steer > 5
-    # 반대로 오른쪽으로 틀어지면 왼쪽 조향
-    g2 = GuidedSteer(S, ref_deg=0.0)
+    g2 = GuidedSteer(s2, ref_deg=0.0)
     _, _, t = _run(g2, ON, 0.0)
     steer, _, _ = _run(g2, LEFT, -8.0, tilt=(5.0, 0.0), n=15, t0=t)
     assert g2.mode == "bump" and steer < -5
+
+
+def test_calibration_check_flags_side_sensor_that_never_saw_tape():
+    from app.line_follow import calibration_check
+    bad = LineSettings(floor=[1200, 1200, 1200], line=[1180, 300, 1150])   # 좁은 유도선 위에서 '테이프' 보정
+    msgs = calibration_check(bad)
+    assert any("왼쪽" in m for m in msgs) and any("오른쪽" in m for m in msgs)
+    assert calibration_check(S) == []
+
+
+def test_learns_straight_steer_when_centered():
+    g = GuidedSteer(S, ref_deg=0.0)
+    _run(g, ON, 0.0, n=100)
+    assert g.summary()["steer_calm_mean"] is not None
+
+
+def test_camera_line_scan_finds_guide_and_cross():
+    import numpy as np
+    from app.vision import LineCam, LineCamSettings, line_scan
+    img = np.full((120, 160, 3), 220.0)
+    img[:, 95:105] = 30                       # 유도선이 오른쪽
+    r = line_scan(img, LineCamSettings())
+    assert r["guide"] > 0.1 and r["cross_y"] is None
+    img2 = img.copy()
+    img2[105:115, :] = 30                     # 화면 아래쪽 가로선
+    r2 = line_scan(img2, LineCamSettings())
+    assert r2["cross_y"] > 0.7
+    cam = LineCam(lambda: None, LineCamSettings())
+    cam.feed(r2, 1.0)
+    cam.feed(r, 1.2)                          # 가로선이 화면 아래로 사라짐 → 차 밑으로 들어감
+    assert cam.cross_passed_at == 1.2
+
+
+def test_lost_uses_camera_guide():
+    class Cam:
+        def guide(self, now=None):
+            return -0.8                        # 카메라: 유도선이 왼쪽
+    g = GuidedSteer(S, ref_deg=0.0, cam=Cam())
+    _, _, t = _run(g, ON, 0.0)
+    steer, ok, _ = _run(g, OFF, 0.0, n=20, t0=t)
+    assert g.mode == "lost" and steer < 0 and g.cam_used > 0
 
 
 def test_lost_after_drift_goes_back_toward_estimated_side():

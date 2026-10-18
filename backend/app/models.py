@@ -12,7 +12,7 @@ class TimedDrive(BaseModel):
     seconds: float = Field(ge=0.2, le=30, description="이 시간만큼 달린 뒤 자동 정지")
 
 class CalibrationUpdate(BaseModel):
-    steering_center: int | None = Field(default=None, ge=-20, le=20)
+    steering_center: float | None = Field(default=None, ge=-20, le=20)
     pan_center: int | None = Field(default=None, ge=-30, le=30)
     tilt_center: int | None = Field(default=None, ge=-30, le=30)
 
