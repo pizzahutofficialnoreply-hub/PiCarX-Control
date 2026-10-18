@@ -102,11 +102,11 @@ class MPU6050Service:
     @staticmethod
     def _corrupt(words: list[int], prev: list[int] | None) -> bool:
         """I²C 전송 오류로 깨진 값(실측에서 확인한 모양):
-          - 자이로 세 축이 모두 정확히 0
+          - 자이로 세 축이 모두 같은 값(0 또는 -1: 읽기가 중간에 끊겨 뒷부분이 00 또는 FF로 채워짐)
           - 가속도 한 축의 아래 12비트가 0(정확히 0·1·2·4·8 g)이면서 직전 값과 300 LSB(0.07 g) 넘게 다름
           - 여섯 값 중 둘 이상의 아래 바이트가 0"""
         return prev is not None and (
-            words[3] == words[4] == words[5] == 0
+            words[3] == words[4] == words[5] in (0, -1)
             or any((w & 0x0FFF) == 0 and abs(w - p) > 300 for w, p in zip(words[:3], prev[:3]))
             or sum(1 for w in words if (w & 0xFF) == 0 and abs(w) >= 256) >= 2
         )

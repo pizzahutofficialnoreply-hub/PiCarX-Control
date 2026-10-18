@@ -154,3 +154,12 @@ def test_fifo_misaligned_frames_trigger_realign():
         m._bus = Bus(shifted)
         m._fifo_read()
     assert m._fifo is False                     # 500 Hz에서도 계속 밀리면 직접 읽기로
+
+
+def test_truncated_read_filled_with_ff_is_rejected():
+    from app.mpu6050 import MPU6050Service as MPU6050
+    prev = [-100, 100, 4500, -140, 95, -74]
+    # 실측: az 7.9998 g(0x7FFF), 자이로 셋 다 -1 → 끊긴 읽기
+    assert MPU6050._corrupt([-246, 1409, 32767, -1, -1, -1], prev)
+    assert MPU6050._corrupt([-1000, -1, -1, -1, -1, -1], prev)
+    assert not MPU6050._corrupt([-120, 110, 4600, -150, 90, -70], prev)
