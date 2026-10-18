@@ -78,3 +78,35 @@ class MPU6050ServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_fifo_read_parses_frames_with_even_timestamps():
+    """센서 내장 버퍼(FIFO): 12바이트 표본을 한꺼번에 읽고, 시각은 표본 번호 × 간격으로 고르게 매김."""
+    from app.mpu6050 import MPU6050Service
+
+    def w(v):
+        r = int(v) & 0xFFFF
+        return [r >> 8, r & 0xFF]
+
+    frames = []
+    for i in range(10):
+        frames += w(100 + i) + w(-3) + w(4096) + w(5) + w(-7) + w(65)
+    class Bus:
+        def __init__(self):
+            self.buf = list(frames)
+        def read_i2c_block_data(self, addr, reg, length):
+            if reg == 0x72:
+                return [len(self.buf) >> 8, len(self.buf) & 0xFF]
+            out, self.buf = self.buf[:length], self.buf[length:]
+            return out
+    m = MPU6050Service()
+    m._bus = Bus()
+    m._fifo_dt = 0.001
+    m._fifo_k = 0
+    import time
+    m._fifo_t0 = time.monotonic() - 0.009
+    out = m._fifo_read()
+    assert len(out) == 10
+    assert abs(out[0][3] - 1.0) < 1e-6 and abs(out[0][6] - 1.0) < 0.01   # az = 1 g, gz = 65/65.5
+    gaps = [b[0] - a[0] for a, b in zip(out, out[1:])]
+    assert max(gaps) - min(gaps) < 1e-9 and abs(gaps[0] - 0.001) < 1e-4

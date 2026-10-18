@@ -57,6 +57,14 @@ class MPU6050Service:
         self._prev_words: list[int] | None = None
         self.bad_reads = 0
         self.io_errors = 0
+        self.fifo_overflows = 0
+        self.use_fifo = True          # 센서 내장 버퍼로 읽기(실패하면 한 표본씩 직접 읽기로 돌아감)
+        self._fifo = False
+        self._fifo_dt = 0.001
+        self._fifo_k = 0
+        self._fifo_t0 = 0.0
+        self._fifo_prev_words: list[int] | None = None
+        self.fifo_note = ""
         self._fail_streak = 0
         self._vertical_axis = 2      # 0=x, 1=y, 2=z (보정 시 중력 방향 축)
         self._vertical_sign = 1.0
@@ -88,6 +96,95 @@ class MPU6050Service:
             import smbus  # type: ignore
             return smbus.SMBus(1)
 
+    @staticmethod
+    def _corrupt(words: list[int], prev: list[int] | None) -> bool:
+        """I²C 전송 오류로 깨진 값(실측에서 확인한 모양):
+          - 자이로 세 축이 모두 정확히 0
+          - 가속도 한 축의 아래 12비트가 0(정확히 0·1·2·4·8 g)이면서 직전 값과 300 LSB(0.07 g) 넘게 다름
+          - 여섯 값 중 둘 이상의 아래 바이트가 0"""
+        return prev is not None and (
+            words[3] == words[4] == words[5] == 0
+            or any((w & 0x0FFF) == 0 and abs(w - p) > 300 for w, p in zip(words[:3], prev[:3]))
+            or sum(1 for w in words if (w & 0xFF) == 0 and abs(w) >= 256) >= 2
+        )
+
+    # ------------------------------------------------------------------ FIFO(센서 내장 버퍼)
+    # 센서가 스스로 정해진 간격(1 kHz 또는 500 Hz)으로 표본을 1024바이트 버퍼에 쌓고, 프로그램은 몇 ms마다 한꺼번에 읽습니다.
+    # 그래서 파이썬이 다른 일(카메라·웹 요청·바닥 센서·모터 명령)로 10~50 ms 멈춰도 표본이 빠지지 않고,
+    # 표본 시각도 센서 시계(표본 번호 × 간격)라 고르게 됩니다. 버퍼는 1 kHz에서 약 85 ms까지 담습니다.
+    FIFO_FRAME = 12          # 가속도 6 + 자이로 6 바이트(온도 제외)
+    FIFO_CHUNK = 24          # I²C 블록 읽기 한 번(최대 32바이트)에 표본 2개
+
+    def _fifo_setup(self, bus) -> None:
+        a = self.ADDRESS
+        bus.write_byte_data(a, 0x23, 0x00)        # FIFO_EN: 끔
+        bus.write_byte_data(a, 0x6A, 0x04)        # USER_CTRL: FIFO 비우기
+        time.sleep(0.005)
+        bus.write_byte_data(a, 0x6A, 0x40)        # USER_CTRL: FIFO 켜기
+        bus.write_byte_data(a, 0x23, 0x78)        # FIFO_EN: 자이로 x·y·z + 가속도
+        self._fifo_k = 0
+        self._fifo_t0 = time.monotonic()
+        self._fifo_prev_words = None
+
+    def _probe_bus_speed(self, bus) -> float:
+        """24바이트 블록 읽기 한 번에 걸리는 시간(초). 100 kHz면 약 2.5 ms, 400 kHz면 약 0.7 ms."""
+        times = []
+        for _ in range(8):
+            t = time.perf_counter()
+            bus.read_i2c_block_data(self.ADDRESS, 0x3B, self.FIFO_CHUNK)
+            times.append(time.perf_counter() - t)
+        times.sort()
+        return times[len(times) // 2]
+
+    def _fifo_read(self) -> list[Sample]:
+        bus = self._bus
+        a = self.ADDRESS
+        with self._i2c_lock:
+            hi, lo = bus.read_i2c_block_data(a, 0x72, 2)
+        count = (hi << 8) | lo
+        if count >= 1008:
+            # 버퍼가 넘침(파이썬이 85 ms 넘게 멈춤): 비우고 다시 시작. 이 구간은 공백으로 남습니다.
+            self.fifo_overflows += 1
+            with self._i2c_lock:
+                bus.write_byte_data(a, 0x6A, 0x44)   # FIFO 켠 채로 비우기
+            self._fifo_k = 0
+            self._fifo_t0 = time.monotonic()
+            return []
+        n = count // self.FIFO_FRAME
+        if n == 0:
+            return []
+        n = min(n, 40)          # 한 번에 너무 오래 잡지 않게(다른 I²C 장치도 써야 함)
+        data: list[int] = []
+        remaining = n * self.FIFO_FRAME
+        while remaining > 0:
+            chunk = min(self.FIFO_CHUNK, remaining)
+            with self._i2c_lock:
+                data += bus.read_i2c_block_data(a, 0x74, chunk)
+            remaining -= chunk
+        now = time.monotonic()
+        dt = self._fifo_dt
+        # 표본 시각 = 시작 시각 + 표본 번호 × 간격. 센서 시계와 컴퓨터 시계의 작은 차이(±1~2%)는 천천히 맞춤.
+        last_k = self._fifo_k + n - 1
+        err = now - (self._fifo_t0 + last_k * dt)
+        if abs(err) > 0.1:
+            self._fifo_t0 = now - last_k * dt
+        else:
+            self._fifo_t0 += 0.05 * err
+        out: list[Sample] = []
+        acc, gs = self.ACCEL_SENSITIVITY, self.GYRO_SENSITIVITY
+        for i in range(n):
+            d = data[i * 12:(i + 1) * 12]
+            words = [_signed(d[k], d[k + 1]) for k in (0, 2, 4, 6, 8, 10)]
+            k = self._fifo_k + i
+            if self._corrupt(words, self._fifo_prev_words):
+                self.bad_reads += 1
+                continue
+            self._fifo_prev_words = words
+            out.append((self._fifo_t0 + k * dt, words[0] / acc, words[1] / acc, words[2] / acc,
+                        words[3] / gs, words[4] / gs, words[5] / gs))
+        self._fifo_k += n
+        return out
+
     def _read_raw(self) -> Sample:
         bus = self._bus
         if bus is None:
@@ -98,15 +195,7 @@ class MPU6050Service:
         words = [_signed(d[k], d[k + 1]) for k in (0, 2, 4, 8, 10, 12)]
         prev = self._prev_words
         self._prev_words = words
-        # I²C 전송 오류로 깨진 값 거르기(실측에서 확인한 모양):
-        #  - 자이로 세 축이 모두 정확히 0
-        #  - 가속도 한 축의 아래 12비트가 0(정확히 0·1·2·4·8 g)이면서 직전 값과 300 LSB(0.07 g) 넘게 다름
-        #  - 여섯 값 중 둘 이상의 아래 바이트가 0
-        if prev is not None and (
-            words[3] == words[4] == words[5] == 0
-            or any((w & 0x0FFF) == 0 and abs(w - p) > 300 for w, p in zip(words[:3], prev[:3]))
-            or sum(1 for w in words if (w & 0xFF) == 0 and abs(w) >= 256) >= 2
-        ):
+        if self._corrupt(words, prev):
             self._prev_words = prev
             raise _BadRead()
         a = self.ACCEL_SENSITIVITY
@@ -133,6 +222,24 @@ class MPU6050Service:
                 bus.write_byte_data(self.ADDRESS, 0x1B, 0x08)  # gyro ±500 deg/s
                 bus.write_byte_data(self.ADDRESS, 0x1C, 0x10)  # accel ±8 g
                 time.sleep(0.05)
+                self._fifo = False
+                if self.use_fifo:
+                    try:
+                        per = self._probe_bus_speed(bus)
+                        # 표본 2개(24바이트)를 읽는 데 1 ms 넘게 걸리면(I²C 100 kHz) 1 kHz를 따라갈 수 없어 500 Hz로
+                        if per > 0.0011:
+                            bus.write_byte_data(self.ADDRESS, 0x19, 0x01)  # SMPLRT_DIV 1 → 500 Hz
+                            self._fifo_dt = 0.002
+                            self.fifo_note = (f"I²C가 느려(24바이트 {per * 1000:.1f} ms) 센서 버퍼를 500 Hz로 씁니다. "
+                                              "/boot/firmware/config.txt에 dtparam=i2c_arm_baudrate=400000을 넣으면 1 kHz가 됩니다.")
+                        else:
+                            self._fifo_dt = 0.001
+                            self.fifo_note = "센서 버퍼 1 kHz"
+                        self._fifo_setup(bus)
+                        self._fifo = True
+                    except Exception as exc:
+                        self._fifo = False
+                        self.fifo_note = f"센서 버퍼를 못 써서 직접 읽기: {exc}"
                 self._bus = bus
                 self._running = True
                 self._available = True
@@ -147,28 +254,48 @@ class MPU6050Service:
                 self._error = f"MPU-6050 초기화 실패: {exc}"
                 return False
 
+    def _ingest(self, sample: Sample, max_record: int) -> None:
+        with self._lock:
+            if self._heading_active and self._last_t is not None and self._bias is not None:
+                yaw = self._vertical_sign * sample[4 + self._vertical_axis] - self._gyro_bias
+                dt = sample[0] - self._last_t
+                self._heading += yaw * dt
+                for n, ax in enumerate(a for a in range(3) if a != self._vertical_axis):
+                    self._tilt[n] += (sample[4 + ax] - self._tilt_bias[n]) * dt
+            self._last_t = sample[0]
+            self._samples.append(sample)
+            if self._recording:
+                if len(self._record) < max_record:
+                    self._record.append(sample)
+                    self._update_peak(sample)
+                else:
+                    self._recording = False
+                    self._error = f"최대 기록 시간 {int(self.MAX_RECORD_SECONDS)}초에 도달해 기록을 멈췄습니다."
+
     def _sample_loop(self) -> None:
         next_tick = time.monotonic()
         max_record = int(self.MAX_RECORD_SECONDS / self.SAMPLE_INTERVAL)
         while self._running:
+            if self._fifo:
+                try:
+                    batch = self._fifo_read()
+                    for sample in batch:
+                        self._ingest(sample, max_record)
+                    self._fail_streak = 0
+                except Exception as exc:
+                    self.io_errors += 1
+                    self._fail_streak += 1
+                    if self._fail_streak > 50:
+                        # 버퍼 읽기가 계속 실패하면 예전 방식(한 표본씩)으로 돌아감
+                        self._fifo = False
+                        self.fifo_note = f"센서 버퍼 읽기가 계속 실패해 직접 읽기로 바꿨습니다: {exc}"
+                    time.sleep(0.002)
+                    continue
+                time.sleep(0.004)   # 4 ms마다 모아 읽기(버퍼는 85 ms까지 담음)
+                continue
             try:
                 sample = self._read_raw()
-                with self._lock:
-                    if self._heading_active and self._last_t is not None and self._bias is not None:
-                        yaw = self._vertical_sign * sample[4 + self._vertical_axis] - self._gyro_bias
-                        dt = sample[0] - self._last_t
-                        self._heading += yaw * dt
-                        for n, ax in enumerate(a for a in range(3) if a != self._vertical_axis):
-                            self._tilt[n] += (sample[4 + ax] - self._tilt_bias[n]) * dt
-                    self._last_t = sample[0]
-                    self._samples.append(sample)
-                    if self._recording:
-                        if len(self._record) < max_record:
-                            self._record.append(sample)
-                            self._update_peak(sample)
-                        else:
-                            self._recording = False
-                            self._error = f"최대 기록 시간 {int(self.MAX_RECORD_SECONDS)}초에 도달해 기록을 멈췄습니다."
+                self._ingest(sample, max_record)
             except _BadRead:
                 self.bad_reads += 1
                 continue  # 바로 다시 읽음(공백 없이)
@@ -466,7 +593,10 @@ class MPU6050Service:
             "actual_sample_rate_hz": _rate(live),
             "calibration_stability_g": self._calibration_stability_g,
             "peak": self._derived(peak) if peak else None,
-            "sample_rate_target_hz": int(round(1 / self.SAMPLE_INTERVAL)),
+            "sample_rate_target_hz": int(round(1 / (self._fifo_dt if self._fifo else self.SAMPLE_INTERVAL))),
+            "read_mode": "fifo" if self._fifo else "direct",
+            "fifo_overflows": self.fifo_overflows,
+            "fifo_note": self.fifo_note,
             "range_g": 8,
             "error": error,
         }

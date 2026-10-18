@@ -375,6 +375,10 @@ sudo systemctl daemon-reload
 
 `backend/devtools/fake_hardware/`의 가짜 picarx·MPU-6050으로 센서 보정·측정·내보내기, 반복 측정, 직진 보정을 PC에서 시험할 수 있습니다. 사용법은 그 폴더의 README를 보세요.
 
+## 센서 기록이 중간에 끊기는 문제(센서 내장 버퍼)
+
+예전에는 파이썬이 MPU-6050 값을 한 표본씩 읽어서, 카메라·웹 요청·바닥 센서·모터 명령으로 잠깐(10~50 ms) 멈추면 그동안 표본이 빠졌습니다(실측: 평균 약 600 Hz, 한 회에 8 ms 넘는 공백 약 50번). 이제는 센서의 내장 버퍼(FIFO, 1024바이트)를 씁니다. 센서가 스스로 정해진 간격으로 표본을 쌓고 프로그램은 4 ms마다 모아 읽으므로, 85 ms(1 kHz 기준)보다 짧게 멈추면 표본이 빠지지 않고 시각도 센서 시계로 고르게 매겨집니다. 시작할 때 I²C 속도를 재서, 느리면(100 kHz) 500 Hz, 빠르면(400 kHz) 1 kHz로 둡니다. 1 kHz를 쓰려면 `/boot/firmware/config.txt`에 `dtparam=i2c_arm_baudrate=400000`을 넣고 재부팅하세요. 센서 상태의 `read_mode`(fifo/direct), `sample_rate_target_hz`, `fifo_overflows`로 확인합니다.
+
 ## 라즈베리파이 준비
 
 - I²C 속도를 400 kHz로 올리면 표본 속도가 좋아집니다. `/boot/firmware/config.txt`(구버전 `/boot/config.txt`)에 `dtparam=i2c_arm_baudrate=400000`을 추가하고 재부팅하세요.
