@@ -6,6 +6,7 @@ import { XYChart } from '../components/ExperimentCharts';
 import type { ExperimentContext } from './context';
 import NumInput from '../components/NumInput';
 import { usePersistentState } from '../services/persist';
+import HelpBox from '../components/HelpBox';
 
 export default function ValidationTab({ ctx }: { ctx: ExperimentContext }) {
   const { data, settings, condition } = ctx;
@@ -48,6 +49,13 @@ export default function ValidationTab({ ctx }: { ctx: ExperimentContext }) {
   }
 
   return <>
+    <HelpBox id="validate-intro" title="검증 탭은 무엇을 하나요?">
+      <ul>
+        <li>식을 만들 때 <b>쓰지 않은</b> 새 조건(다른 질량·속도)으로 달려, 식이 예측한 충격과 실제 충격을 비교합니다. 식을 만든 데이터로 다시 맞춰 보는 것은 검증이 아닙니다.</li>
+        <li>오차가 RMSE(평균 오차) 안에 들어오면 식이 믿을 만하다고 볼 수 있습니다. 측정 범위 밖(외삽)은 오차가 커지기 쉬우니 따로 표시합니다.</li>
+        <li>검증용으로 잰 회차는 목적이 '검증'으로 저장되어 본 실험 식에는 섞이지 않습니다.</li>
+      </ul>
+    </HelpBox>
     <section className="card experiment-card">
       <div className="card-head"><div><h2>식 검증</h2><p>본 실험 데이터로 만든 관계식이 <b>실험하지 않은 조건</b>(예: 새로운 질량 +75 g, +225 g)에서도 맞는지 확인합니다. 아래에서 조건을 고르면 식이 예측한 충격과 필요한 출력을 보여 주고, '검증 측정'은 그 조건으로 자동 측정해 <b>식 검증</b> 시행으로 저장합니다. 검증 시행은 관계식 계산에 쓰지 않습니다.</p></div></div>
       {!model ? <div className="empty-chart">아직 관계식이 없습니다. 측정·분석 탭에서 본 실험(속도 2단계 이상)을 먼저 하세요.</div> : <>

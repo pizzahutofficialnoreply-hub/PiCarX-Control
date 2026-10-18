@@ -2,7 +2,7 @@
 // 화면에 보이는 그대로 PNG/SVG로 저장합니다.
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Download, Image as ImageIcon } from 'lucide-react';
-import { modelPredict, modelSolveSpeed, type ConditionGroup, type ModelResult, type PowerFit, type RunAnalysis, type RunSummary } from '../services/experiment';
+import { EVENT_INFO, modelPredict, modelSolveSpeed, type ConditionGroup, type ModelResult, type PowerFit, type RunAnalysis, type RunSummary } from '../services/experiment';
 import { usePersistentState } from '../services/persist';
 
 const W = 640, H = 360, M = { l: 58, r: 18, t: 30, b: 48 };
@@ -148,6 +148,7 @@ export function RunTraceChart(props: {
       ...analysis,
       front_t_s: shiftT(analysis.front_t_s, t0), rear_t_s: shiftT(analysis.rear_t_s, t0), peak_t_s: shiftT(analysis.peak_t_s, t0), landing_t_s: shiftT(analysis.landing_t_s, t0),
       candidates: (analysis.candidates ?? []).map(c => ({ ...c, t_s: c.t_s - t0 })),
+      events: (analysis.events ?? []).map(e => ({ ...e, t_s: e.t_s - t0, peak_t_s: e.peak_t_s - t0 })),
       auto_pair: analysis.auto_pair ? { ...analysis.auto_pair, front_t_s: analysis.auto_pair.front_t_s - t0, rear_t_s: analysis.auto_pair.rear_t_s - t0 } : analysis.auto_pair,
     } as RunAnalysis,
   }, [series, analysis, t0]);
@@ -214,8 +215,12 @@ function RunTraceChartInner({ series, analysis, thresholdDelta, jumpG, title, na
       {showCandidates && cands.map(c => c.t_s < x[0] || c.t_s > x[1] ? null :
         <g key={'cand' + c.n} fontFamily={FONT}><line x1={sx(c.t_s)} x2={sx(c.t_s)} y1={M.t + 18} y2={M.t + PH} stroke="#6a737d" strokeDasharray="1 3" />
           <rect x={sx(c.t_s) - 22} y={M.t + 2} width={44} height={15} rx={4} fill="#fff" stroke="#6a737d" /><text x={sx(c.t_s)} y={M.t + 13} fontSize={10} textAnchor="middle" fill={INK} fontWeight={600}>후보 {c.n}</text></g>)}
+      {(() => { const ev = analysis.events ?? []; const f = ev.find(e => e.kind === 'FU'), fd = ev.find(e => e.kind === 'FD'), r = ev.find(e => e.kind === 'RU'), rd = ev.find(e => e.kind === 'RD');
+        const band = (a?: { t_s: number }, b?: { t_s: number }, color?: string, label?: string) => a && b && b.t_s > x[0] && a.t_s < x[1] ? <g fontFamily={FONT}><rect x={sx(Math.max(x[0], a.t_s))} y={M.t} width={Math.max(0, sx(Math.min(x[1], b.t_s)) - sx(Math.max(x[0], a.t_s)))} height={PH} fill={color} opacity={0.08} /><text x={sx(Math.max(x[0], a.t_s)) + 3} y={M.t + PH - 20} fontSize={10} fill={color} {...HALO}>{label}</text></g> : null;
+        return <>{band(f, fd, '#d0782a', '앞바퀴가 턱 위')}{band(r, rd, '#3c9a5f', '뒷바퀴가 턱 위')}</>; })()}
+      {(analysis.events ?? []).length ? (analysis.events ?? []).map(e => <g key={e.kind}>{marker(e.peak_t_s, e.g, EVENT_INFO[e.kind].label, EVENT_INFO[e.kind].color)}</g>) : <>
       {marker(analysis.front_t_s, analysis.front_g, '앞바퀴', '#d0782a')}
-      {marker(analysis.rear_t_s, analysis.rear_g, '뒷바퀴', '#3c9a5f')}
+      {marker(analysis.rear_t_s, analysis.rear_g, '뒷바퀴', '#3c9a5f')}</>}
       {analysis.landing_t_s != null && analysis.landing_t_s !== analysis.rear_t_s && marker(analysis.landing_t_s, analysis.landing_g ?? null, '착지', '#a04fa0')}
       {!hasPair && analysis.peak_t_s != null && marker(analysis.peak_t_s, analysis.peak_g, '가장 큰 값', '#5d6b7a')}
       {hasPair && analysis.axle_dt_s != null && (analysis.front_t_s as number) >= x[0] && (analysis.rear_t_s as number) <= x[1] && (() => {

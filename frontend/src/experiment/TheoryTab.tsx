@@ -1,7 +1,7 @@
 // 이론·예측 탭: 목표 1(질량·속도 → 충격 예측식과 역계산), 이론식 ①②③으로 데이터 분석,
 // 직접 만드는 관계식, 목표 2(방지턱 앞 감속 제어), 초음파 거리·속력 분석.
 import { useMemo, useState } from 'react';
-import { Calculator } from 'lucide-react';
+import { Calculator, Footprints, FlaskConical, PencilRuler, Gauge, Radar } from 'lucide-react';
 import { fmt, G, outputFromSpeed, outputLabel, paramText, speedFromOutput, type ModelResult, type OutputMode } from '../services/experiment';
 import { XYChart, MASS_COLORS } from '../components/ExperimentCharts';
 import NumInput from '../components/NumInput';
@@ -11,6 +11,18 @@ import { baseEnv, builtinPredictor, bumpConst, customPredictor, linfit, loadForm
 import { solveFor } from './formula';
 import FormulaLab from './FormulaLab';
 import ControlLab from './ControlLab';
+import EventsLab from './EventsLab';
+import HelpBox from '../components/HelpBox';
+
+type Section = 'predict' | 'theory' | 'events' | 'formula' | 'control' | 'ultra';
+const SECTIONS: { id: Section; label: string; icon: typeof Calculator }[] = [
+  { id: 'predict', label: '① 예측식·계산기', icon: Calculator },
+  { id: 'theory', label: '② 이론 분석', icon: FlaskConical },
+  { id: 'events', label: '③ 단계별 충격', icon: Footprints },
+  { id: 'formula', label: '④ 내 관계식', icon: PencilRuler },
+  { id: 'control', label: '⑤ 감속 제어', icon: Gauge },
+  { id: 'ultra', label: '⑥ 초음파·카메라 거리', icon: Radar },
+];
 
 const num = (x: number, d = 3) => (Math.abs(x) >= 100 ? x.toFixed(1) : Math.abs(x) >= 1 ? x.toFixed(d) : x.toPrecision(d));
 export function builtinText(m: ModelResult): string {
@@ -44,6 +56,8 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
   const pred: Predictor | null = predId === 'builtin' ? builtin : customs.find(x => x.p.id === predId)?.p ?? builtin;
   const predF = pred?.source === 'custom' ? customs.find(x => x.p.id === pred.id)?.f ?? null : null;
   const aLimit = data?.criteria?.[bump]?.a_limit_g ?? null;
+  const [secPref, setSec] = usePersistentState<Section>('theory-section', 'predict');
+  const sec: Section = SECTIONS.some(x => x.id === secPref) ? secPref : 'predict';
 
   // ---------------- 계산기
   const [massG, setMassG] = usePersistentState('calc-massG', condition.base_mass_g + condition.added_mass_g || 600);
@@ -76,10 +90,28 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
   const speedLine = sm && sm.a != null && sm.b != null ? `v = ${num(sm.a)} + ${num(sm.b)}·P${sm.uses_mass ? ` ${sm.c >= 0 ? '+' : '−'} ${num(Math.abs(sm.c))}·m` : ''}` : null;
 
   return <div className="exp-theory">
-    <section className="card experiment-card">
+    <div className="exp-theory-top">
+      <HelpBox id="theory-intro" title="이 탭은 이런 순서로 보세요">
+        <ul>
+          <li><b>① 예측식·계산기</b>: 측정·분석 탭에서 고른 관계식으로 '질량·속도(PWM) → 충격(g, N)'과 거꾸로 '허용 충격 → 최대 속도·PWM'을 계산합니다.</li>
+          <li><b>② 이론 분석</b>: 계획서 이론 ①F=ma ②충격량 ③원운동을 데이터에 대 보고, 맞는 점과 벗어나는 이유를 봅니다(보고서 토의용).</li>
+          <li><b>③ 단계별 충격</b>: 앞바퀴 오름·내림, 뒷바퀴 오름·내림 네 순간을 따로 모아 단계마다 식과 한계 속도를 구합니다.</li>
+          <li><b>④ 내 관계식</b>: 직접 식을 만들어 맞추고, 예측식으로 쓸 수 있습니다.</li>
+          <li><b>⑤ 감속 제어</b>: ①·③의 식으로 방지턱 앞에서 얼마나 줄일지 계산해 실제로 달려 확인합니다(시간·거리·초음파·카메라로 방지턱 감지).</li>
+          <li><b>⑥ 초음파·카메라 거리</b>: 벽까지 거리로 속력을 재고, 방지턱 감지용 센서를 시험합니다.</li>
+        </ul>
+        <p>위의 방지턱 선택은 모든 칸에 함께 적용됩니다. 데이터가 바뀌면(측정·제외·재분석) 모든 칸이 자동으로 새로 계산됩니다.</p>
+      </HelpBox>
+      <div className="exp-theory-bar">
+        {bumpIds.length > 1 && <div className="segmented">{bumpIds.map(id => <button key={id} type="button" className={id === bump ? 'selected' : ''} onClick={() => setBump(id)}>방지턱 {id}</button>)}</div>}
+        {bumpIds.length <= 1 && <span className="exp-sub">방지턱 {bump}</span>}
+      </div>
+      <nav className="exp-subtabs" aria-label="이론·예측·제어 하위 메뉴">{SECTIONS.map(x => { const I = x.icon; return <button key={x.id} type="button" className={x.id === sec ? 'selected' : ''} onClick={() => setSec(x.id)}><I size={14} />{x.label}</button>; })}</nav>
+    </div>
+    {sec === 'predict' && <section className="card experiment-card">
       <div className="card-head"><div><h2><Calculator size={17} /> 목표 1 · 질량과 속도로 충격을 예측하는 식</h2>
         <p>계획서 이론 ① F = m·a 에서 a(위아래 가속도)를 실험으로 구한 식으로 바꿔 넣은 꼴입니다. 질량 m과 속도 v(또는 PWM)만 넣으면 최대 수직 가속도(g)와 충격력(N)이 나오고, 거꾸로 '이 충격을 넘지 않는 속도·PWM'도 구합니다.</p></div>
-        <div className="button-row">{bumpIds.length > 1 && <div className="segmented">{bumpIds.map(id => <button key={id} type="button" className={id === bump ? 'selected' : ''} onClick={() => setBump(id)}>방지턱 {id}</button>)}</div>}</div></div>
+</div>
       {!pred ? <div className="exp-why"><b>아직 식이 없습니다.</b> 측정·분석 탭에서 출력(속도) 2단계 이상, 가능하면 질량 2단계 이상을 측정하면 자동으로 생깁니다.</div> : <>
         <label className="exp-inline exp-predsel">사용할 식<select value={pred.id === builtin?.id ? 'builtin' : pred.id} onChange={e => setPredId(e.target.value)}>
           {builtin && <option value="builtin">측정·분석 탭에서 고른 식: {builtin.name}</option>}
@@ -122,11 +154,13 @@ export default function TheoryTab({ ctx }: { ctx: ExperimentContext }) {
           </div>
         </div>
       </>}
-    </section>
+    </section>}
 
-    <TheoryCharts ctx={ctx} bump={bump} chosen={chosen} />
-    <FormulaLab ctx={ctx} bump={bump} env={env} formulas={formulas} setFormulas={list => setFormulas(list)} onUse={id => setPredId(id)} chosen={chosen} />
-    <ControlLab ctx={ctx} bump={bump} pred={pred} />
+    {sec === 'theory' && <TheoryCharts ctx={ctx} bump={bump} chosen={chosen} />}
+    {sec === 'events' && <EventsLab ctx={ctx} bump={bump} />}
+    {sec === 'formula' && <FormulaLab ctx={ctx} bump={bump} env={env} formulas={formulas} setFormulas={list => setFormulas(list)} onUse={id => { setPredId(id); setSec('predict'); }} chosen={chosen} />}
+    {sec === 'control' && <ControlLab ctx={ctx} bump={bump} part="control" />}
+    {sec === 'ultra' && <ControlLab ctx={ctx} bump={bump} part="ultra" />}
   </div>;
 }
 

@@ -15,6 +15,8 @@ import LineTab from './experiment/LineTab';
 import ToolsTab from './experiment/ToolsTab';
 import GuideTab from './experiment/GuideTab';
 import TheoryTab from './experiment/TheoryTab';
+import CourseCard from './experiment/CourseCard';
+import HelpBox from './components/HelpBox';
 import type { ExperimentContext } from './experiment/context';
 import NumInput from './components/NumInput';
 import { usePersistentState } from './services/persist';
@@ -294,6 +296,16 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     {tab === 'tools' && <ToolsTab ctx={ctx} />}
     {tab === 'guide' && <GuideTab ctx={ctx} />}
     {tab === 'measure' && <>
+    <HelpBox id="measure" title="측정·분석 탭 사용 순서">
+      <ol>
+        <li><b>차량·분석 설정</b>(오른쪽 카드): 축간거리 L, 바퀴 반지름 r, 방지턱 높이 h·폭 w를 자로 재서 넣고 '설정 저장'. 속도와 이론값 계산에 쓰입니다.</li>
+        <li><b>실험 조건</b>(왼쪽 카드): 방지턱, 차체 질량(저울), 추가 질량, 출력(PWM 또는 직접 듀티)을 고릅니다. 측정 목적은 보통 '본 실험'.</li>
+        <li><b>측정</b>: 차를 출발 위치에 놓고 '자동 측정 주행'(직진 한 번) 또는 아래 '코스 반복 측정'(출발선·정지선 테이프로 자동 왕복)을 누릅니다. 측정 전에 센서 화면에서 MPU-6050 정지 보정을 한 번 하세요.</li>
+        <li><b>확인</b>: '시행 결과'에서 그래프의 앞바퀴·뒷바퀴 오름·내림 표시가 맞는지 보고, 이상한 회차는 '집계에서 빼기'.</li>
+        <li><b>진행표</b>: 계획(질량 × 출력 × 반복)의 빈칸을 채웁니다. 칸을 누르면 그 조건 그래프가 겹쳐 나옵니다.</li>
+        <li><b>분석 및 관계식</b>(맨 아래): 조건별 평균, 관계식 후보, 허용 기준과 v_max. 더 깊은 해석과 예측·제어는 '이론·예측·제어' 탭에서.</li>
+      </ol>
+    </HelpBox>
     <section className="experiment-layout">
       <article className="card experiment-card"><div className="card-head"><div><h2>실험 조건</h2><p>조작 변인(방지턱·질량·출력)을 정하고 자동 측정 주행을 누르세요. 차는 정지 기록 → 직진 → 정지 순으로 움직입니다.</p></div></div>
         <div className="experiment-fields">
@@ -358,6 +370,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
         </>}
       </article>
     </section>
+    <CourseCard ctx={ctx} />
 
     {progress && progress.cells.length > 0 && <section className="card experiment-card exp-progress">
       <div className="card-head"><div><h2>실험 진행표 · {progress.done}/{progress.need}회</h2><p>계획(방지턱 × 추가 질량 × 출력 × 반복)에 대비해 본 실험이 몇 회 끝났는지 보여 줍니다. 칸을 누르면 그 조건이 입력되고 아래에 그래프가 나옵니다(여러 칸을 누르면 겹쳐 비교, 다시 누르면 빠짐).{progress.next ? ` 다음 추천: 방지턱 ${progress.next.bump_id}, +${progress.next.added_mass_g} g, 출력 ${progress.next.output_value}` : ' 계획을 모두 마쳤습니다.'}</p></div>

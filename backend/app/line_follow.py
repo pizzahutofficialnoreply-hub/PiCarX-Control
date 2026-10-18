@@ -28,6 +28,10 @@ class LineSettings(BaseModel):
     lost_timeout_s: float = Field(default=0.6, ge=0.1, le=3)
     auto_sign: bool = Field(default=True, description="조향 방향 자동 판정 켜기")
     steer_sign: int = Field(default=1, description="테이프가 오른쪽일 때 오른쪽(+1)/왼쪽(−1)으로 꺾기. 센서 순서가 반대인 차는 −1(주행 중 자동 판정)")
+    mode: str = Field(default="gentle", description="gentle: 조향 최소(테이프가 가운데 근처면 직진, 벗어날 때만 조금), normal: 적극적으로 따라감")
+    deadband: float = Field(default=0.35, ge=0, le=0.9, description="이 위치(−1~1) 안쪽이면 조향하지 않음(gentle)")
+    gentle_max_deg: float = Field(default=8, ge=2, le=30, description="gentle 모드 최대 조향각")
+    rate_limit_dps: float = Field(default=60, ge=10, le=600, description="조향각이 1초에 바뀔 수 있는 최대치(급하게 꺾지 않게)")
 
 
 def weights(raw: list[float], s: LineSettings) -> list[float] | None:
@@ -67,6 +71,8 @@ class LineTracker:
         self.wrong_pos = 0.0
         self.flipped = False
         self.recover_until = 0.0
+        self.steer_prev = 0.0
+        self.t_prev: float | None = None
 
     def update(self, raw: list[float] | None, direction: str = "forward", now: float | None = None) -> tuple[float, bool]:
         """(조향각, 계속 가도 되는지). 후진이면 조향 부호가 반대입니다."""
@@ -87,13 +93,27 @@ class LineTracker:
             self.rate = 0.6 * self.rate + 0.4 * inst  # 변화율은 살짝 부드럽게(센서 잡음 때문)
         if pos is not None:
             self.prev = (now, pos)
-        frac = self.s.gain * pos_used + self.s.damping * self.rate
-        steer = max(-self.s.max_steer_deg, min(self.s.max_steer_deg, frac * self.s.max_steer_deg)) * self.sign
+        if self.s.mode == "gentle":
+            # 조향 최소: 테이프가 가운데 근처(데드밴드 안)면 바퀴를 똑바로 두고, 벗어난 만큼만 작게 꺾습니다.
+            lim = min(self.s.gentle_max_deg, self.s.max_steer_deg)
+            mag = max(0.0, abs(pos_used) - self.s.deadband) / max(1e-6, 1.0 - self.s.deadband)
+            e = mag if pos_used >= 0 else -mag
+            frac = self.s.gain * e + (0.5 * self.s.damping * self.rate if mag > 0 else 0.0)
+            target = max(-lim, min(lim, frac * lim)) * self.sign
+        else:
+            lim = self.s.max_steer_deg
+            frac = self.s.gain * pos_used + self.s.damping * self.rate
+            target = max(-lim, min(lim, frac * lim)) * self.sign
+        # 조향각 변화 속도 제한(덜컥 꺾지 않게)
+        dt = max(0.0, min(0.2, now - self.t_prev)) if self.t_prev is not None else 0.02
+        step = self.s.rate_limit_dps * dt if self.s.mode == "gentle" else 1e9
+        steer = self.steer_prev + max(-step, min(step, target - self.steer_prev))
+        self.steer_prev, self.t_prev = steer, now
         # 조향 방향 점검(전진, 자동 판정 켜짐): 테이프 쪽으로 크게 꺾는데 0.35초가 지나도 테이프가 가운데로 오지 않거나
         # 그 사이 테이프를 놓치면 센서 순서가 반대인 것으로 보고 조향 방향을 뒤집습니다.
         if self.s.auto_sign and direction == "forward" and not self.flipped:
             side = pos if pos is not None else self.last_pos
-            hard = abs(steer) >= 0.5 * self.s.max_steer_deg and abs(side) >= 0.6
+            hard = abs(steer) >= 0.5 * lim and abs(side) >= 0.6
             if hard:
                 if self.wrong_since is None or (side > 0) != (self.wrong_pos > 0):
                     self.wrong_since, self.wrong_pos = now, side
@@ -105,6 +125,7 @@ class LineTracker:
                     self.recover_until = now + 2.0  # 반대로 꺾어 테이프를 다시 찾을 시간(최대 2초)을 줌
                     ok = True
                     steer = -steer
+                    self.steer_prev = steer
             else:
                 self.wrong_since = None
         if direction == "backward":

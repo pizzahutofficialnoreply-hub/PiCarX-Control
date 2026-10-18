@@ -30,6 +30,8 @@ from pydantic import BaseModel, Field
 from . import impact_analysis as ia
 from . import model_fit as mf
 from .distance import DistanceLogger
+from .vision import BumpCamera, VisionSettings
+from . import vision as vis
 from . import distance as dist
 from .line_follow import LineSettings, LineTracker
 from .mpu6050 import mpu6050_service
@@ -104,6 +106,8 @@ class ExperimentSettings(BaseModel):
     ultrasonic_log: bool = Field(default=False, description="측정 주행 중 초음파 거리 기록(벽까지 거리 → 속력)")
     ultrasonic_hz: float = Field(default=20.0, ge=5, le=40)
     wall_stop_cm: float = Field(default=0.0, ge=0, le=200, description="벽까지 이 거리(cm)보다 가까워지면 정지(0 = 끔)")
+    vision: "VisionSettings" = Field(default_factory=lambda: VisionSettings())
+    course_spin_lead_deg: float = Field(default=12.0, ge=0, le=60, description="코스 제자리 회전에서 배운 '일찍 끄는 각'")
     model_id: str = Field(default="auto", max_length=20, description="관계식 모델(auto = 교차검증 오차 최소)")
     plan_added_masses: list[float] = Field(default_factory=lambda: [0.0, 150.0, 300.0])
     plan_outputs: list[float] = Field(default_factory=lambda: [40.0, 55.0, 70.0, 85.0, 100.0])
@@ -151,12 +155,16 @@ class AutoRunRequest(BaseModel):
 
 class SlowdownRequest(BaseModel):
     """목표 2: 관계식으로 '허용 기준을 넘지 않는 속도'를 구해, 방지턱 앞에서 그 속도에 맞는 출력으로 줄입니다."""
-    trigger: Literal["time", "tape", "distance"] = "time"
+    trigger: Literal["time", "tape", "distance", "distance_auto", "camera"] = "time"
     at_s: float = Field(default=0.6, ge=0.0, le=6, description="출발 후 이 시간(초)에 감속(trigger=time)")
     at_cm: float = Field(default=60.0, ge=5, le=300, description="벽까지 이 거리(cm)가 되면 감속(trigger=distance)")
     safety: float = Field(default=0.9, ge=0.3, le=1.0, description="v_max에 곱하는 여유율(0.9 = 10% 느리게)")
     min_output: float = Field(default=10.0, ge=1, le=100, description="이보다 낮은 출력으로는 줄이지 않음(멈춤 방지)")
     target_g: float | None = Field(default=None, gt=1.0, le=8, description="허용 기준(g)을 따로 줄 때. 비우면 분석 탭 기준")
+    margin: Literal["ratio", "sigma"] = Field(default="ratio", description="ratio: v_max × 여유율, sigma: 기준 − 2×예측오차(교차검증 RMSE)로 목표 충격을 낮춤")
+    staged: bool = Field(default=False, description="단계별: 앞바퀴(오름·내림) 구간과 뒷바퀴 구간을 각각의 식으로 정한 속도로")
+    resume: bool = Field(default=True, description="방지턱을 다 넘으면 원래 출력으로 다시 가속")
+    lead_cm: float = Field(default=30.0, ge=5, le=150, description="distance_auto: 지난 회차의 '앞바퀴 충격 때 벽까지 거리'보다 이만큼 먼저 감속")
 
 
 AutoRunRequest.model_rebuild()
@@ -538,7 +546,7 @@ def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) ->
     return {"groups": groups, "fits": fits, "models": comparisons,
             "chosen_models": {k: (v["id"] if v else None) for k, v in chosen.items()},
             "criteria": criteria, "interpretation": interpretation,
-            "speed_maps": mf.speed_maps(groups), "speed_models": mf.speed_models(groups), "validation": validation_rows(runs, chosen),
+            "speed_maps": mf.speed_maps(groups), "speed_models": mf.speed_models(groups), "event_models": mf.event_models(groups), "validation": validation_rows(runs, chosen),
             "progress": plan_progress(runs, settings)}
 
 
@@ -579,6 +587,7 @@ class AutoRunner:
 
 
 auto_runner = AutoRunner()
+extra_busy: list[Callable[[], bool]] = []  # 다른 주행(코스 반복 등)이 진행 중인지
 _get_control: Callable[[], Any] | None = None
 
 
@@ -633,6 +642,9 @@ class BumpPassWatcher:
                     break
             return False
         a = self.sign * tilt[self.axis]
+        if self.stage == "wait_down" and "front_level" not in self.events and "up" in self.events and abs(a) <= self.level \
+                and now - self.events["up"] >= 0.03:
+            self.events["front_level"] = now  # 좁은 방지턱: 앞바퀴가 다 내려와 수평으로 돌아온 순간(FD)
         if self.stage == "wait_down" and a <= -self.down:
             self.stage = "wait_level"
             self.events["down"] = now
@@ -704,7 +716,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                      stop_when: Callable[[Any], bool] | None = None, min_s: float = 0.0, polarity: int = 1,
                      bump_watch: "BumpPassWatcher | None" = None, after_bump_s: float = 0.3,
                      slowdown: dict[str, Any] | None = None, distance: "DistanceLogger | None" = None,
-                     wall_stop_cm: float = 0.0, slow_tape: Callable[[Any], bool] | None = None) -> dict[str, Any]:
+                     wall_stop_cm: float = 0.0, slow_tape: Callable[[Any], bool] | None = None,
+                     camera: "BumpCamera | None" = None, stop_on_pass: bool = True) -> dict[str, Any]:
     """정해진 시간 동안 일정한 출력으로 직진/후진.
 
     출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
@@ -741,6 +754,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                 else:
                     await asyncio.sleep(0.01)
         poller = asyncio.create_task(poll())
+    stage_now, stage_prev, stage_log = "approach", None, []
     slow_seen = asyncio.Event()
     slow_poller: asyncio.Task | None = None
     slowed_at: float | None = None
@@ -777,7 +791,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                   break
           if bump_watch is not None and passed_at is None and bump_watch.update(mpu6050_service.tilt_deg(), now - start):
               passed_at = now
-              end = min(end, now + after_bump_s)
+              if stop_on_pass:
+                  end = min(end, now + after_bump_s)
           if mark_seen.is_set():
               stopped_on_mark = True
               break
@@ -789,10 +804,28 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               trig = slowdown.get("trigger")
               if (trig == "time" and now - start >= float(slowdown.get("at_s") or 0)) \
                       or (trig == "distance" and near is not None and near <= float(slowdown.get("at_cm") or 0)) \
-                      or (trig == "tape" and slow_seen.is_set()):
+                      or (trig == "tape" and slow_seen.is_set()) \
+                      or (trig == "camera" and camera is not None and camera.seen_at is not None):
                   slowed_at = now
           prev_t = now
           cur = float(slowdown["output"]) if slowed_at is not None and slowdown else value
+          st = (slowdown or {}).get("staged") if slowed_at is not None else None
+          if st and bump_watch is not None:
+              # 단계별: 앞바퀴가 다 내려와 수평으로 돌아오면 뒷바퀴 구간 출력으로
+              if "front_level" in bump_watch.events and st.get("output_rear") is not None:
+                  cur = float(st["output_rear"])
+                  stage_now = "rear"
+              elif st.get("output_front") is not None:
+                  cur = float(st["output_front"])
+                  stage_now = "front"
+          if slowdown and passed_at is not None and slowdown.get("resume"):
+              # 다 넘었으면 원래 출력으로 0.4초에 걸쳐 다시 가속
+              k = min(1.0, (now - passed_at) / 0.4)
+              cur = cur + (value - cur) * k
+              stage_now = "resume"
+          if stage_now != stage_prev:
+              stage_log.append([round(now - start, 3), stage_now, round(cur, 1)])
+              stage_prev = stage_now
           out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else cur
           if not await ctl.experiment_drive(mode, out, generation, direction, steer):
               raise Aborted()
@@ -816,6 +849,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None,
             "heading_flipped": bool(controller and controller.flipped),
             "slowed_at_s": round(slowed_at - start, 3) if slowed_at is not None else None,
+            "stage_log": stage_log,
+            "camera_seen_s": round(camera.seen_at - start, 3) if camera is not None and camera.seen_at is not None else None,
             "stopped_by_wall": stopped_by_wall,
             "steer_saturated": bool(controller and sum(1 for row in log if abs(row[2]) >= MAX_HEADING_CORRECTION_DEG - 0.01) > len(log) * 0.3)}
 
@@ -857,10 +892,13 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
     """목표 2 감속 계획: 관계식(선택된 식)과 '출력·질량 → 속도' 식으로 방지턱에서 쓸 출력을 정합니다.
 
     1) 지금 출력으로 들어가면 속도 v₀ = 속도식(출력₀, m), 예측 충격 Δa(v₀, m)
-    2) 허용 기준 a_lim에서 Δa(v, m) = a_lim − 1 을 풀어 v_max(m)
-    3) 목표 속도 v* = v_max × 여유율. v₀ ≤ v* 이면 감속 불필요
-    4) 감속 출력 = 속도식을 거꾸로 풀어 v*가 나오는 출력(최소 출력 아래로는 안 내림)
-    거듭제곱식 Δa = k·vⁿ·mᵖ 이면 v*/v₀ = (Δa_lim/Δa(v₀))^(1/n) 와 같습니다.
+    2) 목표 충격 Δa* : 여유 방식 ratio면 기준(a_lim − 1), sigma면 기준 − 2×예측오차(교차검증 RMSE)
+       → '기준 바로 밑(0.9999…)'이 아니라 '측정 오차를 감안해도 넘지 않을 값'을 목표로 함
+    3) Δa(v, m) = Δa* 를 풀어 v_max(m), ratio면 v* = v_max × 여유율, sigma면 v* = v_max
+    4) 단계별(staged): 앞바퀴 구간(FU·FD)과 뒷바퀴 구간(RU·RD)을 각각의 단계식으로 풀어 v_앞 = min(v_FU, v_FD),
+       v_뒤 = min(v_RU, v_RD). 방지턱 전에는 v_앞의 출력, 앞바퀴가 다 내려오면(기울기 수평 복귀) v_뒤의 출력,
+       다 넘으면(resume) 원래 출력으로 다시 가속
+    5) 출력 = 속도식을 거꾸로 풀어 그 속도가 나오는 출력(최소 출력 아래로는 안 내림)
     """
     runs = runs_for_mode(simulated)
     bundle = analysis_bundle(runs, settings)
@@ -877,30 +915,66 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
     if not a_lim or a_lim <= 1:
         raise RuntimeError("허용 기준(g)이 없습니다. 분석 탭에서 기준을 고르거나 감속 설정에 직접 넣으세요.")
     m_g = cond.base_mass_g + cond.added_mass_g
+    mk = m_g / 1000.0
     models = bundle["speed_models"]
     v0 = mf.speed_from_output(models, bump, cond.output_mode, cond.output_value, m_g)
     if v0 is None:
         raise RuntimeError("출력 → 속도 식이 없습니다. 같은 방지턱·출력 방식으로 출력을 2단계 이상 측정하세요.")
-    vmax = mf.solve_speed(model, a_lim - 1.0, m_g / 1000.0)
+    err = model.get("loocv_rmse") or model.get("rmse") or 0.0
+    d_target = (a_lim - 1.0) - (2.0 * err if req.margin == "sigma" else 0.0)
+    if d_target <= 0:
+        raise RuntimeError(f"예측 오차(±{err:.2f} g)가 허용 여유보다 커서 목표 충격을 정할 수 없습니다. 반복 측정을 늘려 식을 더 정확하게 하세요.")
+    vmax = mf.solve_speed(model, d_target, mk)
     if vmax is None:
         raise RuntimeError("관계식으로 v_max를 풀지 못했습니다(기준이 너무 낮거나 식이 맞지 않음).")
-    target_v = vmax * req.safety
+    factor = req.safety if req.margin == "ratio" else 1.0
+    target_v = vmax * factor
+
+    def out_for(v: float) -> tuple[float | None, bool]:
+        o = mf.output_from_speed(models, bump, cond.output_mode, v, m_g)
+        if o is None:
+            return None, False
+        clipped = o < req.min_output
+        return min(max(o, req.min_output), cond.output_value), clipped
+
+    stages: dict[str, Any] | None = None
+    if req.staged:
+        em = (bundle.get("event_models") or {}).get(bump) or {}
+        if not all(k in em for k in ("FU", "FD", "RU", "RD")):
+            raise RuntimeError("단계별 식(앞·뒤 바퀴 오름·내림)이 아직 없습니다. 기울기로 네 순간이 찾아진 회차(분석 방식 '기울기 4단계')가 출력 2단계 이상 필요합니다.")
+        vs = {k: mf.event_solve(em[k], d_target, mk) for k in ("FU", "FD", "RU", "RD")}
+        if any(v is None for v in vs.values()):
+            raise RuntimeError("단계별 식으로 속도를 풀지 못했습니다.")
+        v_front = min(vs["FU"], vs["FD"]) * factor
+        v_rear = min(vs["RU"], vs["RD"]) * factor
+        of, cf = out_for(v_front)
+        orr, cr = out_for(v_rear)
+        stages = {"v_by_event": {k: round(v, 4) for k, v in vs.items()}, "v_front_mps": round(v_front, 4), "v_rear_mps": round(v_rear, 4),
+                  "output_front": None if of is None else round(of, 1), "output_rear": None if orr is None else round(orr, 1),
+                  "clipped": cf or cr,
+                  "pred_by_event_g": {k: round(mf.event_predict(em[k], v_front if k in ("FU", "FD") else v_rear, mk), 4) for k in em}}
+        target_v = v_front
     need = v0 > target_v
-    out_slow = mf.output_from_speed(models, bump, cond.output_mode, target_v, m_g) if need else cond.output_value
-    clipped = False
+    out_slow, clipped = out_for(target_v) if need else (cond.output_value, False)
     if out_slow is None:
         raise RuntimeError("목표 속도에 맞는 출력을 계산하지 못했습니다.")
-    if out_slow < req.min_output:
-        out_slow, clipped = req.min_output, True
-    out_slow = min(out_slow, cond.output_value)
-    mk = m_g / 1000.0
-    return {"trigger": req.trigger, "at_s": req.at_s, "at_cm": req.at_cm, "safety": req.safety,
+    at_cm = req.at_cm
+    trigger = req.trigger
+    if trigger == "distance_auto":
+        dists = sorted(r["distance_summary"]["distance_at_front_cm"] for r in runs
+                       if r.get("condition", {}).get("bump_id") == bump and (r.get("distance_summary") or {}).get("distance_at_front_cm"))
+        if not dists:
+            raise RuntimeError("'거리 자동'은 초음파를 켜고 측정한 회차가 있어야 합니다(앞바퀴 충격 때 벽까지 거리를 배움).")
+        at_cm = round(dists[len(dists) // 2] + req.lead_cm, 1)
+        trigger = "distance"
+    return {"trigger": trigger, "trigger_requested": req.trigger, "at_s": req.at_s, "at_cm": at_cm, "safety": req.safety,
+            "margin": req.margin, "model_error_g": round(err, 4), "target_delta_g": round(d_target, 4),
             "a_limit_g": round(a_lim, 4), "model_id": model["id"], "model_formula": model.get("formula"),
             "v0_pred_mps": round(v0, 4), "pred_delta_v0_g": round(mf.predict(model, v0, mk), 4),
             "vmax_mps": round(vmax, 4), "target_v_mps": round(target_v, 4),
             "pred_delta_target_g": round(mf.predict(model, target_v, mk), 4),
-            "needed": need, "output": round(out_slow, 1) if need else None, "output_initial": cond.output_value,
-            "output_clipped": clipped,
+            "needed": need or bool(stages), "output": round(out_slow, 1) if (need or stages) else None, "output_initial": cond.output_value,
+            "output_clipped": clipped, "staged": stages, "resume": req.resume,
             "ratio": round(target_v / v0, 4) if v0 else None}
 
 
@@ -945,15 +1019,30 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                 hold = bool(opts["steering_source"] in ("gyro", "line") and track)
                 run["heading_hold"] = hold
             ff_key = "heading_ff_forward" if mdir == "forward" else "heading_ff_backward"
+            plan = opts.get("slowdown_plan") or {}
+            plan_staged = bool(plan.get("staged"))
+            cam = None
+            if plan.get("trigger") == "camera" and not simulated:
+                from .camera import camera_service
+                vs = store.load_settings().vision
+                if vs.floor_mean is None:
+                    raise RuntimeError("카메라 방지턱 감지는 '이론·예측·제어 → 감속 제어'에서 바닥 보정을 먼저 하세요.")
+                cam = BumpCamera(camera_service.capture_array, vs)
+                cam.start()
             drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], mdir, gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
                                           ki=settings.heading_ki, ff=getattr(store.load_settings(), ff_key) if hold else 0.0,
                                           polarity=store.load_settings().heading_sign,
-                                          bump_watch=BumpPassWatcher() if (settings.stop_after_bump and track) else None,
+                                          bump_watch=BumpPassWatcher() if ((settings.stop_after_bump or plan_staged) and track) else None,
+                                          stop_on_pass=settings.stop_after_bump,
+                                          camera=cam,
                                           after_bump_s=settings.after_bump_s,
                                           slowdown=opts.get("slowdown_plan") if (opts.get("slowdown_plan") or {}).get("needed") else None,
                                           distance=logger, wall_stop_cm=opts.get("wall_stop_cm") or 0.0,
                                           slow_tape=_tape_detector(settings) if not simulated else None)
+            if cam is not None:
+                cam.stop()
+                drive_info["camera_scores"] = cam.scores[-80:]
             auto_runner.last_forward_s = drive_info.get("elapsed_s")
             if line is not None and line.flipped:
                 st = store.load_settings()
@@ -994,7 +1083,9 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             raise RuntimeError("센서 표본이 없어 저장하지 않았습니다.")
     if run.get("slowdown") and drive_info.get("slowed_at_s") is not None:
         run["slowdown"]["slowed_at_s"] = round(drive_info["slowed_at_s"] + opts["pre_roll"], 3)  # 기록 시작 기준
-    run.update({k: v for k, v in drive_info.items() if k != "slowed_at_s"})
+    if run.get("slowdown") and drive_info.get("stage_log"):
+        run["slowdown"]["stage_log"] = [[round(t + opts["pre_roll"], 3), st, o] for t, st, o in drive_info["stage_log"]]
+    run.update({k: v for k, v in drive_info.items() if k not in ("slowed_at_s", "stage_log")})
     run["data_source"] = "synthetic" if simulated else "mpu6050"
     run = await asyncio.to_thread(finalize_run, run, columns, meta, settings)
     if simulated and opts.get("ultrasonic"):
@@ -1152,7 +1243,7 @@ async def list_runs():
     settings = store.load_settings()
     runs = runs_for_mode(simulated)
     # 평지 오검출 판정(bump_detected)이 생기기 전에 분석된 시행은 저장된 원자료로 한 번 다시 분석합니다.
-    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {}) or "glitches_fixed" not in (r.get("analysis") or {})
+    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {}) or (r.get("analysis") or {}).get("version", 0) < ia.ANALYSIS_VERSION
              or ((r.get("analysis") or {}).get("params") or {}).get("filter_hz") and not r["analysis"]["params"].get("peak_keep")]
     for run in stale:
         try:
@@ -1205,6 +1296,41 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
                     "pair_source": a.get("pair_source"), "excluded": run.get("excluded"),
                     "t": sub["t_s"], "g": sub["vertical_g"], **({"raw": sub["raw_g"]} if "raw_g" in sub else {})})
     return {"series": out, "filter_hz": hz}
+
+
+class VisionUpdate(BaseModel):
+    roi_top: float | None = Field(default=None, ge=0.0, le=0.95)
+    roi_bottom: float | None = Field(default=None, ge=0.05, le=1.0)
+    center_gap: float | None = Field(default=None, ge=0.0, le=0.8)
+    k_sigma: float | None = Field(default=None, ge=1.5, le=10)
+    threshold: float | None = Field(default=None, ge=0.01, le=0.9)
+
+
+@router.post("/vision/calibrate")
+async def vision_calibrate(body: VisionUpdate | None = None):
+    """방지턱이 화면에 없을 때(출발선에서) 바닥 색을 저장합니다."""
+    from .camera import camera_service
+    settings = store.load_settings()
+    vs = settings.vision.model_copy(update={k: v for k, v in (body.model_dump() if body else {}).items() if v is not None})
+    arr = await asyncio.to_thread(camera_service.capture_array)
+    if arr is None:
+        raise HTTPException(503, "카메라 영상을 가져오지 못했습니다(카메라 연결·모의 모드 확인).")
+    settings.vision = vis.calibrate(arr, vs)
+    store.save_settings(settings)
+    return {"vision": settings.vision.model_dump(), "score": vis.score(arr, settings.vision)}
+
+
+@router.get("/vision/test")
+async def vision_test():
+    """지금 화면의 방지턱 점수(왼쪽, 오른쪽). 방지턱 앞에 차를 두고 점수가 기준을 넘는지 확인하세요."""
+    from .camera import camera_service
+    vs = store.load_settings().vision
+    arr = await asyncio.to_thread(camera_service.capture_array)
+    if arr is None:
+        raise HTTPException(503, "카메라 영상을 가져오지 못했습니다(카메라 연결·모의 모드 확인).")
+    sc = vis.score(arr, vs)
+    return {"score": sc, "threshold": vs.threshold, "detected": bool(sc and min(sc) >= vs.threshold), "calibrated": vs.floor_mean is not None,
+            "roi": {"top": vs.roi_top, "bottom": vs.roi_bottom, "center_gap": vs.center_gap}}
 
 
 @router.get("/ultrasonic/test")
@@ -1505,8 +1631,8 @@ async def save_recording(request: SaveRecordingRequest):
 async def start_auto_run(request: AutoRunRequest):
     ctl = control()
     from .line_follow import line_runner
-    if auto_runner.busy or line_runner.busy or symmetry_runner.busy:
-        raise HTTPException(409, "이미 자동 측정 주행(또는 라인 추종·점검)이 진행 중입니다.")
+    if auto_runner.busy or line_runner.busy or symmetry_runner.busy or any(f() for f in extra_busy):
+        raise HTTPException(409, "이미 자동 측정 주행(또는 라인 추종·점검·코스 반복)이 진행 중입니다.")
     if not ctl.adapter.connected:
         raise HTTPException(409, ctl.adapter.connection_error or "PiCar-X가 연결되어 있지 않습니다.")
     if request.condition.output_value > EXPERIMENT_MAX_OUTPUT:

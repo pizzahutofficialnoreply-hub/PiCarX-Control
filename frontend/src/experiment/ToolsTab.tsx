@@ -6,6 +6,7 @@ import { XYChart } from '../components/ExperimentCharts';
 import type { ExperimentContext } from './context';
 import NumInput from '../components/NumInput';
 import { usePersistentState } from '../services/persist';
+import HelpBox from '../components/HelpBox';
 
 type Check = { ok: boolean; text: string };
 type DataCheck = { mode: string; real_runs: number; simulated_runs: number; mean_sample_rate_hz: number | null; checks: Check[]; last_real_run: { id: string; created_at: string } | null };
@@ -123,6 +124,15 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
   const cmdRow = (name: string, c: Cmd | undefined) => <tr><td>{name}</td><td>{c ? `${c.mapping === 'duty' ? '직접 듀티' : '라이브러리'} ${c.requested}` : '—'}</td><td>{c ? `${c.applied} (×${c.trim})` : '—'}</td><td>{c ? `${c.expected_duty_percent}%` : '—'}</td><td>{c?.pins?.cali_dir_value ? c.pins.cali_dir_value.join(' / ') : '—'}</td></tr>;
 
   return <>
+    <HelpBox id="tools-intro" title="도구 탭 사용법">
+      <ul>
+        <li><b>실제 데이터 입력 확인</b>: MPU-6050이 진짜 값을 보내는지(모의 데이터가 아닌지) 먼저 확인합니다.</li>
+        <li><b>측정 전 점검표</b>: 배터리 충전, 센서 고정, 방지턱 위치 등을 매번 같게 맞춥니다. 배터리가 약하면 같은 PWM에서도 느려집니다.</li>
+        <li><b>좌우 바퀴 균형</b>: 차가 한쪽으로 돌면 라인·코스 주행에서 조향이 많아집니다. 한 번 맞춰 두면 조향을 거의 쓰지 않고 곧게 갑니다.</li>
+        <li><b>전진·후진 대칭</b>: 코스 주행에서 후진으로 방지턱을 넘으려면 후진 힘이 충분해야 합니다. 차이를 재고 맞춥니다.</li>
+        <li><b>백업과 초기화</b>: 초기화 전에 백업 ZIP을 받아 두세요. 초기화한 기록은 휴지통에서 되돌릴 수 있습니다.</li>
+      </ul>
+    </HelpBox>
     <section className="experiment-layout">
       <article className="card experiment-card">
         <div className="card-head"><div><h2>실제 데이터 입력 확인</h2><p>지금 저장되는 기록이 실제 MPU-6050 측정인지 점검합니다. 합성(모의) 데이터는 실제 목록·집계와 따로 저장됩니다.</p></div><button className="secondary" onClick={() => void refresh()}><RefreshCw size={14} /> 다시 점검</button></div>

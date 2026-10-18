@@ -105,7 +105,7 @@ class MPU6050Service:
         if prev is not None and (
             words[3] == words[4] == words[5] == 0
             or any((w & 0x0FFF) == 0 and abs(w - p) > 300 for w, p in zip(words[:3], prev[:3]))
-            or sum(1 for w in words if (w & 0xFF) == 0) >= 2
+            or sum(1 for w in words if (w & 0xFF) == 0 and abs(w) >= 256) >= 2
         ):
             self._prev_words = prev
             raise _BadRead()
@@ -278,6 +278,21 @@ class MPU6050Service:
             self._heading_active = True
             return True
 
+    def heading_zero(self) -> bool:
+        """방향만 0으로 두고 자이로 영점(바이어스)은 그대로 씁니다.
+
+        멈춘 지 얼마 안 돼 차가 아직 흔들리거나 돌던 중이면 heading_reset의 '최근 0.4초 평균 = 영점'이 틀어져
+        이후 방향이 계속 한쪽으로 흐릅니다. 코스 주행처럼 자주 멈췄다 가는 경우에 씁니다.
+        """
+        with self._lock:
+            if not self._heading_active or self._bias is None:
+                active = False
+            else:
+                self._heading = 0.0
+                self._tilt = [0.0, 0.0]
+                return True
+        return self.heading_reset() if not active else True
+
     def heading_deg(self) -> float | None:
         with self._lock:
             return self._heading if self._heading_active else None
@@ -308,12 +323,18 @@ class MPU6050Service:
             try:
                 s = self._read_raw()
                 readings.append((s[1], s[2], s[3]))
+            except _BadRead:
+                continue
             except Exception as exc:
                 with self._lock:
                     self._error = f"보정 실패: {exc}"
                 return self.status()
             time.sleep(0.002)
         n = len(readings)
+        if n < 50:
+            with self._lock:
+                self._error = "보정 실패: 센서 값이 계속 깨져 들어옵니다(배선·I²C 속도 확인)."
+            return self.status()
         bias = tuple(sum(row[i] for row in readings) / n for i in range(3))
         stability = max(math.sqrt(sum((row[i] - bias[i]) ** 2 for row in readings) / n) for i in range(3))
         if stability > 0.05:

@@ -478,8 +478,11 @@ class PitchTimingTests(unittest.TestCase):
     def test_narrow_bump_speed_from_pitch(self):
         cols, tf, tr = self._cols(wide=False, w=0.03)
         r = ia.analyze_run(cols, wheelbase_mm=95, mass_g=600, bump_width_mm=30)
-        self.assertEqual(r["pair_source"], "pitch")
+        self.assertEqual(r["pair_source"], "pitch4")
         self.assertAlmostEqual(r["speed_mps"], 0.24, delta=0.03)
+        kinds = [e["kind"] for e in r["events"]]
+        self.assertEqual(kinds, ["FU", "FD", "RU", "RD"])
+        self.assertAlmostEqual(r["events"][2]["t_s"] - r["events"][0]["t_s"], tr - tf, delta=0.03)
 
     def test_summary_export(self):
         from app.main import app
@@ -549,10 +552,11 @@ class BackwardMeasureTests(unittest.TestCase):
 
 
 class LineFollowSimTests(unittest.TestCase):
-    def _sim(self, reversed_sensors: bool, start_y=0.012, seconds=6.0, v=0.25):
+    def _sim(self, reversed_sensors: bool, start_y=0.012, seconds=6.0, v=0.25, mode="normal"):
         import math
         from app.line_follow import LineSettings, LineTracker
-        st = LineSettings(floor=[900, 900, 900], line=[300, 300, 300], gain=0.8, damping=0.25, max_steer_deg=25)
+        st = LineSettings(floor=[900, 900, 900], line=[300, 300, 300], gain=0.8, damping=0.25, max_steer_deg=25, mode=mode)
+        self.steers = []
         tr = LineTracker(st)
         y, hdg, t, dt = start_y, 0.0, 0.0, 0.02   # y: 테이프에서 왼쪽(+)으로 벗어난 거리(m)
         offs = (0.02, 0.0, -0.02)                  # 센서 왼·가운데·오른쪽의 옆 위치
@@ -562,6 +566,7 @@ class LineFollowSimTests(unittest.TestCase):
         for _ in range(int(seconds / dt)):
             raw = [900 - 600 * max(0.0, 1 - abs(y + o) / 0.012) for o in offs]   # 테이프 폭 24 mm
             steer, ok = tr.update(raw, "forward", now=t)
+            self.steers.append(steer)
             hdg += -v / 0.095 * math.tan(math.radians(steer)) * dt               # 오른쪽 조향(+) → 시계 방향
             y += v * math.sin(hdg) * dt
             t += dt
@@ -575,6 +580,14 @@ class LineFollowSimTests(unittest.TestCase):
         self.assertIsNotNone(worst)
         self.assertLess(worst, 0.011)   # 센서 3개라 가운데 센서만 테이프를 볼 때 ±1 cm 안쪽은 구분 못 함
         self.assertFalse(tr.flipped)
+
+    def test_gentle_mode_steers_little(self):
+        worst, tr = self._sim(False, start_y=0.008, mode="gentle")
+        self.assertIsNotNone(worst)
+        self.assertLess(worst, 0.016)
+        self.assertLessEqual(max(abs(x) for x in self.steers), 8.0 + 1e-6)
+        straight = sum(1 for x in self.steers[-150:] if abs(x) < 1.0) / 150
+        self.assertGreater(straight, 0.6)   # 대부분 바퀴를 똑바로 둠
 
     def test_reversed_sensor_order_is_corrected(self):
         worst, tr = self._sim(True)

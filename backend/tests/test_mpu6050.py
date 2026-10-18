@@ -19,7 +19,8 @@ class FakeBus:
         self.calls += 1
         az = -1.0 - (2.0 if self.spike else 0.0)  # 뒤집힌 장착: 충돌 시 더 음수
         # 실제 센서처럼 몇 LSB 잡음을 넣습니다(정확히 0인 값은 통신 오류로 걸러지므로).
-        n = lambda: random.randint(3, 9)  # noqa: E731
+        self.k = getattr(self, 'k', 0) + 1
+        n = lambda: 1 if (self.k % 2) else -1  # noqa: E731
         w = lambda v: [(v & 0xFFFF) >> 8, v & 0xFF]  # noqa: E731
         raw = int(az * 4096) + n()
         g = int(getattr(self, "gz", 0.0) * 65.5) + n()

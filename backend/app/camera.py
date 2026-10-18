@@ -93,6 +93,20 @@ class CameraService:
                 self._error = str(exc)
                 return None
 
+    def capture_array(self, step: int = 8):
+        """한 프레임을 숫자 배열(세로×가로×RGB)로 가져와 step 간격으로 줄입니다(방지턱 감지용). 실패하면 None."""
+        if not self.start():
+            return None
+        with self._lock:
+            if self._camera is None:
+                return None
+            try:
+                frame = self._camera.capture_array()
+                return frame[::step, ::step]
+            except Exception as exc:
+                self._error = str(exc)
+                return None
+
     def stream(self) -> Generator[bytes, None, None]:
         """Generate an MJPEG stream."""
         while True:

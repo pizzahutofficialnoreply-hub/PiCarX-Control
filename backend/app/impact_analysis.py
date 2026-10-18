@@ -234,6 +234,90 @@ def pitch_axle_times(t: Sequence[float], pitch: Sequence[float] | None, wheelbas
     return t_front, t_rear, abs(theta)
 
 
+def pitch_events(t: Sequence[float], pitch: Sequence[float] | None, wheelbase_mm: float | None,
+                 narrow: bool = True, around: tuple[float, float] | None = None) -> dict[str, float] | None:
+    """차의 앞뒤 기울기(피치)로 네 순간을 찾습니다: 앞바퀴 오름(FU)·내림(FD), 뒷바퀴 오름(RU)·내림(RD).
+
+    좁은 방지턱(바퀴가 턱을 지나는 거리 < 축간거리, 예: 폭 38 mm 반원)에서
+      앞바퀴가 오르면 앞이 들려 기울기가 한쪽(+)으로 커졌다가, 앞바퀴가 내려오면 0으로 돌아오고(FD),
+      뒷바퀴가 오르면 반대쪽(−)으로 기울었다가, 뒷바퀴가 내려오면 다시 0(RD)이 됩니다.
+    넓은 방지턱(폭 > 축간거리)은 + 구간이 FU→RU, − 구간이 FD→RD 입니다.
+    각 순간은 기울기가 그 구간 최대치의 20%를 넘는/내려가는 시각으로 잡습니다(오름·내림에 같은 기준을 써서
+    시각 차이는 정확). 두 구간의 모양이 서로 맞지 않으면 None.
+    """
+    if pitch is None or not wheelbase_mm or len(t) < 50:
+        return None
+    n = len(t)
+    rng = [i for i in range(n) if around is None or around[0] <= t[i] <= around[1]]
+    if len(rng) < 20:
+        return None
+    ia_ = max(rng, key=lambda i: abs(pitch[i]))
+    # 방지턱 전 평평한 구간의 기울기를 0점으로
+    pre = sorted(pitch[i] for i in range(n) if t[ia_] - 0.7 <= t[i] <= t[ia_] - 0.3) or [0.0]
+    base = pre[len(pre) // 2]
+    q0 = [x - base for x in pitch]
+    # 가장 먼저 나타난 큰 기울기 구간이 앞바퀴 쪽
+    big = max(abs(q0[i]) for i in rng)
+    if big < 2.5:
+        return None
+    first = next(i for i in rng if abs(q0[i]) >= 0.6 * big)
+    sgn = 1.0 if q0[first] > 0 else -1.0
+    q = [sgn * x for x in q0]
+    # 첫 구간(+)의 꼭대기
+    a = first
+    while a + 1 < n and q[a + 1] >= 0.3 * big:
+        a += 1
+    pa = max(range(first, a + 1), key=lambda i: q[i])
+    A = q[pa]
+    lo = 0.2 * A
+    i0 = pa
+    while i0 > 0 and q[i0 - 1] >= lo:
+        i0 -= 1
+    i1 = pa
+    while i1 < n - 1 and q[i1] >= lo:
+        i1 += 1
+    if i0 == 0 or i1 >= n - 1:
+        return None
+    dur = t[i1] - t[i0]
+    # 두 번째 구간(−): 첫 구간이 끝난 뒤 (첫 구간 길이×3 + 0.3초) 안의 가장 낮은 곳
+    lim = t[i1] + 3 * dur + 0.3
+    cand = [i for i in range(i1, n) if t[i] <= lim]
+    if not cand:
+        return None
+    pb = min(cand, key=lambda i: q[i])
+    B = -q[pb]
+    if B < 0.3 * A:
+        return None
+    lo2 = 0.2 * B
+    j0 = pb
+    while j0 > i1 and q[j0 - 1] <= -lo2:
+        j0 -= 1
+    j1 = pb
+    while j1 < n - 1 and q[j1] <= -lo2:
+        j1 += 1
+    if j1 >= n - 1:
+        return None
+    s1, e1, s2, e2 = t[i0], t[i1], t[j0], t[j1]
+    if narrow:
+        ev = {"FU": s1, "FD": e1, "RU": s2, "RD": e2}
+    else:
+        ev = {"FU": s1, "RU": e1, "FD": s2, "RD": e2}
+    a1, a2 = ev["RU"] - ev["FU"], ev["RD"] - ev["FD"]
+    c1, c2 = ev["FD"] - ev["FU"], ev["RD"] - ev["RU"]
+    if a1 <= 0 or a2 <= 0 or c1 <= 0 or c2 <= 0:
+        return None
+    if abs(a1 / a2 - 1) > 0.35 or abs(c1 / c2 - 1) > 0.5:
+        return None
+    ev.update(front_deg=round(A, 2), rear_deg=round(B, 2), axle_dt_s=(a1 + a2) / 2, cross_s=(c1 + c2) / 2,
+              speed_mps=(wheelbase_mm / 1000.0) / ((a1 + a2) / 2))
+    return ev
+
+
+ANALYSIS_VERSION = 5  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
+
+EVENT_LABEL = {"FU": "앞바퀴 오름", "FD": "앞바퀴 내림", "RU": "뒷바퀴 오름", "RD": "뒷바퀴 내림"}
+
+
 def pick_axle_pattern(peaks: list[Peak], wheelbase_mm: float | None, bump_width_mm: float | None,
                       t: Sequence[float] | None = None, pitch: Sequence[float] | None = None,
                       bump_height_mm: float | None = None, all_out: list | None = None) -> tuple[Peak, Peak, Peak, Peak, float] | None:
@@ -598,7 +682,7 @@ def analyze_run(
         "pi": None, "r_eff_m": None, "critical_speed_mps": None,
         "peak_count": 0, "flags": flags, "candidates": [], "pair_source": None,
         "bump_detected": None, "noise_sigma_g": None, "threshold_used_g": None, "standout_ratio": None,
-        "glitches_fixed": glitches, "max_gap_ms": None,
+        "glitches_fixed": glitches, "max_gap_ms": None, "version": ANALYSIS_VERSION, "events": [],
         "params": {"threshold_delta_g": threshold_delta_g, "min_gap_s": min_gap_s, "jump_g": jump_g,
                    "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius,
                    "filter_hz": filter_hz, "detect_level": detect_level, "peak_keep": True},
@@ -652,8 +736,40 @@ def analyze_run(
     # 0순위: 기울기(피치)로 앞·뒤 바퀴가 턱에 오른 시각을 찾고, 그 근처(±80 ms)의 가장 큰 충격 피크에 맞춥니다.
     # 충격이 있었던 구간 근처에서만 찾습니다(주행 끝에 벽·완충재에 올라타 기운 것을 방지턱으로 착각하지 않게).
     span = (peaks[0].t_s - 0.4, peaks[-1].t_s + 0.2) if peaks else None
-    by_pitch = pitch_axle_times(t, pitch, wheelbase_mm, bump_width_mm, span) if span else None
-    if by_pitch is not None:
+    # 최우선: 기울기로 네 순간(앞 오름·앞 내림·뒤 오름·뒤 내림)을 모두 찾으면 그걸로 속도와 각 충격을 정합니다.
+    cross_mm = None
+    if bump_radius and bump_height_mm and wheel_radius_mm is not None:
+        big_r, low_r = bump_radius + wheel_radius_mm, bump_radius - bump_height_mm + wheel_radius_mm
+        if low_r < big_r:
+            cross_mm = 2 * (big_r * big_r - low_r * low_r) ** 0.5
+    if cross_mm is None and bump_width_mm:
+        cross_mm = bump_width_mm
+    narrow = cross_mm is None or wheelbase_mm is None or cross_mm < wheelbase_mm
+    ev4 = pitch_events(t, pitch, wheelbase_mm, narrow, span) if span else None
+    if ev4 is not None and not (MIN_SPEED_MPS <= ev4["speed_mps"] <= MAX_SPEED_MPS):
+        ev4 = None
+    events: list[dict[str, Any]] = []
+    if ev4 is not None:
+        def win_peak(t0: float, before: float = 0.03, after: float = 0.06) -> Peak:
+            idxs = [i for i in range(len(t)) if t0 - before <= t[i] <= t0 + after] or [min(range(len(t)), key=lambda i: abs(t[i] - t0))]
+            i = max(idxs, key=lambda i: v[i])
+            return Peak(i, t[i], v[i])
+        order = sorted(("FU", "FD", "RU", "RD"), key=lambda k: ev4[k])
+        for j, k in enumerate(order):
+            # 이웃한 순간과 겹치지 않게 창을 가운데에서 자릅니다(빠르면 앞바퀴 내림과 뒷바퀴 오름이 가까움).
+            before = 0.03 if j == 0 else min(0.03, (ev4[k] - ev4[order[j - 1]]) / 2)
+            after = 0.06 if j == 3 else min(0.06, (ev4[order[j + 1]] - ev4[k]) / 2)
+            pk = win_peak(ev4[k], before, after)
+            events.append({"kind": k, "label": EVENT_LABEL[k], "t_s": round(ev4[k], 4), "peak_t_s": round(pk.t_s, 4), "g": round(pk.value_g, 4)})
+        result["events"] = events
+        result["pitch"] = {"front_up_t_s": round(ev4["FU"], 4), "rear_up_t_s": round(ev4["RU"], 4), "max_deg": max(ev4["front_deg"], ev4["rear_deg"]),
+                           "front_down_t_s": round(ev4["FD"], 4), "rear_down_t_s": round(ev4["RD"], 4),
+                           "cross_s": round(ev4["cross_s"], 4), "speed_mps": round(ev4["speed_mps"], 4)}
+    by_pitch = None if ev4 is not None else (pitch_axle_times(t, pitch, wheelbase_mm, bump_width_mm, span) if span else None)
+    if ev4 is not None:
+        fu = next(e for e in events if e["kind"] == "FU"); ru = next(e for e in events if e["kind"] == "RU")
+        pitch_pair = (Peak(0, fu["peak_t_s"], fu["g"]), Peak(0, ru["peak_t_s"], ru["g"]))
+    elif by_pitch is not None:
         tf, tr, th = by_pitch
         def near(target: float) -> Peak | None:
             close = [p for p in find_peaks(t, v, max(0.05, 2.0 * sigma), min_gap_s) if abs(p.t_s - target) <= 0.08]
@@ -689,7 +805,7 @@ def analyze_run(
             pattern = None
     if pitch_pair is not None:
         pair = pitch_pair
-        result["pair_source"] = "pitch"
+        result["pair_source"] = "pitch4" if ev4 is not None else "pitch"
     elif pattern is not None:
         pa, pb, pc, pd, pv = pattern
         pair = (pa, pc)
@@ -718,7 +834,7 @@ def analyze_run(
         pair = pick_axle_pair(peaks, wheelbase_mm)
         if pair is not None:
             flags.append("착지 피크가 바퀴 피크와 겹쳐 짝에 포함했습니다 – 속도 오차 가능(영상 실측과 비교 권장).")
-    if pair is not None and result["pair_source"] not in ("manual", "pitch"):
+    if pair is not None and result["pair_source"] not in ("manual", "pitch", "pitch4"):
         # 방지턱이 정말 있었는지: 고른 두 피크가 나머지 진동 피크보다 뚜렷이(민감도에 따라 1.15~1.5배 이상) 커야 합니다.
         small = find_peaks(t, v, max(0.08, min(3.0, noise_k * 0.66) * sigma), min_gap_s)
         near = lambda p: any(0 <= p.t_s - q.t_s <= 0.04 or abs(p.t_s - q.t_s) < 1e-9 for q in pair)  # noqa: E731
@@ -752,6 +868,10 @@ def analyze_run(
         if wheelbase_mm:
             if result["pair_source"] == "pattern" and result.get("pattern"):
                 result["speed_mps"] = result["pattern"]["speed_mps"]  # 앞·뒤 오름 간격과 내림 간격의 평균으로 계산
+            elif result["pair_source"] == "pitch4" and result.get("pitch"):
+                # 기울기로 찾은 오름→오름, 내림→내림 간격의 평균(충격 피크의 위치보다 정확)
+                result["speed_mps"] = result["pitch"]["speed_mps"]
+                result["axle_dt_s"] = round(ev4["axle_dt_s"], 4)
             else:
                 result["speed_mps"] = round((wheelbase_mm / 1000.0) / dt, 4)
         else:
@@ -861,7 +981,7 @@ def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[
     groups: dict[tuple, list[dict[str, Any]]] = {}
     for run in runs:
         a = run.get("analysis") or {}
-        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") in ("manual", "pattern", "pitch") or not a.get("axle_dt_s"):
+        if run.get("excluded") or not a.get("bump_detected") or a.get("pair_source") in ("manual", "pattern", "pitch", "pitch4") or not a.get("axle_dt_s"):
             continue
         groups.setdefault(group_key(run), []).append(run)
     fixed: dict[str, dict[str, Any]] = {}
@@ -930,6 +1050,13 @@ def aggregate(runs: list[dict[str, Any]], method: str = "trim") -> list[dict[str
         dvzs = [r["analysis"].get("dvz_mps") for r in kept_runs if r["analysis"].get("dvz_mps")]
         crests = [r["analysis"].get("crest_min_g") for r in kept_runs if r["analysis"].get("crest_min_g") is not None]
         favg = [r["analysis"].get("avg_force_n") for r in kept_runs if r["analysis"].get("avg_force_n")]
+        ev_mean: dict[str, float] = {}
+        ev_n: dict[str, int] = {}
+        for kind in ("FU", "FD", "RU", "RD"):
+            vals = [e["g"] - 1.0 for r in kept_runs for e in (r["analysis"].get("events") or []) if e.get("kind") == kind]
+            if vals:
+                ev_mean[kind] = round(sum(vals) / len(vals), 4)
+                ev_n[kind] = len(vals)
         pulses = [r["analysis"].get("pulse_s") for r in kept_runs if r["analysis"].get("pulse_s")]
         mean_delta = _mean(kept)
         sd_delta = (sum((x - mean_delta) ** 2 for x in kept) / (len(kept) - 1)) ** 0.5 if len(kept) > 1 and mean_delta is not None else None
@@ -953,6 +1080,7 @@ def aggregate(runs: list[dict[str, Any]], method: str = "trim") -> list[dict[str
             "mean_dvz_mps": round(_mean(dvzs), 5) if dvzs else None,
             "mean_crest_min_g": round(_mean(crests), 4) if crests else None,
             "mean_avg_force_n": round(_mean(favg), 4) if favg else None,
+            "event_delta_g": ev_mean, "event_n": ev_n,
             "mean_pi": round(_mean(pis), 4) if pis else None,
             "jump_count": sum(1 for r in items if r["analysis"].get("jump")),
             "run_ids": [r["id"] for r in items],

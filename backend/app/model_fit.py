@@ -266,6 +266,51 @@ def output_for_speed(maps: list[dict[str, Any]], bump_id: str, mass_g: float, mo
             "extrapolated": not (min(xs) <= out <= max(xs)), "r2": best["r2"]}
 
 
+def event_models(groups: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """방지턱·단계(앞 오름 FU, 앞 내림 FD, 뒤 오름 RU, 뒤 내림 RD)별 거듭제곱식 Δa = k·vⁿ(·mᵖ).
+
+    조건 평균(이상치 처리 반영)의 단계별 Δa를 로그 회귀로 맞춥니다. 질량이 2가지 이상이고 점이 4개 이상이면 질량 항도 넣습니다.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for bump in sorted({g["bump_id"] for g in groups}):
+        per: dict[str, Any] = {}
+        for kind in ("FU", "FD", "RU", "RD"):
+            pts = [(g["mean_speed_mps"], g["total_mass_g"] / 1000.0, (g.get("event_delta_g") or {}).get(kind))
+                   for g in groups if g["bump_id"] == bump and g.get("mean_speed_mps")]
+            pts = [(v, m, d) for v, m, d in pts if d is not None and d > 0 and v > 0]
+            if len({round(v, 3) for v, _, _ in pts}) < 2:
+                continue
+            use_m = len({m for _, m, _ in pts}) >= 2 and len(pts) >= 4
+            x = [[1.0, math.log(v)] + ([math.log(m)] if use_m else []) for v, m, _ in pts]
+            y = [math.log(d) for _, _, d in pts]
+            res = ols(x, y)
+            if not res:
+                continue
+            b = res["beta"]
+            k, n, p = math.exp(b[0]), b[1], (b[2] if use_m else 0.0)
+            pred = [k * v ** n * (m ** p if use_m else 1.0) for v, m, _ in pts]
+            act = [d for _, _, d in pts]
+            mean = sum(act) / len(act)
+            sst = sum((a - mean) ** 2 for a in act)
+            ssr = sum((a - q) ** 2 for a, q in zip(act, pred))
+            per[kind] = {"k": k, "n": n, "p": p, "uses_mass": use_m, "points": len(pts),
+                         "r2": 1 - ssr / sst if sst > 0 else 1.0, "rmse": (ssr / len(pts)) ** 0.5}
+        if per:
+            out[bump] = per
+    return out
+
+
+def event_predict(em: dict[str, Any], v: float, m_kg: float) -> float:
+    return em["k"] * v ** em["n"] * (m_kg ** em["p"] if em.get("uses_mass") else 1.0)
+
+
+def event_solve(em: dict[str, Any], delta: float, m_kg: float) -> float | None:
+    if delta <= 0 or em["n"] <= 0:
+        return None
+    base = em["k"] * (m_kg ** em["p"] if em.get("uses_mass") else 1.0)
+    return (delta / base) ** (1.0 / em["n"]) if base > 0 else None
+
+
 def speed_models(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """방지턱·출력 방식별 '출력값·질량 → 통과 속도' 식.
 

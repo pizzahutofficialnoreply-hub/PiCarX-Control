@@ -69,3 +69,18 @@ def test_glitch_samples_are_replaced():
     assert n_bad == 2
     assert max(out["vertical_g"][90:110]) < 1.2 and min(out["vertical_g"][190:210]) > 0.8
     assert max(out["vertical_g"][295:310]) > 3.5
+
+
+def test_vision_detects_colored_bumps_beside_line():
+    import numpy as np
+    from app import vision
+    rng = np.random.default_rng(0)
+    floor = np.clip(rng.normal([200, 180, 150], 6, size=(90, 160, 3)), 0, 255)
+    floor[:, 75:85] = 30  # 가운데 검은 유도선
+    s = vision.calibrate(floor, vision.VisionSettings())
+    assert max(vision.score(floor, s)) < 0.05
+    bump = floor.copy()
+    bump[60:75, 10:70] = [120, 120, 125]   # 왼쪽 회색 방지턱
+    bump[60:75, 90:150] = [210, 170, 40]   # 오른쪽 노란 방지턱
+    sc = vision.score(bump, s)
+    assert min(sc) > 0.12

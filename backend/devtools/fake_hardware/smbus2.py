@@ -26,7 +26,8 @@ class SMBus:
         ax = fs.state["accel"] / 9.80665 + random.gauss(0, 0.01)
         out = _word(ax, 4096) + _word(random.gauss(0, 0.01), 4096) + _word(az, 4096)
         out += [0, 0]
-        out += _word(random.gauss(0, 0.3), 65.5) + _word(random.gauss(0, 0.3), 65.5) + _word(gz, 65.5)
+        gy = fs.state.get("pitch_rate", 0.0) + random.gauss(0, 0.3)
+        out += _word(random.gauss(0, 0.3), 65.5) + _word(gy, 65.5) + _word(gz, 65.5)
         return out[:length]
 
     def close(self):

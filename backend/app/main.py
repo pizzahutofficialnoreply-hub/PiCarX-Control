@@ -159,6 +159,27 @@ class ControlService:
                     pass
                 raise
 
+    async def experiment_spin(self, direction: str, power: float, generation: int, steer: float = 30.0) -> bool:
+        """코스 주행의 제자리 회전 명령(0.1초 안에 다시 보내 watchdog을 갱신)."""
+        async with self.lock:
+            if generation != self.stop_generation:
+                return False
+            if not self.adapter.connected:
+                raise RuntimeError(self.adapter.connection_error or "PiCar-X is not connected.")
+            try:
+                self.adapter.spin(direction, power, steer)
+                self.motion, self.speed, self.steering = "spin_" + direction, int(round(power)), int(round(steer))
+                self.updated_at = time.monotonic()
+                self.fault = None
+                return True
+            except Exception as exc:
+                self.fault = str(exc)
+                try:
+                    self.stop_now()
+                except Exception:
+                    pass
+                raise
+
     async def experiment_drive(self, mode: str, value: float, generation: int,
                                direction: str = "forward", steering: float = 0.0) -> bool:
         """실험용 직진 명령. 자동 측정 주행이 0.1초마다 호출해 watchdog을 갱신합니다.
@@ -302,6 +323,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PiCar X Control API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(experiment_router)
+from .course import router as course_router  # noqa: E402
+app.include_router(course_router)
 bind_control(lambda: control)
 
 @app.get("/api/health")

@@ -6,6 +6,7 @@ import { XYChart } from '../components/ExperimentCharts';
 import type { ExperimentContext } from './context';
 import NumInput from '../components/NumInput';
 import { usePersistentState } from '../services/persist';
+import HelpBox from '../components/HelpBox';
 
 type LineStatus = {
   raw: number[] | null; weights: number[] | null; position: number | null; settings: LineSettings; calibrated: boolean; error: string | null;
@@ -64,8 +65,19 @@ export default function LineTab({ ctx }: { ctx: ExperimentContext }) {
       </article>
 
       <article className="card experiment-card">
+        <HelpBox id="line-gentle" title="왜 '조향 최소' 방식인가요?" defaultOpen={false}>
+          <p>바닥 센서 3개는 테이프가 가운데 센서 밑에 있을 때(약 ±1 cm) 위치를 구분하지 못해, 예전 방식은 작은 흔들림에도 좌우로 크게 꺾었습니다. 그러면 차가 방지턱에 비스듬히 들어가 왼쪽·오른쪽 바퀴가 다른 시각에 부딪혀 측정이 흐트러집니다.</p>
+          <ul><li><b>조향 최소</b>: 테이프 위치가 '안 꺾는 범위' 안이면 바퀴를 똑바로 두고, 그 밖으로 벗어난 만큼만 최대 8°까지 꺾습니다. 꺾는 각도도 1초에 60° 이상 빨리 바뀌지 않게 합니다.</li>
+            <li>그래도 흔들리면 '안 꺾는 범위'를 0.45로 올리고, 테이프에서 자꾸 벗어나면 0.25로 낮추거나 최대 조향각을 10~12°로 올리세요.</li>
+            <li>출발 전에 차를 유도선과 나란하게 놓는 것이 가장 중요합니다(코스 반복 측정은 출발선 가로 테이프로 위치를 맞춥니다).</li></ul>
+        </HelpBox>
         <div className="card-head"><div><h2>추종 설정과 시험 주행</h2><p>먼저 이 탭에서 테이프만 따라가 보며 배율을 맞춘 뒤, 측정·분석 탭의 '측정 중 조향'을 <b>바닥 테이프 따라가기</b>로 바꾸면 측정 직진에도 쓰입니다(후진 복귀는 자이로 사용).</p></div></div>
         {draft && <div className="experiment-fields">
+          <label>추종 방식<select value={draft.mode ?? 'gentle'} onChange={e => setDraft({ ...draft, mode: e.target.value as 'gentle' | 'normal' })}><option value="gentle">조향 최소 (가운데 근처면 똑바로, 추천)</option><option value="normal">적극 추종 (커브 코스용)</option></select></label>
+          {(draft.mode ?? 'gentle') === 'gentle' && <>
+            <label>안 꺾는 범위 (0~0.9, 클수록 덜 꺾음)<NumInput min={0} max={0.9} step={0.05} value={draft.deadband ?? 0.35} onChange={e => setDraft({ ...draft, deadband: Math.max(0, Math.min(0.9, Number(e.target.value))) })} /></label>
+            <label>최대 조향각 (조향 최소 모드, °)<NumInput min={2} max={30} value={draft.gentle_max_deg ?? 8} onChange={e => setDraft({ ...draft, gentle_max_deg: Math.max(2, Math.min(30, Number(e.target.value) || 8)) })} /></label>
+            <label>조향 바뀌는 속도 한계 (°/s)<NumInput min={10} max={600} step={10} value={draft.rate_limit_dps ?? 60} onChange={e => setDraft({ ...draft, rate_limit_dps: Math.max(10, Math.min(600, Number(e.target.value) || 60)) })} /></label></>}
           <label>조향 배율<NumInput min={0} max={3} step={0.1} value={draft.gain} onChange={e => setDraft({ ...draft, gain: Number(e.target.value) })} /></label>
           <label>감쇠 (s, 흔들림 줄이기)<NumInput min={0} max={1} step={0.05} value={draft.damping ?? 0.25} onChange={e => setDraft({ ...draft, damping: Number(e.target.value) })} /></label>
           <label className="exp-check"><input type="checkbox" checked={draft.auto_sign ?? true} onChange={e => setDraft({ ...draft, auto_sign: e.target.checked })} /> 조향 방향 자동 판별 (현재 {(draft.steer_sign ?? 1) > 0 ? '정방향' : '반대 방향'})</label>

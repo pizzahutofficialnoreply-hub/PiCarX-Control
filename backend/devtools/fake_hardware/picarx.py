@@ -52,6 +52,7 @@ class Picarx:
             fs.state["motion"] = motion if speed else "stopped"
             fs.state["duty"] = duty
             fs.state["duty_l"] = fs.state["duty_r"] = duty
+            fs.state["sl"] = fs.state["sr"] = sign
 
     def forward(self, speed):
         self._drive("forward", speed)
@@ -72,6 +73,7 @@ class Picarx:
         self.motor_direction_pins[motor - 1]._v = (0 if forward else 1) if motor == 1 else (1 if forward else 0)
         with fs.LOCK:
             fs.state["duty_l" if motor == 1 else "duty_r"] = duty
+            fs.state["sl" if motor == 1 else "sr"] = 1 if forward else -1
         if motor == 1:
             self._m1 = (forward, duty)
         else:

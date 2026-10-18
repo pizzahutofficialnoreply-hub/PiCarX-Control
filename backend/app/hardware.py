@@ -38,6 +38,7 @@ class HardwareAdapter(Protocol):
     def read_battery(self) -> float | None: ...
     def read_grayscale(self) -> list[float] | None: ...
     def read_distance(self) -> float | None: ...
+    def spin(self, direction: str, power: float, steer: float = 30.0) -> None: ...
     def drive_experiment(self, mode: str, value: float, direction: str = "forward", steering: float = 0.0) -> None: ...
     def test_steering(self, direction: str, angle: int) -> None: ...
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None: ...
@@ -84,6 +85,9 @@ class MockAdapter:
         return [320.0, 340.0, 315.0]
     def read_distance(self) -> float | None:
         return None
+    def spin(self, direction: str, power: float, steer: float = 30.0) -> None:
+        self.motion = "spin_" + direction
+        self.last_command = {"direction": "spin_" + direction, "power": power, "at": time.time()}
     def test_steering(self, direction: str, angle: int) -> None:
         pass
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -137,6 +141,8 @@ class UnavailableAdapter:
         raise RuntimeError(self.connection_error or "PiCar-X is unavailable.")
     def read_distance(self) -> float | None:
         return None
+    def spin(self, direction: str, power: float, steer: float = 30.0) -> None:
+        raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def test_steering(self, direction: str, angle: int) -> None:
         raise RuntimeError(f"PiCar-X is unavailable: {self.connection_error}")
     def set_calibration(self, steering_center: int, pan_center: int, tilt_center: int) -> None:
@@ -353,6 +359,27 @@ class PiCarXAdapter:
         if not callable(getattr(car, "get_grayscale_data", None)):
             return None
         return [float(x) for x in car.get_grayscale_data()]
+
+    def spin(self, direction: str, power: float, steer: float = 30.0) -> None:
+        """제자리 회전: 앞바퀴를 끝까지 꺾고 뒤 두 바퀴를 서로 반대로 돌립니다(left = 반시계).
+
+        PiCar-X는 앞바퀴 조향 + 뒤 두 바퀴 구동이라 완전한 제자리 회전은 아니고, 뒷축 가운데 근처를 중심으로 돕니다.
+        """
+        car = self._require_car()
+        p = float(self._clamp(round(power), 0, MAX_PWM))
+        angle = -abs(steer) if direction == "left" else abs(steer)
+        self._set_steering(int(round(angle)))
+        set_speed = getattr(car, "set_motor_speed", None)
+        if not callable(set_speed):
+            raise RuntimeError("설치된 picarx 라이브러리에 set_motor_speed가 없어 제자리 회전을 할 수 없습니다.")
+        # 모터 1 = 왼쪽(전진 +), 모터 2 = 오른쪽(전진 −). 왼쪽 회전: 왼쪽 바퀴 후진, 오른쪽 바퀴 전진.
+        if direction == "left":
+            set_speed(1, -p); set_speed(2, -p)
+        else:
+            set_speed(1, p); set_speed(2, p)
+        self._last_motor_key = None
+        self._last_angle = None
+        self.last_command = {"direction": "spin_" + direction, "power": p, "steering": angle, "at": time.time()}
 
     def read_distance(self) -> float | None:
         """앞쪽 초음파 센서 거리(cm). 실패하면(라이브러리가 -1, -2 등을 돌려줌) None."""

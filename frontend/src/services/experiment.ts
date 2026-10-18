@@ -53,6 +53,8 @@ export type ExperimentSettings = {
   ultrasonic_hz?: number;
   wall_stop_cm?: number;
   line?: LineSettings;
+  vision?: VisionSettings;
+  course_spin_lead_deg?: number;
   bumps: BumpProfile[];
   max_output?: number;
 };
@@ -90,22 +92,40 @@ export type RunAnalysis = {
   front_t_s: number | null; front_g: number | null; rear_t_s: number | null; rear_g: number | null;
   axle_dt_s: number | null; speed_mps: number | null; min_g: number | null; jump: boolean | null;
   airborne_s?: number | null; landing_t_s?: number | null; landing_g?: number | null;
-  candidates?: PeakCandidate[]; auto_pair?: { front_t_s: number; front_g: number; rear_t_s: number; rear_g: number; source: string | null } | null; pair_source?: 'auto' | 'manual' | 'consistency' | 'pattern' | 'pitch' | null;
+  candidates?: PeakCandidate[]; auto_pair?: { front_t_s: number; front_g: number; rear_t_s: number; rear_g: number; source: string | null } | null; pair_source?: 'auto' | 'manual' | 'consistency' | 'pattern' | 'pitch' | 'pitch4' | null;
   peak_force_n: number | null; dynamic_force_n: number | null; pi: number | null; r_eff_m: number | null;
   critical_speed_mps: number | null; peak_count: number; flags: string[];
   bump_detected?: boolean | null; noise_sigma_g?: number | null; threshold_used_g?: number | null; standout_ratio?: number | null;
   params?: Record<string, number | null>;
   impulse_front_ns?: number | null; impulse_rear_ns?: number | null; impulse_ns?: number | null; dvz_mps?: number | null;
   pulse_s?: number | null; pulse_rear_s?: number | null; avg_force_n?: number | null; momentum_nsx?: number | null;
+  events?: BumpEvent[]; glitches_fixed?: number; max_gap_ms?: number | null;
+  pitch?: { front_up_t_s: number; rear_up_t_s: number; front_down_t_s?: number; rear_down_t_s?: number; max_deg: number; cross_s?: number; speed_mps?: number } | null;
   entry_sin?: number | null; dvz_theory_mps?: number | null; impulse_theory_ns?: number | null; crest_min_g?: number | null; crest_theory_g?: number | null;
 };
 
+export type EventKind = 'FU' | 'FD' | 'RU' | 'RD';
+export type BumpEvent = { kind: EventKind; label: string; t_s: number; peak_t_s: number; g: number };
+export const EVENT_INFO: Record<EventKind, { label: string; short: string; color: string }> = {
+  FU: { label: '앞바퀴 오름', short: '앞↑', color: '#d0782a' }, FD: { label: '앞바퀴 내림', short: '앞↓', color: '#9c4f12' },
+  RU: { label: '뒷바퀴 오름', short: '뒤↑', color: '#3c9a5f' }, RD: { label: '뒷바퀴 내림', short: '뒤↓', color: '#1f6b3c' },
+};
 export type SlowdownInfo = {
-  trigger: 'time' | 'tape' | 'distance'; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
+  trigger: 'time' | 'tape' | 'distance' | 'camera'; trigger_requested?: string; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
+  margin?: 'ratio' | 'sigma'; model_error_g?: number; target_delta_g?: number;
   v0_pred_mps: number; pred_delta_v0_g: number; vmax_mps: number; target_v_mps: number; pred_delta_target_g: number; needed: boolean;
   output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null;
+  staged?: { v_by_event: Record<EventKind, number>; v_front_mps: number; v_rear_mps: number; output_front: number | null; output_rear: number | null; clipped: boolean; pred_by_event_g: Record<EventKind, number> } | null;
+  resume?: boolean; stage_log?: [number, string, number][];
   measured_speed_mps?: number | null; measured_peak_g?: number | null; pass?: boolean;
 };
+export type EventModel = { k: number; n: number; p: number; uses_mass: boolean; points: number; r2: number; rmse: number };
+export const eventPredict = (em: EventModel, v: number, mKg: number) => em.k * v ** em.n * (em.uses_mass ? mKg ** em.p : 1);
+export const eventSolve = (em: EventModel, delta: number, mKg: number): number | null => {
+  const base = em.k * (em.uses_mass ? mKg ** em.p : 1);
+  return delta > 0 && em.n > 0 && base > 0 ? (delta / base) ** (1 / em.n) : null;
+};
+export type VisionSettings = { floor_mean: number[] | null; floor_std: number | null; roi_top: number; roi_bottom: number; center_gap: number; k_sigma: number; threshold: number };
 export type DistanceSummary = {
   n_samples: number; n_valid: number; n_removed: number; rate_hz: number | null; approach_speed_mps: number | null; bump_speed_mps: number | null;
   min_speed_mps: number | null; drop_pct: number | null; us_bump_t_s: number | null; us_vs_imu_s: number | null; us_dip_pct?: number | null;
@@ -134,6 +154,7 @@ export type ConditionGroup = {
   mean_peak_delta_g: number | null; mean_peak_g: number | null; kept_min_delta_g: number; kept_max_delta_g: number;
   dropped_delta_g: number[]; mean_force_n: number | null; mean_pi: number | null; jump_count: number; run_ids: string[];
   sd_peak_delta_g?: number | null; dropped_run_ids?: string[]; outlier?: { method: OutlierMethod; low?: number; high?: number; mean?: number; sd?: number; q1?: number; q3?: number; iqr?: number };
+  event_delta_g?: Partial<Record<EventKind, number>>; event_n?: Partial<Record<EventKind, number>>;
   mean_impulse_ns?: number | null; mean_pulse_s?: number | null; mean_dvz_mps?: number | null; mean_crest_min_g?: number | null; mean_avg_force_n?: number | null;
   direction?: 'forward' | 'backward';
 };
@@ -162,7 +183,7 @@ export type Criterion = {
 export type RunsResponse = {
   simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit>; criteria?: Record<string, Criterion>;
   models?: Record<string, ModelComparison>; chosen_models?: Record<string, string | null>; interpretation?: Record<string, string[]>;
-  speed_maps?: SpeedMap[]; speed_models?: SpeedModel[]; validation?: ValidationBundle; progress?: Progress;
+  speed_maps?: SpeedMap[]; speed_models?: SpeedModel[]; event_models?: Record<string, Partial<Record<EventKind, EventModel>>>; validation?: ValidationBundle; progress?: Progress;
 };
 
 export type AutoRunState = {
@@ -250,7 +271,7 @@ export type ValidationRow = {
 export type ValidationBundle = { rows: ValidationRow[]; summary: { count: number; evaluated: number; mape: number | null; bias_pct: number | null; within_10pct: number; within_20pct: number } };
 export type ProgressCell = { bump_id: string; added_mass_g: number; output_value: number; done: number; need: number };
 export type Progress = { cells: ProgressCell[]; done: number; need: number; next: ProgressCell | null };
-export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number; auto_sign?: boolean; steer_sign?: number };
+export type LineSettings = { floor: number[] | null; line: number[] | null; gain: number; damping: number; max_steer_deg: number; min_weight: number; lost_timeout_s: number; auto_sign?: boolean; steer_sign?: number; mode?: 'gentle' | 'normal'; deadband?: number; gentle_max_deg?: number; rate_limit_dps?: number };
 export type PeakCandidate = { t_s: number; g: number; landing: boolean };
 
 export function modelPredict(model: { kind: string; coef: Record<string, number> } | null | undefined, v: number, mKg: number): number | null {
