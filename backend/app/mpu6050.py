@@ -58,6 +58,8 @@ class MPU6050Service:
         self.bad_reads = 0
         self.io_errors = 0
         self.fifo_overflows = 0
+        self.fifo_realigns = 0
+        self._odd_hist: deque = deque()
         import os
         self.use_fifo = os.getenv("PICARX_MPU_FIFO", "1") != "0"   # 센서 내장 버퍼로 읽기(실패하면 한 표본씩 직접 읽기로 돌아감)
         self._fifo = False
@@ -137,12 +139,37 @@ class MPU6050Service:
         times.sort()
         return times[len(times) // 2]
 
+    def _fifo_realign(self, why: str) -> None:
+        """FIFO를 비우고 다시 시작(12바이트 칸 맞추기). 짧은 시간에 자주 일어나면 직접 읽기로 바꿈."""
+        self.fifo_realigns += 1
+        now = time.monotonic()
+        self._realign_times = [t for t in getattr(self, "_realign_times", []) if now - t < 10.0] + [now]
+        try:
+            with self._i2c_lock:
+                self._bus.write_byte_data(self.ADDRESS, 0x6A, 0x44)   # FIFO 켠 채로 비우기
+        except Exception:
+            pass
+        self._fifo_k = 0
+        self._fifo_t0 = time.monotonic()
+        self._fifo_prev_words = None
+        if len(self._realign_times) > 5:
+            self._fifo = False
+            self.fifo_note = f"센서 버퍼 칸이 자주 밀려({why}) 한 표본씩 직접 읽기로 바꿨습니다. I²C 배선·속도를 확인하세요."
+            try:
+                with self._i2c_lock:
+                    self._bus.write_byte_data(self.ADDRESS, 0x23, 0x00)   # FIFO 끔
+                    self._bus.write_byte_data(self.ADDRESS, 0x19, 0x00)   # 1 kHz 목표로 되돌림
+            except Exception:
+                pass
+
     def _fifo_read(self) -> list[Sample]:
         bus = self._bus
         a = self.ADDRESS
         with self._i2c_lock:
             hi, lo = bus.read_i2c_block_data(a, 0x72, 2)
         count = (hi << 8) | lo
+        if count > 1024:
+            return []          # 개수 읽기가 깨짐(통신 오류): 이번엔 건너뜀
         if count >= 1008:
             # 버퍼가 넘침(파이썬이 85 ms 넘게 멈춤): 비우고 다시 시작. 이 구간은 공백으로 남습니다.
             self.fifo_overflows += 1
@@ -157,11 +184,17 @@ class MPU6050Service:
         n = min(n, 40)          # 한 번에 너무 오래 잡지 않게(다른 I²C 장치도 써야 함)
         data: list[int] = []
         remaining = n * self.FIFO_FRAME
-        while remaining > 0:
-            chunk = min(self.FIFO_CHUNK, remaining)
-            with self._i2c_lock:
-                data += bus.read_i2c_block_data(a, 0x74, chunk)
-            remaining -= chunk
+        try:
+            while remaining > 0:
+                chunk = min(self.FIFO_CHUNK, remaining)
+                with self._i2c_lock:
+                    data += bus.read_i2c_block_data(a, 0x74, chunk)
+                remaining -= chunk
+        except Exception:
+            # 읽는 도중 통신이 끊기면 버퍼에서 몇 바이트가 빠져 12바이트 칸이 밀립니다(가속도 자리에 자이로 값이 들어감).
+            # 버퍼를 비우고 처음부터 다시 맞춥니다.
+            self._fifo_realign("읽는 도중 통신 오류")
+            raise
         now = time.monotonic()
         dt = self._fifo_dt
         # 표본 시각 = 시작 시각 + 표본 번호 × 간격. 센서 시계와 컴퓨터 시계의 작은 차이(±1~2%)는 천천히 맞춤.
@@ -173,6 +206,23 @@ class MPU6050Service:
             self._fifo_t0 += 0.05 * err
         out: list[Sample] = []
         acc, gs = self.ACCEL_SENSITIVITY, self.GYRO_SENSITIVITY
+        # 칸 밀림 점검: 정상이면 가속도 크기가 대부분 0.5~5 g(정지·주행 1 g 근처). 절반 넘게 벗어나면 칸이 밀린 것
+        odd = 0
+        for i in range(n):
+            d = data[i * 12:i * 12 + 6]
+            ax_, ay_, az_ = (_signed(d[k], d[k + 1]) / acc for k in (0, 2, 4))
+            if not (0.5 <= math.sqrt(ax_ * ax_ + ay_ * ay_ + az_ * az_) <= 5.0):
+                odd += 1
+        # 바퀴가 뜨면(점프) 실제로 0 g 근처가 수십 ms 나오므로, 최근 약 100개 표본 중 70% 넘게 비정상일 때만 칸 밀림으로 봄
+        hist = self._odd_hist
+        hist.append((n, odd))
+        while sum(h[0] for h in hist) > 100 and len(hist) > 1:
+            hist.popleft()
+        tot = sum(h[0] for h in hist)
+        if tot >= 40 and sum(h[1] for h in hist) > 0.7 * tot:
+            hist.clear()
+            self._fifo_realign("값이 물리적으로 맞지 않음(칸 밀림)")
+            return []
         for i in range(n):
             d = data[i * 12:(i + 1) * 12]
             words = [_signed(d[k], d[k + 1]) for k in (0, 2, 4, 6, 8, 10)]
@@ -597,6 +647,7 @@ class MPU6050Service:
             "sample_rate_target_hz": int(round(1 / (self._fifo_dt if self._fifo else self.SAMPLE_INTERVAL))),
             "read_mode": "fifo" if self._fifo else "direct",
             "fifo_overflows": self.fifo_overflows,
+            "fifo_realigns": self.fifo_realigns,
             "fifo_note": self.fifo_note,
             "range_g": 8,
             "error": error,

@@ -815,7 +815,11 @@ def analyze_run(
                              "speed_mps": round(pv, 4),
                              "bump_pass_s": round(((pb.t_s - pa.t_s) + (pd.t_s - pc.t_s)) / 2, 4)}
         landing = [p for p in landing if p not in (pa, pb, pc, pd)]
-        result["landing_t_s"] = result["landing_g"] = None
+        if landing:
+            hardest = max(landing, key=lambda p: p.value_g)
+            result.update(landing_t_s=round(hardest.t_s, 4), landing_g=round(hardest.value_g, 4))
+        else:
+            result["landing_t_s"] = result["landing_g"] = None
     else:
         pair = pick_axle_pair([p for p in peaks if p not in landing], wheelbase_mm)
         result["pair_source"] = "auto" if pair else None
@@ -884,7 +888,7 @@ def analyze_run(
             # 진동 한 점이 잠깐 기준 아래로 내려간 것은 점프가 아닙니다. 5 ms 이상 이어진 공중 구간만 인정합니다.
             lo_t, hi_t = peaks[0].t_s - 0.05, peaks[-1].t_s + 0.3
             result["jump"] = any(end >= lo_t and start <= hi_t for start, end, _ in segments)
-    if landing and not any("겹쳐" in f for f in flags):
+    if landing and result.get("landing_g") is not None and not any("겹쳐" in f for f in flags):
         flags.append(f"지면 이탈 후 착지 피크 {result['landing_g']:.2f} g를 앞·뒤 바퀴 피크에서 제외했습니다.")
 
     # 이론식 ② 충격량·③ 원운동 비교용 값(바퀴가 턱에 오르는 순간의 충격 펄스)

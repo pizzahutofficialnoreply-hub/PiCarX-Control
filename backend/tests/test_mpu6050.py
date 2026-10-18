@@ -110,3 +110,42 @@ def test_fifo_read_parses_frames_with_even_timestamps():
     assert abs(out[0][3] - 1.0) < 1e-6 and abs(out[0][6] - 1.0) < 0.01   # az = 1 g, gz = 65/65.5
     gaps = [b[0] - a[0] for a, b in zip(out, out[1:])]
     assert max(gaps) - min(gaps) < 1e-9 and abs(gaps[0] - 0.001) < 1e-4
+
+
+def test_fifo_misaligned_frames_trigger_realign():
+    """통신 오류로 FIFO 칸이 밀리면(가속도 자리에 엉뚱한 값) 버리고 버퍼를 다시 맞춤. 자주 일어나면 직접 읽기로 바꿈."""
+    from app.mpu6050 import MPU6050Service
+
+    def w(v):
+        r = int(v) & 0xFFFF
+        return [r >> 8, r & 0xFF]
+    good = []
+    for i in range(40):
+        good += w(0) + w(0) + w(4096) + w(5) + w(-7) + w(65)
+    shifted = good[3:] + [0, 0, 0]          # 3바이트 밀림
+    class Bus:
+        def __init__(self, data):
+            self.buf = list(data); self.writes = []
+        def read_i2c_block_data(self, addr, reg, length):
+            if reg == 0x72:
+                return [len(self.buf) >> 8, len(self.buf) & 0xFF]
+            out, self.buf = self.buf[:length], self.buf[length:]
+            return out
+        def write_byte_data(self, addr, reg, value):
+            self.writes.append((reg, value))
+    m = MPU6050Service()
+    m._fifo = True
+    m._bus = Bus(shifted)
+    assert m._fifo_read() == [] and m.fifo_realigns == 1 and (0x6A, 0x44) in m._bus.writes
+    m._bus = Bus(good)
+    assert len(m._fifo_read()) == 40
+    # 점프(공중, 0 g)가 짧게(20 ms) 섞인 정상 데이터는 버리지 않음
+    air = []
+    for i in range(20):
+        air += w(0) + w(0) + w(100) + w(5) + w(-7) + w(65)
+    m._bus = Bus(good + air)
+    assert len(m._fifo_read()) == 40 and len(m._fifo_read()) == 20 and m.fifo_realigns == 1
+    for _ in range(6):
+        m._bus = Bus(shifted)
+        m._fifo_read()
+    assert m._fifo is False                     # 너무 자주 밀리면 직접 읽기로

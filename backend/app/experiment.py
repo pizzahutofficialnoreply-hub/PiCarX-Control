@@ -1480,7 +1480,11 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
             pass
         if not simulated:
             await asyncio.to_thread(mpu6050_service.stop_recording)
-        auto_runner._phase("error", None, f"자동 측정 실패: {exc}")
+        import traceback
+        tb = traceback.extract_tb(exc.__traceback__)
+        where = f" [{tb[-1].filename.rsplit('/', 1)[-1]}:{tb[-1].lineno}]" if tb else ""
+        auto_runner._phase("error", None, f"자동 측정 실패: {exc}{where}")
+        record_event("experiment", "Auto run traceback", level="ERROR", details={"trace": traceback.format_exc()[-2000:]})
         record_event("experiment", "Auto run failed", level="ERROR", details={"error": str(exc)})
     finally:
         mpu6050_service.heading_stop()
