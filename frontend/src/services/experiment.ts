@@ -55,6 +55,18 @@ export type ExperimentSettings = {
   line?: LineSettings;
   vision?: VisionSettings;
   course_spin_lead_deg?: number;
+  /** 반복 측정: 끝내기(time = 시간·방지턱 통과 자동 정지, stop_line = 정지선 테이프에서 서서히 정지) */
+  end_mode?: 'time' | 'stop_line';
+  accel_mode?: 'instant' | 'ramp';
+  accel_s?: number;
+  decel_s?: number;
+  /** 복귀: 없음 / 후진 / 제자리 180° 회전(비우면 return_enabled로) */
+  return_mode?: 'none' | 'reverse' | 'uturn' | null;
+  spin_output?: number;
+  spin_direction?: 'left' | 'right';
+  creep_duty?: number;
+  leg_timeout_s?: number;
+  cross_threshold?: number;
   bumps: BumpProfile[];
   max_output?: number;
 };
@@ -64,7 +76,7 @@ export const DEFAULT_SETTINGS: ExperimentSettings = {
   wheelbase_mm: null, wheel_radius_mm: null, base_mass_g: null, threshold_delta_g: 0.3, min_gap_s: 0.03, jump_g: 0.2, filter_hz: 0, detect_level: 'normal',
   a_limit_mode: 'manual', a_limit_g: 1.7, a_limit_preset: 'trl614', a_limit_effective_g: 1.7, pre_roll_s: 1.0, run_seconds: 2.5, tail_s: 0.6,
   repeats: 5, return_enabled: true, return_output: null, return_scale: 1.0, rest_s: 1.5, heading_hold: true, heading_gain: 1.2, heading_ki: 0.8, heading_learn: true, heading_ff_forward: 0, heading_ff_backward: 0,
-  steering_source: 'gyro', kick_ms: 0, model_id: 'auto', plan_added_masses: [0, 150, 300], plan_outputs: [40, 55, 70, 85, 100], plan_repeats: 5,
+  steering_source: 'gyro', kick_ms: 0, end_mode: 'time', accel_mode: 'instant', accel_s: 0.6, decel_s: 0.3, return_mode: null, spin_output: 100, spin_direction: 'left', creep_duty: 40, leg_timeout_s: 8, cross_threshold: 0.5, model_id: 'auto', plan_added_masses: [0, 150, 300], plan_outputs: [40, 55, 70, 85, 100], plan_repeats: 5,
   bumps: [
     { id: 'A', name: 'A형 (완만)', height_mm: 10, width_mm: 60, radius_mm: 50 },
     { id: 'B', name: 'B형 (급함)', height_mm: 10, width_mm: 30, radius_mm: 16.25 },
@@ -143,6 +155,10 @@ export type RunSummary = {
   peak_override?: { front_t_s: number; rear_t_s: number } | null;
   steer_mean_late?: number | null; heading_ff_learned?: number | null;
   slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null;
+  /** 정지선 코스로 잰 회차: 구간(A→B/B→A), 정지선 인식 시각 */
+  course?: { leg?: string | null; end_mode?: string | null; accel?: string | null; detected?: boolean | null; detect_s?: number | null } | null;
+  /** 유도선+자이로 조향 요약: 방지턱 위 방향 유지 시간, 유도선 복귀 시간, 최대 방향 차이 */
+  guided?: { bump_hold_s: number; recover_s: number; max_offset_deg: number; ref_deg?: number | null } | null;
 };
 
 export type RunDetail = RunSummary & { series: { t_s: number[]; vertical_g: number[]; dynamic_g: number[]; filtered_g?: number[] }; drive_log?: [number, number, number, number | null][] | null;
@@ -187,7 +203,7 @@ export type RunsResponse = {
 };
 
 export type AutoRunState = {
-  state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'returning' | 'rest' | 'done' | 'error' | 'aborted';
+  state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'returning' | 'turning' | 'aligning' | 'rest' | 'done' | 'error' | 'aborted';
   message: string; run_id: string | null; phase_remaining_s: number | null; result: RunSummary | null;
   cycle?: number; cycles?: number; completed_run_ids?: string[]; heading_deg?: number | null;
 };

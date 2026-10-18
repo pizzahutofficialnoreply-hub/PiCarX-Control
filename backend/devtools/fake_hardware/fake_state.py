@@ -32,6 +32,8 @@ START_X = float(os.getenv("FAKE_START_X", str(round(SENSOR_AHEAD, 3))))
 STOP_X = float(os.getenv("FAKE_STOP_X", "1.15"))
 CROSS_HALF_LEN = 0.07
 TAPE_OFFSETS = (0.02, 0.0, -0.02)  # 그레이스케일 센서 좌·중·우의 옆 위치(m, 왼쪽 +)
+# 방지턱에 바퀴가 오를 때 차가 한쪽으로 틀어지는 정도(°, − = 오른쪽). 예: FAKE_BUMP_YAW=-8
+BUMP_YAW = float(os.getenv("FAKE_BUMP_YAW", "0"))
 
 state = {
     "motion": "stopped",   # stopped | forward | backward
@@ -48,6 +50,7 @@ state = {
     "last": time.monotonic(),
     "pulses": [],          # (t, amplitude)
     "sl": 1, "sr": 1,      # 좌우 바퀴 방향(+1 전진, −1 후진) – 제자리 회전 시험
+    "kick_left": 0.0, "kicked": set(),
 }
 
 
@@ -77,6 +80,10 @@ def _crossings(x0: float, x1: float, now: float, v: float, c: float = 1.0) -> No
                 state["pulses"].append((now, amp))
                 if up:
                     state["v"] *= 0.93  # 턱을 오르며 잠깐 느려짐
+                    key = ("kick", axle_offset, round(edge, 4))
+                    if BUMP_YAW and key not in state["kicked"]:
+                        state["kicked"].add(key)  # 바퀴마다 한 번만(짧은 회전 펄스로: 자이로에도 보이게)
+                        state["kick_left"] += BUMP_YAW * (1.0 if axle_offset else 0.6)
 
 
 def update(now: float | None = None) -> None:
@@ -112,6 +119,12 @@ def update(now: float | None = None) -> None:
             # 좌우 바퀴가 반대로 돌면 제자리 회전(뒷축 가운데 기준). 반시계(+) = 오른쪽 바퀴 전진.
             w = speed_for_duty(state["duty_r"]) * state["sr"] - speed_for_duty(state["duty_l"]) * state["sl"]
             yaw = math.degrees(w / TRACK) * 0.22  # 앞바퀴가 미끄러지며 버텨 실제보다 느리게 돎(약 150 °/s)
+        if state["kick_left"]:
+            k = state["kick_left"] * min(1.0, dt / 0.05)   # 방지턱에 부딪혀 약 50 ms 동안 틀어짐
+            state["kick_left"] -= k
+            yaw += k / dt
+        if v < 0.01 and not spinning:
+            state["kicked"].clear()  # 멈추면 다음 통과 때 다시 틀어질 수 있게
         state["yaw_rate"] = yaw
         state["heading"] += yaw * dt
         # 앞뒤 기울기(피치): 앞·뒤 바퀴가 들린 높이 차이로 계산(앞이 들리면 +)

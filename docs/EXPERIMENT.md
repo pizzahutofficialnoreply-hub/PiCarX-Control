@@ -223,21 +223,23 @@ MPU-6050은 I2C로 읽습니다. 라즈베리파이 기본 I2C 속도(100 kHz)�
 
 차가 거의 곧게 가는데 센서가 테이프를 조금 벗어났다고 매번 크게 꺾으면, 오히려 좌우로 흔들려 측정에 진동이 섞입니다. 라인 설정의 *조향 방식*을 '조향 최소'로 두면 ① 위치가 데드밴드(기본 ±0.25) 안이면 0°, ② 최대 조향각을 작게(기본 8°) 제한, ③ 조향 변화 속도를 초당 일정 각도(기본 60°/s)로 제한합니다. 좌우 바퀴 균형(도구 탭)을 먼저 맞추면 거의 조향 없이 테이프를 따라갑니다.
 
-## 코스 모드 (출발선 ↔ 정지선 반복)
+## 정지선 코스로 반복 측정 (출발선 ↔ 정지선)
 
-측정·분석 탭의 *코스 주행* 카드. 바닥에 가로 검은 테이프 2개(1번 출발선, 2번 정지선)와 그 사이를 잇는 세로 안내선을 붙입니다. 가로선은 센서 3개가 모두 어두우면(기본 0.5 이상) 인식합니다.
+측정·분석 탭 → 실험 조건 → *반복 측정* 안의 옵션입니다(따로 된 카드가 아님). 바닥에 가로 검은 테이프 2개(출발선·정지선)와 그 사이를 잇는 세로 유도선을 붙입니다. 가로선은 센서 3개가 모두 어두우면(기본 0.5 이상) 인식합니다. 방지턱을 지나며 차가 옆으로 2~4 cm 밀려도 세 센서가 모두 가로선 위에 오도록 **가로선은 20 cm 이상 길게**(유도선 양쪽으로 10 cm씩) 붙이고, 방지턱과 정지선·출발선 사이는 30 cm 이상 두세요(턱을 지난 뒤 유도선으로 돌아올 거리).
 
-1. 라인 탭에서 바닥·테이프 보정을 하고, 회색 센서가 출발선 위에 오도록 차를 놓습니다. 시작하면 자이로를 한 번 보정하고 출발선에 정확히 맞춥니다(지나치면 반대로 천천히 되돌아와 맞춤).
-2. 가속은 *바로*(즉시 목표 출력) 또는 *서서히*(가속 시간 동안 램프)를 고릅니다. 출발선을 벗어난 뒤(연속 25번 밝음) 정지선을 찾고, 정지선이 센서 아래 들어온 순간부터 감속 시간에 걸쳐 서서히 멈춥니다(진동 줄임).
-3. 돌아오기
-   - **후진**: 정지 후 바로 후진합니다. 후진은 방지턱을 뒤로 넘어야 하므로 출력을 따로(기본 더 크게) 정합니다. 출발선이 다시 보이면 멈추고 출발선에 맞춥니다.
-   - **제자리 180° 회전**: 정지선 위에서 제자리 회전해 출발선 쪽을 봅니다. 안내선을 다시 찾은 뒤 방지턱을 넘어 출발선까지 가고, 출발선에서 다시 180° 돌아 원래 방향이 되면 출발선에 맞춥니다. 회전이 덜/더 도는 양(관성)은 매번 학습해 다음 회전의 '미리 멈추는 각'을 고칩니다.
-   - **안 함**: 한 번만 갑니다.
-4. 반복 횟수만큼 되풀이하며, *기록*을 켜면 매 전진 구간이 측정 시행(source = course)으로 저장되어 분석·관계식에 쓰입니다.
-5. 조향: '안내선 따라가기(조향 최소)' 또는 '자이로 직진'. 방향 기준은 코스 시작 때 한 번 정하고, 회전할 때마다 목표 방향에 ±180°를 더합니다(정지 직후 자이로를 다시 보정하면 흔들림이 섞여 방향이 틀어지기 때문).
-6. 느린 접근 출력(creep, 듀티 %)은 선에 맞출 때 쓰는 속도입니다. 라이브러리 PWM 25는 실제 듀티 62.5%라 너무 빨라 선을 지나치므로 듀티로 따로 정합니다.
+- **멈추는 곳**: *주행 시간/방지턱 통과 후 자동 정지*(기존) 또는 *정지선에서 서서히 정지*. 정지선을 본 순간부터 '멈추는 시간' 동안 실제 듀티를 0까지 줄입니다(급정지 진동 방지). 방지턱 위에서 차가 기울면(2° 이상) 가로선 판정을 잠시 멈춥니다(들린 센서가 어둡게 읽힘).
+- **출발**: *바로* 또는 *서서히*(정한 시간 동안 듀티를 0→목표로).
+- **측정 중 조향 = 바닥 유도선 + 자이로**: 테이프 위치로 '가야 할 방향'을 정하고 자이로로 그 방향을 맞춥니다.
+  - 테이프가 가운데 근처: 유도선 방향을 그대로 유지(조향 거의 0).
+  - 방지턱 위(기울기 1.5° 이상)와 내려온 뒤 0.25초: 바닥 센서 값을 무시하고 **방지턱 직전 방향을 자이로로 유지**합니다. 턱에 부딪혀 한쪽으로 틀어져도 바로 되돌립니다.
+  - 벗어남/놓침: 최대 15°로 비스듬히 테이프 쪽으로 다가갑니다(놓쳤을 때 방향은 마지막 위치 + 그 뒤 차가 돈 각도로 추정). 1.5초 넘게 못 찾으면 멈춤.
+- **복귀 방식**
+  - *후진*: 정지선에서 멈춘 뒤 바로 후진(기본 측정 출력 × 1.3, 바꿀 수 있음)해 방지턱을 뒤로 넘고, 출발선을 보면 멈춰 위치를 맞춥니다. 감속하며 정지선을 지나쳤으면 후진 중 그 정지선은 건너뜁니다.
+  - *제자리 180° 회전*: 정지선 위에서 뒤 두 바퀴를 반대로 돌려 자이로로 180°를 재며 돌고(기본 출력 100), 유도선을 찾은 뒤 가로선이 센서 밑에 올 때까지 후진해 맞춥니다. 다음 회차는 반대 방향(B→A)으로 측정하고, 출발선에서 다시 180° 돌아 원래 방향이 됩니다. 멈춘 뒤 더 도는 각을 배워 다음 회전부터 그만큼 일찍 끕니다.
+- 자이로 영점은 출발선에서 처음 한 번만 잡고, 이후 회차는 방향만 0으로 돌립니다(멈춘 직후 흔들림이 영점에 섞이지 않게).
+- 세부 설정: 위치 맞춤 듀티(기본 40%, 선을 자꾸 지나치면 낮춤), 정지선을 못 볼 때 최대 주행 시간, 바닥 센서 확인.
 
-센서 확인 버튼은 지금 세 센서 값과 '가로선 위인지'를 보여 줍니다.
+PiCar-X는 앞바퀴 조향 + 뒷바퀴 구동이라 제자리 회전 때 앞바퀴가 옆으로 끌립니다. 그래서 회전 출력은 높게(기본 100) 둡니다.
 
 ## 점검·데이터
 
@@ -296,7 +298,7 @@ MPU-6050은 I2C로 읽습니다. 라즈베리파이 기본 I2C 속도(100 kHz)�
 | Method | Path | 설명 |
 |---|---|---|
 | GET/PUT | `/api/experiment/settings` | 축간거리, 바퀴 반지름, 검출 기준, 허용 가속도, 방지턱 형상, 조향 방식, 모델 선택, 실험 계획, 라인 설정 등 |
-| POST | `/api/experiment/auto-run` | `{condition, run_seconds?, pre_roll_s?, tail_s?, repeats?, return_enabled?, return_output?, return_scale?, rest_s?, steering_source?, kick_ms?}` 자동·반복 측정 시작 (`condition.purpose`: main/validation/pilot) |
+| POST | `/api/experiment/auto-run` | `{condition, run_seconds?, pre_roll_s?, tail_s?, repeats?, return_enabled?, return_mode? (none/reverse/uturn), end_mode? (time/stop_line), accel_mode?, accel_s?, decel_s?, spin_output?, spin_direction?, creep_duty?, leg_timeout_s?, return_output?, return_scale?, rest_s?, steering_source?, kick_ms?}` 자동·반복 측정 시작 (`condition.purpose`: main/validation/pilot) |
 | GET | `/api/experiment/auto-run` | 진행 상태(`pre_roll`, `driving`, `tail`, `analyzing`, `returning`, `rest`, `done`, `aborted`, `error`), 회차, 완료된 시행 ID, 현재 방향(°) |
 | GET | `/api/impact/recording.csv` | 센서 화면에서 기록한 원자료 전체(축소 없음) |
 | POST | `/api/experiment/save-recording` | 센서 화면에서 수동으로 기록한 데이터를 조건과 함께 저장 |
@@ -318,7 +320,6 @@ MPU-6050은 I2C로 읽습니다. 라즈베리파이 기본 I2C 속도(100 kHz)�
 | GET | `/api/experiment/series?...&raw=1` | 겹쳐 보기 시계열(거르기 전 값 포함, before/after를 크게 주면 전체) |
 | GET / POST / PUT | `/api/experiment/line/status`, `/line/calibrate {target}`, `/line/settings` | 라인 센서 상태 / 바닥·테이프 보정 / 설정 |
 | POST | `/api/experiment/line/start`, `/line/stop` | 테이프 따라 주행 시작 `{output_mode, output_value, seconds}` / 정지 |
-| POST / GET / POST | `/api/experiment/course/start`, `/course/status`, `/course/stop` | 코스 주행 `{legs, accel: ramp/instant, accel_s, decel_s, return_mode: reverse/uturn/none, reverse_output, spin_output, spin_direction, creep_duty, steering, record, ...}` / 상태 / 정지 |
 | GET | `/api/experiment/course/sensors` | 회색 센서 값과 가로선 판정 |
 | POST | `/api/experiment/auto-run` + `slowdown` | 감속 제어 시행: `slowdown: {trigger: time/distance/distance_auto/tape/camera, margin: ratio/sigma, staged, resume, lead_cm, ...}` |
 | POST / GET | `/api/experiment/vision/calibrate`, `/vision/test` | 카메라 바닥색 보정(ROI 설정 포함) / 현재 점수 |

@@ -1,18 +1,11 @@
-"""코스 반복 측정: 출발선 → (방지턱) → 정지선을 바닥 테이프로 인식해 왕복을 자동으로 되풀이합니다.
+"""바닥 테이프 코스 도구(반복 측정의 '정지선 모드'와 '제자리 회전 복귀'에서 씀).
 
 바닥 구성
   - 유도선: 진행 방향으로 붙인 검은 테이프(가운데 센서만 검게 봄)
   - 출발선·정지선: 유도선과 직각으로 붙인 가로 테이프(센서 3개가 모두 검게 봄 → 유도선과 구분)
 
-한 구간(leg)
-  1) (측정 시) 정지 기록 → 출발: 즉시 출력 또는 정해진 시간 동안 순차 가속
-  2) 유도선을 '조향 최소' 방식으로 따라감(가운데 근처면 바퀴를 똑바로)
-  3) 출발선을 벗어난 뒤 가로 테이프를 보면(2번 연속, 차가 기울지 않았을 때) 그 순간부터 순차 감속 → 정지
-  4) 기록을 저장(1회차)
-복귀 방식
-  - reverse: 정지 후 더 센 출력으로 후진해 출발선을 다시 볼 때까지(방지턱을 후진으로 넘음)
-  - uturn  : 정지 후 제자리 180° 회전 → 정지선이 센서 밑에 올 때까지 살짝 후진 → 다음 구간은 반대 방향으로 측정
-  - none   : 한 구간만
+여기에는 가로 테이프 감시(CrossWatcher), 위치 맞춤(_align_on_cross), 테이프까지 주행(_drive_until_cross),
+제자리 회전(_spin), 유도선 찾기(_find_guide)가 있고, 반복 측정(experiment._auto_run)이 이것들을 조합합니다.
 방지턱을 지나며 차가 들리면 바닥 센서가 바닥에서 멀어져 어둡게(검은 테이프처럼) 읽힐 수 있어, 기울기가 클 때는
 가로 테이프 판정을 하지 않습니다.
 """
@@ -27,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from . import experiment as ex
 from . import impact_analysis as ia
-from .line_follow import LineSettings, LineTracker, weights
+from .line_follow import LineSettings, LineTracker, TiltGate, weights
 from .mpu6050 import mpu6050_service
 
 
@@ -54,8 +47,8 @@ class CourseRequest(BaseModel):
     steering: Literal["line", "gyro", "none"] = "line"
 
 
-class Stopped(Exception):
-    pass
+class Stopped(ex.Aborted):
+    """사용자 정지(반복 측정의 Aborted로 처리)."""
 
 
 async def _halt(ctl, reason: str) -> None:
@@ -93,7 +86,6 @@ class CourseRunner:
 
 
 runner = CourseRunner()
-ex.extra_busy.append(lambda: runner.busy)
 
 
 def course_err() -> float | None:
@@ -136,6 +128,8 @@ class CrossWatcher:
         self.ready_after = 0.0
         self.task: asyncio.Task | None = None
         self.blocked = 0
+        self.gate = TiltGate(tilt_limit)
+        self.prev_partial = False
 
     def start(self, ready_after: float) -> None:
         self.ready_after = ready_after
@@ -146,6 +140,7 @@ class CrossWatcher:
             raw = await asyncio.to_thread(self.ctl.adapter.read_grayscale)
             self.raw = raw
             c = is_cross(raw, self.line, self.thr)
+            bumpy = self.gate.update(mpu6050_service.tilt_deg())  # 방지턱 위(기울기 흐름은 빼고 판단)
             if not self.armed:
                 # 출발할 때 센서가 가로 테이프 위에 있으므로, 테이프에서 확실히 벗어난 뒤부터 봅니다:
                 # 세 센서 중 하나라도 바닥 쪽(테이프 정도 < 기준의 절반)인 상태가 25번(약 50~100 ms) 연속이어야 함.
@@ -154,20 +149,27 @@ class CrossWatcher:
                 self.cleared = self.cleared + 1 if off else 0
                 if self.cleared >= 25 and time.monotonic() >= self.ready_after:
                     self.armed = True
-            elif c:
-                if tilted(self.tilt_limit):
+            else:
+                # 가로 테이프: 세 센서가 모두 기준 이상인 읽기 2번 연속, 또는 1번 + 바로 앞/뒤 읽기가 절반 이상(빨리 지나가거나
+                # 읽기가 잠깐 밀려 테이프 위 읽기가 한 번뿐인 경우)
+                w = weights(list(raw or []), self.line)
+                m = min(w) if w else 0.0
+                partial = m >= 0.5 * self.thr
+                if c and bumpy:
                     self.blocked += 1
                     self.hits = 0
+                elif c or (partial and self.hits >= 1):
+                    self.hits += 1 if c else 0
+                    if self.hits >= 2 or (self.hits >= 1 and (partial and not c or self.prev_partial)):
+                        if self.skip > 0:
+                            self.skip -= 1
+                            self.armed, self.cleared, self.hits = False, 0, 0
+                        else:
+                            self.seen.set()
+                            return
                 else:
-                    self.hits += 1
-                    if self.hits >= 2 and self.skip > 0:
-                        self.skip -= 1
-                        self.armed, self.cleared, self.hits = False, 0, 0
-                    elif self.hits >= 2:
-                        self.seen.set()
-                        return
-            else:
-                self.hits = 0
+                    self.hits = 0
+                self.prev_partial = partial and not bumpy
             await asyncio.sleep(0.002)
 
     def stop(self) -> None:
@@ -244,6 +246,7 @@ async def _creep_to_cross(ctl, gen: int, req: CourseRequest, line: LineSettings,
         return True
     t0 = time.monotonic()
     hits = 0
+    peak = 0.0
     hold = ex.HeadingController(1.2, 0.0, 0.0, polarity=ex.store.load_settings().heading_sign) if mpu6050_service.heading_deg() is not None else None
     prev = t0
     try:
@@ -261,6 +264,12 @@ async def _creep_to_cross(ctl, gen: int, req: CourseRequest, line: LineSettings,
                 hits = hits + 1 if is_cross(raw, line, req.cross_threshold) else 0
                 if hits >= 2:
                     return True
+                w = weights(list(raw or []), line)
+                m = min(w) if w else 0.0
+                peak = max(peak, m)
+                if peak >= 0.6 * req.cross_threshold and m < 0.15:
+                    # 테이프 위를 지나쳐 버림(읽기가 잠깐 밀린 사이): 바로 멈추고, 다음 시도에서 반대로 더 천천히 맞춤
+                    return False
                 await asyncio.sleep(0.003)
     finally:
         await _halt(ctl, "course_creep_end")
@@ -315,13 +324,13 @@ async def _spin(ctl, gen: int, req: CourseRequest, degrees: float, direction: st
             await asyncio.sleep(0.02)
     finally:
         await _halt(ctl, "course_spin_end")
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.2)
     turned = abs((mpu6050_service.heading_deg() or h0) - h0)
     runner.target_deg += degrees if direction == "left" else -degrees  # 왼쪽(반시계) = +
     # 남은 방향 오차(관성으로 더 돌았거나 덜 돈 것)를 천천히 맞춤
     for _ in range(3):
         err = _wrap(course_err() or 0.0)
-        if abs(err) <= 4.0:
+        if abs(err) <= 6.0:
             break
         fix_dir = "right" if err > 0 else "left"
         t1 = time.monotonic()
@@ -332,215 +341,79 @@ async def _spin(ctl, gen: int, req: CourseRequest, degrees: float, direction: st
                 e = _wrap(course_err() or 0.0)
                 if abs(e) <= 2.0 or (e > 0) != (err > 0):
                     break
-                if not await ctl.experiment_spin(fix_dir, max(req.spin_output * 0.6, 30), runner.gen):
+                if not await ctl.experiment_spin(fix_dir, max(req.spin_output * 0.7, 55), runner.gen):
                     raise Stopped()
                 await asyncio.sleep(0.01)
         finally:
             await _halt(ctl, "course_spin_fix")
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.15)
     return turned
 
 
 async def _find_guide(ctl, gen: int, req: CourseRequest, line: LineSettings) -> bool:
-    """제자리 회전 뒤 가운데 센서가 유도선을 보도록 좌우로 조금씩 돌려 찾습니다(최대 ±25°)."""
-    def center(raw: Any) -> float:
+    """제자리 회전 뒤 바닥 센서가 유도선을 보는지 확인하고, 안 보이면 좌우로 조금만(±12°) 돌려 찾습니다.
+
+    크게 돌리면 차가 비스듬해져 뒤로 가로 테이프를 찾을 때 빗나가므로, 못 찾으면 유도선 방향(목표 각)으로 되돌려 둡니다.
+    가로 테이프는 유도선보다 훨씬 길어서 옆으로 1~3 cm 어긋나도 찾을 수 있고, 다음 구간에서 유도선으로 돌아갑니다.
+    """
+    def seen(raw: Any) -> bool:
         w = weights(list(raw or []), line)
-        return w[1] if w else 0.0
+        return bool(w) and max(w) >= 0.5
     raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-    if center(raw) >= 0.5:
+    if seen(raw):
         return True
-    for direction, limit in (("left", 20.0), ("right", 40.0), ("left", 40.0)):
+    found = False
+    for direction, limit in (("left", 12.0), ("right", 24.0)):
         h0 = mpu6050_service.heading_deg()
         if h0 is None:
             return False
         t0 = time.monotonic()
         try:
-            while time.monotonic() - t0 < 2.5:
+            while time.monotonic() - t0 < 1.5:
                 if ctl.stop_generation != runner.gen:
                     raise Stopped()
                 raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-                if center(raw) >= 0.5:
-                    return True
+                if seen(raw):
+                    found = True
+                    break
                 if abs((mpu6050_service.heading_deg() or h0) - h0) >= limit:
                     break
-                if not await ctl.experiment_spin(direction, req.spin_output * 0.75, runner.gen):
+                if not await ctl.experiment_spin(direction, max(55.0, req.spin_output * 0.7), runner.gen):
                     raise Stopped()
                 await asyncio.sleep(0.01)
         finally:
             await _halt(ctl, "course_find_line")
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.12)
+        if found:
+            return True
+    await _face_target(ctl, req)
     return False
 
 
-async def _record_leg(ctl, gen: int, req: CourseRequest, settings: ex.ExperimentSettings, line: LineSettings,
-                      trial: int, leg_dir: str) -> dict[str, Any]:
-    cond = req.condition.model_copy(update={"trial": trial, "direction": "forward",
-                                            "note": ((req.condition.note + " · ") if req.condition.note else "") + f"코스 {leg_dir}"})
-    run = ex.new_run(cond, settings, simulated=False, source="course", pre_roll_s=req.pre_roll_s, run_seconds=req.leg_timeout_s)
-    run["course"] = {"leg_direction": leg_dir, "accel": req.accel, "accel_s": req.accel_s, "decel_s": req.decel_s}
-    if req.record:
-        from .camera import camera_service
-        camera_service.paused = True
-        st = await asyncio.to_thread(mpu6050_service.start_recording)
-        if st.get("error") or not st.get("recording"):
-            raise RuntimeError(st.get("error") or "MPU-6050 기록을 시작하지 못했습니다.")
-    try:
-        runner.phase = "pre_roll"
-        await asyncio.sleep(req.pre_roll_s)
-        if ctl.stop_generation != runner.gen:
-            raise Stopped()
-        runner.phase = "driving"
-        out = req.condition.output_value
-        info = await _drive_until_cross(ctl, 0, req, line, "forward", out, req.accel_s if req.accel == "ramp" else 0.0,
-                                        req.decel_s, req.leg_timeout_s, req.min_leg_s, req.steering,
-                                        polarity=ex.store.load_settings().heading_sign)
-        run["course"].update(info)
-        runner.phase = "tail"
-        await asyncio.sleep(req.tail_s)
-    finally:
-        if req.record:
-            from .camera import camera_service
-            await asyncio.to_thread(mpu6050_service.stop_recording)
-            camera_service.paused = False
-    if not req.record:
-        return {"run_id": None, **info}
-    meta = await asyncio.to_thread(mpu6050_service.recording_columns)
-    columns = meta.pop("columns")
-    run["data_source"] = "mpu6050"
-    run["steering_source"] = req.steering
-    run = await asyncio.to_thread(ex.finalize_run, run, columns, meta, settings)
-    if not info["detected"]:
-        run["analysis"].setdefault("flags", []).append("정지선을 찾지 못하고 최대 시간에서 멈췄습니다.")
-        ex.store.put(run)
-    runner.completed.append(run["id"])
-    return {"run_id": run["id"], **info}
-
-
-async def _course(req: CourseRequest) -> None:
-    ctl = ex.control()
-    if ctl.adapter.mode != "hardware":
-        runner.state, runner.message = "error", "코스 주행은 실제 차량(하드웨어 모드)에서만 됩니다."
-        return
-    settings = ex.store.load_settings()
-    line = settings.line
-    if not line.floor or not line.line:
-        runner.state, runner.message = "error", "라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 하세요."
-        return
-    runner.gen = ctl.stop_generation
-    trial = req.condition.trial
-    rev_out = req.reverse_output or min(100.0, req.condition.output_value * 1.3)
-    try:
-        # 자이로 영점은 출발선에 서 있을 때 한 번만 잡고, 이후에는 방향만 0으로 돌립니다(멈춘 직전 흔들림이 영점에 섞이지 않게).
-        mpu6050_service.heading_stop()
-        await asyncio.sleep(0.6)
-        runner.target_deg = 0.0
-        if not mpu6050_service.heading_reset():
-            runner.note("자이로를 쓸 수 없습니다(센서 보정 필요) – 회전·직진 보정 없이 진행")
-        raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-        if not is_cross(raw, line, req.cross_threshold):
-            runner.note("출발선이 센서 밑에 없습니다. 천천히 후진해 출발선을 찾습니다.")
-            if not await _align_on_cross(ctl, req, line, "backward", 2.5):
-                raise RuntimeError("출발선을 찾지 못했습니다. 차의 바닥 센서가 출발선(가로 테이프) 위에 오도록 놓으세요.")
-        for i in range(req.legs):
-            runner.leg = i + 1
-            leg_dir = "A→B" if (i % 2 == 0 or req.return_mode != "uturn") else "B→A"
-            runner.note(f"{i + 1}/{req.legs}구간 측정 주행 ({leg_dir})")
-            if not await _on_cross(ctl, req, line):
-                runner.note("가로 테이프가 센서 밑에 없어 위치를 다시 맞춥니다.")
-                if not await _align_on_cross(ctl, req, line, "backward", 1.5):
-                    raise RuntimeError("출발 위치(가로 테이프 위)에 차를 맞추지 못했습니다.")
-            res = await _record_leg(ctl, 0, req, settings, line, trial + i, leg_dir)
-            if not res["detected"]:
-                runner.note(f"{i + 1}구간: 유도선을 놓쳐 멈췄습니다. 코스를 멈춥니다." if res.get("line_lost") else
-                            f"{i + 1}구간: 정지선을 못 보고 {req.leg_timeout_s:g}초에서 멈췄습니다. 코스를 멈춥니다.")
-                runner.state = "error"
-                return
-            runner.note(f"{i + 1}구간 완료 · 정지선 {res['detect_s']:.2f}초에 인식, 순차 감속 후 정지")
-            if res.get("line_flipped"):
-                st = ex.store.load_settings(); st.line.steer_sign = res["line_sign"]; ex.store.save_settings(st)
-                line = st.line
-            last = i == req.legs - 1
-            if req.return_mode == "none" or (last and req.return_mode == "uturn"):
-                break
-            await asyncio.sleep(0.3)
-            if req.return_mode == "reverse":
-                runner.phase = "returning"
-                # 순차 감속으로 정지선을 조금 지나쳐 멈췄다면, 후진하면서 그 정지선을 한 번 더 지나므로 하나는 건너뜁니다.
-                skip = 0 if await _on_cross(ctl, req, line) else 1
-                runner.note(f"출발선까지 후진 (출력 {rev_out:g}{', 방금 지난 정지선은 건너뜀' if skip else ''})")
-                back = await _drive_until_cross(ctl, 0, req, line, "backward", rev_out, 0.3, max(0.1, req.decel_s * 0.6),
-                                                req.leg_timeout_s * 1.5, req.min_leg_s, "gyro" if req.steering != "none" else "none",
-                                                polarity=ex.store.load_settings().heading_sign, skip=skip)
-                if not back["detected"]:
-                    raise RuntimeError("후진 중 출발선을 찾지 못했습니다.")
-                runner.note("출발선 인식 → 위치 맞춤")
-                if not await _align_on_cross(ctl, req, line, "forward", 2.0):
-                    raise RuntimeError("출발선 위에 차를 맞추지 못했습니다.")
-            else:
-                runner.phase = "turning"
-                runner.note("제자리 180° 회전")
-                turned = await _spin(ctl, 0, req, 180.0, req.spin_direction)
-                if turned is not None:
-                    # 멈춘 뒤 더 돈 만큼(관성)을 배워 다음 회전부터 그만큼 일찍 끕니다.
-                    req.spin_lead_deg = max(0.0, min(60.0, req.spin_lead_deg + 0.6 * (turned - 180.0)))
-                    run_lead = req.spin_lead_deg
-                    st = ex.store.load_settings()
-                    st.course_spin_lead_deg = round(run_lead, 1)
-                    ex.store.save_settings(st)
-                runner.note(f"회전 {turned:.0f}° (다음 회전은 {req.spin_lead_deg:.0f}° 일찍 끔) → 유도선 찾기")
-                if not await _find_guide(ctl, 0, req, line):
-                    runner.note("유도선을 바로 못 찾았습니다(다음 구간에서 따라가며 맞춤).")
-                # 회전 뒤 테이프 위치는 '멈출 때 지나친 거리'에 따라 센서 뒤쪽일 수도(대부분) 앞쪽일 수도 있어 양쪽을 찾습니다.
-                runner.note("가로 테이프가 센서 밑에 올 때까지 후진")
-                found = await _align_on_cross(ctl, req, line, "backward", 2.0)
-                if not found:
-                    raise RuntimeError("회전 뒤 가로 테이프를 다시 찾지 못했습니다(회전하며 많이 밀렸거나 유도선에서 벗어남).")
-            if req.rest_s:
-                runner.phase = "rest"
-                await asyncio.sleep(req.rest_s)
-        runner.state = "done"
-        runner.note(f"코스 반복 완료 · {len(runner.completed)}회 저장")
-    except Stopped:
-        runner.state = "stopped"
-        runner.note("정지 명령으로 멈췄습니다.")
-    except Exception as exc:
-        runner.state = "error"
-        runner.note(f"코스 주행 오류: {exc}")
+async def _face_target(ctl, req: CourseRequest, tol: float = 4.0) -> None:
+    """코스 목표 방향(runner.target_deg)으로 제자리에서 조금씩 돌려 맞춤."""
+    for _ in range(3):
+        err = _wrap(course_err() or 0.0)
+        if abs(err) <= tol:
+            return
+        fix_dir = "right" if err > 0 else "left"
+        t1 = time.monotonic()
         try:
-            await ctl.stop(reason="course_error")
-        except Exception:
-            pass
-    finally:
-        runner.phase = ""
-        mpu6050_service.heading_stop()
+            while time.monotonic() - t1 < 1.5:
+                if ctl.stop_generation != runner.gen:
+                    raise Stopped()
+                e = _wrap(course_err() or 0.0)
+                if abs(e) <= tol / 2 or (e > 0) != (err > 0):
+                    break
+                if not await ctl.experiment_spin(fix_dir, max(req.spin_output * 0.7, 55), runner.gen):
+                    raise Stopped()
+                await asyncio.sleep(0.01)
+        finally:
+            await _halt(ctl, "course_face")
+        await asyncio.sleep(0.15)
 
 
 router = APIRouter(prefix="/api/experiment/course", tags=["course"])
-
-
-@router.post("/start")
-async def course_start(req: CourseRequest):
-    from .line_follow import line_runner
-    if runner.busy or ex.auto_runner.busy or line_runner.busy:
-        raise HTTPException(409, "이미 다른 주행이 진행 중입니다.")
-    runner.state, runner.leg, runner.legs, runner.log, runner.completed = "running", 0, req.legs, [], []
-    runner.started = time.monotonic()
-    runner.note("시작")
-    runner.task = asyncio.create_task(_course(req))
-    return runner.snapshot()
-
-
-@router.get("/status")
-async def course_status():
-    return runner.snapshot()
-
-
-@router.post("/stop")
-async def course_stop():
-    # 세대 번호를 갱신하지 않고 멈춰야 진행 중인 코스가 '사용자 정지'로 알아채고 끝납니다.
-    ctl = ex.control()
-    await ctl.stop(reason="course_stop")
-    return runner.snapshot()
 
 
 @router.get("/sensors")

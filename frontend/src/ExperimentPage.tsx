@@ -1,6 +1,6 @@
 // 실험 관리 화면 – 보고서 III~V장의 절차(조건 입력 → 자동 측정 주행 → 시행 확인 → 조건별 집계 → 회귀식)를 따릅니다.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, AlertTriangle, BookOpen, CheckCircle2, CircleStop, ClipboardCopy, Download, FlaskConical, Play, RefreshCw, Repeat, Route, Save, Sigma, Trash2, Wrench } from 'lucide-react';
+import { Activity, AlertTriangle, BookOpen, CheckCircle2, CircleStop, ClipboardCopy, Download, FlaskConical, Play, RefreshCw, Repeat, Route, Save, ScanLine, Sigma, Trash2, Wrench } from 'lucide-react';
 import { apiDownload } from './services/api';
 import {
   bumpRadiusMm, DEFAULT_SETTINGS, effectiveDuty, fmt, G, modelPredict, modelSolveSpeed, OUTLIER_LABEL, outputLabel, paramText, PURPOSE_LABEL, readCondition, writeCondition, type OutlierMethod, type Purpose,
@@ -15,7 +15,6 @@ import LineTab from './experiment/LineTab';
 import ToolsTab from './experiment/ToolsTab';
 import GuideTab from './experiment/GuideTab';
 import TheoryTab from './experiment/TheoryTab';
-import CourseCard from './experiment/CourseCard';
 import HelpBox from './components/HelpBox';
 import type { ExperimentContext } from './experiment/context';
 import NumInput from './components/NumInput';
@@ -38,8 +37,8 @@ type Props = {
   impact: ImpactInfo;
   onOpenSensors: () => void;
 };
-const BUSY: AutoRunState['state'][] = ['pre_roll', 'driving', 'tail', 'analyzing', 'returning', 'rest'];
-const PHASE_LABEL: Record<string, string> = { pre_roll: '정지 기록', driving: '직진 측정', tail: '정지 후 기록', analyzing: '분석·저장', returning: '후진 복귀', rest: '대기', done: '완료', error: '오류', aborted: '중단', idle: '대기' };
+const BUSY: AutoRunState['state'][] = ['pre_roll', 'driving', 'tail', 'analyzing', 'returning', 'turning', 'aligning', 'rest'];
+const PHASE_LABEL: Record<string, string> = { pre_roll: '정지 기록', driving: '직진 측정', tail: '정지 후 기록', analyzing: '분석·저장', returning: '복귀', turning: '제자리 회전', aligning: '위치 맞춤', rest: '대기', done: '완료', error: '오류', aborted: '중단', idle: '대기' };
 
 export default function ExperimentPage({ request: requestProp, controlMode, connected, serverMode, vehicleConnected, impact, onOpenSensors }: Props) {
   const [settings, setSettings] = useState<ExperimentSettings | null>(null);
@@ -162,14 +161,21 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const canAutoRun = !!(serverAvailable && vehicleConnected && !busy && !conditionError && sensorReady && !outdated);
   const runOpts = draft ?? DEFAULT_SETTINGS;
   const setRunOpts = (patch: Partial<ExperimentSettings>) => setDraft(d => ({ ...(d ?? DEFAULT_SETTINGS), ...patch }));
+  const retMode: 'none' | 'reverse' | 'uturn' = runOpts.return_mode ?? (runOpts.return_enabled ? 'reverse' : 'none');
+  const endMode: 'time' | 'stop_line' = retMode === 'uturn' ? 'stop_line' : (runOpts.end_mode ?? 'time');
+  const lineReady = !!(settings?.line?.floor && settings?.line?.line);
+  const [floorCheck, setFloorCheck] = useState<{ weights: number[] | null; cross: boolean | null; guide: boolean; calibrated: boolean } | null>(null);
+  async function checkFloor() { try { setFloorCheck(await request('/api/experiment/course/sensors')); } catch (e) { fail(e); } }
 
   async function startAutoRun(override?: Partial<ExperimentCondition>, extra?: Record<string, unknown>) {
     setError(''); setMessage('');
     try {
       const body = {
         condition: { ...condition, ...(override ?? {}), total_mass_g: undefined },
-        repeats: runOpts.repeats, run_seconds: runOpts.run_seconds, return_enabled: runOpts.return_enabled, return_output: runOpts.return_output || null,
+        repeats: runOpts.repeats, run_seconds: runOpts.run_seconds, return_enabled: retMode !== 'none', return_mode: retMode, return_output: runOpts.return_output || null,
         return_scale: runOpts.return_scale, return_stop_on_tape: !!runOpts.return_stop_on_tape, rest_s: runOpts.rest_s, steering_source: runOpts.steering_source ?? 'gyro', kick_ms: runOpts.kick_ms ?? 0,
+        end_mode: endMode, accel_mode: runOpts.accel_mode ?? 'instant', accel_s: runOpts.accel_s ?? 0.6, decel_s: runOpts.decel_s ?? 0.3,
+        spin_output: runOpts.spin_output ?? 100, spin_direction: runOpts.spin_direction ?? 'left', creep_duty: runOpts.creep_duty ?? 40, leg_timeout_s: runOpts.leg_timeout_s ?? 8,
         ...(extra ?? {}),
       };
       seenRuns.current = 0;
@@ -300,7 +306,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       <ol>
         <li><b>차량·분석 설정</b>(오른쪽 카드): 축간거리 L, 바퀴 반지름 r, 방지턱 높이 h·폭 w를 자로 재서 넣고 '설정 저장'. 속도와 이론값 계산에 쓰입니다.</li>
         <li><b>실험 조건</b>(왼쪽 카드): 방지턱, 차체 질량(저울), 추가 질량, 출력(PWM 또는 직접 듀티)을 고릅니다. 측정 목적은 보통 '본 실험'.</li>
-        <li><b>측정</b>: 차를 출발 위치에 놓고 '자동 측정 주행'(직진 한 번) 또는 아래 '코스 반복 측정'(출발선·정지선 테이프로 자동 왕복)을 누릅니다. 측정 전에 센서 화면에서 MPU-6050 정지 보정을 한 번 하세요.</li>
+        <li><b>측정</b>: 차를 출발 위치에 놓고 '자동 측정 주행' 또는 '반복 측정 시작'을 누릅니다. 바닥에 출발선·정지선·유도선 테이프를 붙였다면 반복 측정의 '멈추는 곳'을 정지선으로, '복귀 방식'을 후진 또는 제자리 180° 회전으로 고르면 사람이 차를 다시 놓지 않아도 자동으로 왕복합니다. 측정 전에 센서 화면에서 MPU-6050 정지 보정을 한 번 하세요.</li>
         <li><b>확인</b>: '시행 결과'에서 그래프의 앞바퀴·뒷바퀴 오름·내림 표시가 맞는지 보고, 이상한 회차는 '집계에서 빼기'.</li>
         <li><b>진행표</b>: 계획(질량 × 출력 × 반복)의 빈칸을 채웁니다. 칸을 누르면 그 조건 그래프가 겹쳐 나옵니다.</li>
         <li><b>분석 및 관계식</b>(맨 아래): 조건별 평균, 관계식 후보, 허용 기준과 v_max. 더 깊은 해석과 예측·제어는 '이론·예측·제어' 탭에서.</li>
@@ -322,21 +328,43 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
         </div>
         <div className="experiment-mass"><span>총 질량</span><strong>{totalMass.toLocaleString()} g</strong><small>실제 모터 듀티 약 {effectiveDuty(condition.output_mode, condition.output_value)}% · 축간거리 {settings?.wheelbase_mm ? `${settings.wheelbase_mm} mm` : '미입력 (속도 계산 불가)'}</small></div>
         <div className="exp-repeat">
-          <div className="exp-repeat-head"><Repeat size={14} /><b>반복 측정</b><small>직진하며 측정 → 출발선으로 후진 → 대기를 정해진 횟수만큼 반복합니다. 회차는 자동으로 1씩 늘어납니다.</small></div>
+          <div className="exp-repeat-head"><Repeat size={14} /><b>반복 측정</b><small>측정 주행 → 출발 위치로 복귀 → 대기를 정해진 횟수만큼 반복합니다. 회차는 자동으로 1씩 늘어납니다.</small></div>
           <div className="experiment-fields">
             <label>반복 횟수<NumInput min={1} max={20} value={runOpts.repeats} onChange={e => setRunOpts({ repeats: Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1))) })} /></label>
-            <label>주행 시간 (s, 최대)<NumInput min={0.3} max={6} step={0.1} value={runOpts.run_seconds} onChange={e => setRunOpts({ run_seconds: Math.max(0.3, Math.min(6, Number(e.target.value) || 2.5)) })} /></label>
+            <label>측정 중 조향<select value={runOpts.steering_source ?? 'gyro'} onChange={e => setRunOpts({ steering_source: e.target.value as ExperimentSettings['steering_source'], heading_hold: e.target.value === 'gyro' })}><option value="gyro">자이로 직진 보정 (반듯하게)</option><option value="line">바닥 유도선 + 자이로 (조향 최소)</option><option value="none">조향 없음</option></select></label>
+            <label>멈추는 곳<select value={endMode} disabled={retMode === 'uturn'} onChange={e => setRunOpts({ end_mode: e.target.value as 'time' | 'stop_line' })}><option value="time">주행 시간 / 방지턱 통과 후 자동 정지</option><option value="stop_line" disabled={!lineReady}>정지선(가로 테이프)에서 서서히 정지{lineReady ? '' : ' – 라인 보정 먼저'}</option></select></label>
+            <label>출발<div className="exp-inline"><div className="segmented"><button type="button" className={(runOpts.accel_mode ?? 'instant') === 'instant' ? 'selected' : ''} onClick={() => setRunOpts({ accel_mode: 'instant' })}>바로</button><button type="button" className={runOpts.accel_mode === 'ramp' ? 'selected' : ''} onClick={() => setRunOpts({ accel_mode: 'ramp' })}>서서히</button></div>
+              {runOpts.accel_mode === 'ramp' && <><NumInput min={0.05} max={3} step={0.1} value={runOpts.accel_s ?? 0.6} onChange={e => setRunOpts({ accel_s: Math.max(0.05, Math.min(3, Number(e.target.value) || 0.6)) })} /><small>초</small></>}</div></label>
+            {endMode === 'time' ? <>
+              <label>주행 시간 (s, 최대)<NumInput min={0.3} max={6} step={0.1} value={runOpts.run_seconds} onChange={e => setRunOpts({ run_seconds: Math.max(0.3, Math.min(6, Number(e.target.value) || 2.5)) })} /></label>
+              <label className="exp-check"><input type="checkbox" checked={settings?.stop_after_bump ?? true} onChange={e => void patchSettings({ stop_after_bump: e.target.checked })} /> 방지턱을 다 넘으면 자동 정지 (주행 시간은 최대 시간이 됨)</label>
+            </> : <>
+              <label>정지선을 본 뒤 멈추는 시간 (s)<NumInput min={0.05} max={3} step={0.05} value={runOpts.decel_s ?? 0.3} onChange={e => setRunOpts({ decel_s: Math.max(0.05, Math.min(3, Number(e.target.value) || 0.3)) })} /></label>
+            </>}
+            <label>복귀 방식<select value={retMode} onChange={e => setRunOpts({ return_mode: e.target.value as 'none' | 'reverse' | 'uturn', return_enabled: e.target.value !== 'none' })}>
+              <option value="reverse">후진으로 출발선까지</option>
+              <option value="uturn" disabled={!lineReady}>제자리 180° 회전 (왕복 모두 측정){lineReady ? '' : ' – 라인 보정 먼저'}</option>
+              <option value="none">복귀 안 함</option></select></label>
+            {retMode === 'reverse' && <label>후진 출력 (빈칸 = {endMode === 'stop_line' ? `측정 × 1.3 = ${Math.min(100, Math.round(condition.output_value * 1.3))}` : '측정과 같음'})<NumInput min={1} max={maxOutput} value={runOpts.return_output ?? ''} placeholder={String(endMode === 'stop_line' ? Math.min(100, Math.round(condition.output_value * 1.3)) : condition.output_value)} onChange={e => setRunOpts({ return_output: e.target.value === '' ? null : Math.max(1, Math.min(maxOutput, Number(e.target.value))) })} /></label>}
+            {retMode === 'reverse' && endMode === 'time' && <><label>복귀 시간 배율{runOpts.return_stop_on_tape ? ' (테이프 못 찾을 때 최대 ×1.6)' : ''}<NumInput min={0.3} max={3} step={0.05} value={runOpts.return_scale} onChange={e => setRunOpts({ return_scale: Math.max(0.3, Math.min(3, Number(e.target.value) || 1)) })} /></label>
+              <label className="exp-check"><input type="checkbox" checked={!!runOpts.return_stop_on_tape} disabled={!lineReady} onChange={e => setRunOpts({ return_stop_on_tape: e.target.checked })} /> 출발선 테이프에서 멈추기{lineReady ? '' : ' (라인 추종 탭에서 바닥·테이프 보정 먼저)'}</label></>}
+            {retMode === 'uturn' && <><label>회전 출력 (앞바퀴가 끌려 돌아 높게)<NumInput min={30} max={100} value={runOpts.spin_output ?? 100} onChange={e => setRunOpts({ spin_output: Math.max(30, Math.min(100, Number(e.target.value) || 100)) })} /></label>
+              <label>회전 방향<select value={runOpts.spin_direction ?? 'left'} onChange={e => setRunOpts({ spin_direction: e.target.value as 'left' | 'right' })}><option value="left">왼쪽 (반시계)</option><option value="right">오른쪽 (시계)</option></select></label></>}
             <label>회차 사이 대기 (s)<NumInput min={0.3} max={10} step={0.5} value={runOpts.rest_s} onChange={e => setRunOpts({ rest_s: Math.max(0.3, Number(e.target.value) || 1.5) })} /></label>
-            <label className="exp-check"><input type="checkbox" checked={settings?.stop_after_bump ?? true} onChange={e => void patchSettings({ stop_after_bump: e.target.checked })} /> 방지턱을 다 넘으면 자동 정지 (주행 시간은 최대 시간이 됨)</label>
-            <label className="exp-check"><input type="checkbox" checked={runOpts.return_enabled} onChange={e => setRunOpts({ return_enabled: e.target.checked })} /> 측정 후 출발선으로 후진 복귀</label>
-            <label>측정 중 조향<select value={runOpts.steering_source ?? 'gyro'} onChange={e => setRunOpts({ steering_source: e.target.value as ExperimentSettings['steering_source'], heading_hold: e.target.value === 'gyro' })}><option value="gyro">자이로 직진 보정 (반듯하게)</option><option value="line">바닥 테이프 따라가기</option><option value="none">조향 없음</option></select></label>
             <label>출발 밀어주기 (ms, 0 = 끔)<NumInput min={0} max={400} step={20} value={runOpts.kick_ms ?? 0} onChange={e => setRunOpts({ kick_ms: Math.max(0, Math.min(400, Math.round(Number(e.target.value) || 0))) })} /></label>
             <label className="exp-check"><input type="checkbox" checked={!!settings?.ultrasonic_log} onChange={e => void patchSettings({ ultrasonic_log: e.target.checked })} /> 초음파 거리 기록 (벽까지 거리 → 속력, 이론·예측·제어 탭에서 분석){settings?.wall_stop_cm ? ` · 벽 ${settings.wall_stop_cm} cm 앞 자동 정지` : ''}</label>
-            {runOpts.return_enabled && <><label>복귀 출력 (빈칸 = 측정과 같음)<NumInput min={1} max={maxOutput} value={runOpts.return_output ?? ''} placeholder={String(condition.output_value)} onChange={e => setRunOpts({ return_output: e.target.value === '' ? null : Math.max(1, Math.min(maxOutput, Number(e.target.value))) })} /></label>
-            <label>복귀 시간 배율{runOpts.return_stop_on_tape ? ' (테이프 못 찾을 때 최대 ×1.6)' : ''}<NumInput min={0.3} max={3} step={0.05} value={runOpts.return_scale} onChange={e => setRunOpts({ return_scale: Math.max(0.3, Math.min(3, Number(e.target.value) || 1)) })} /></label>
-            <label className="exp-check"><input type="checkbox" checked={!!runOpts.return_stop_on_tape} disabled={!settings?.line?.floor || !settings?.line?.line} onChange={e => setRunOpts({ return_stop_on_tape: e.target.checked })} /> 출발선 테이프에서 멈추기{!settings?.line?.floor || !settings?.line?.line ? ' (테이프 인식 탭에서 바닥·테이프 보정 먼저)' : ''}</label></>}
           </div>
-          <small className="exp-hint">한 회 약 {(runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s).toFixed(1)}초 · 전체 약 {((runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (runOpts.return_enabled ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s) * runOpts.repeats).toFixed(0)}초. 후진은 실제로 앞으로 달린 시간만큼 하므로(자동 정지했으면 그 시간), 출발선보다 덜 오면 배율을 늘리고 더 가면 줄이세요. 매번 같은 자리로 돌아오게 하려면 출발선에 테이프를 붙이고 '출발선 테이프에서 멈추기'를 켜세요(차 앞쪽 센서가 테이프를 보면 멈춤). 이 값들은 '설정 저장'을 누르면 기본값으로 남습니다.</small>
+          {endMode === 'stop_line' && <details className="exp-tips"><summary>정지선 코스 세부 설정 · 바닥 센서 확인</summary>
+            <div className="experiment-fields">
+              <label>위치 맞춤 듀티 (%, 차가 겨우 움직일 정도)<NumInput min={15} max={100} value={runOpts.creep_duty ?? 40} onChange={e => setRunOpts({ creep_duty: Math.max(15, Math.min(100, Number(e.target.value) || 40)) })} /></label>
+              <label>정지선을 못 볼 때 최대 주행 시간 (s)<NumInput min={1} max={30} value={runOpts.leg_timeout_s ?? 8} onChange={e => setRunOpts({ leg_timeout_s: Math.max(1, Math.min(30, Number(e.target.value) || 8)) })} /></label>
+            </div>
+            <div className="button-row"><button type="button" className="secondary" disabled={!serverAvailable} onClick={() => void checkFloor()}><ScanLine size={14} /> 바닥 센서 확인</button>
+              {floorCheck && <span className="exp-hint">{!floorCheck.calibrated ? '보정 필요' : floorCheck.cross ? '가로 테이프 위 ✔ (출발 가능)' : floorCheck.guide ? '유도선 위 (가로 테이프 아님)' : '바닥 위'} · {floorCheck.weights?.map(w => Math.round(w * 100) + '%').join(' / ')}</span>}</div>
+          </details>}
+          <small className="exp-hint">{endMode === 'stop_line'
+            ? <>정지선 코스: 바닥 센서를 출발선(가로 테이프) 위에 두고 시작합니다. 가로선은 20 cm 이상 길게, 방지턱과 가로선 사이는 30 cm 이상 두세요. 유도선을 따라 방지턱을 넘고, 정지선을 보면 {(runOpts.decel_s ?? 0.3).toFixed(2)}초에 걸쳐 멈춘 뒤 {retMode === 'uturn' ? '제자리에서 180° 돌아 정지선 위치를 맞추고 반대 방향(B→A)으로 다음 회차를 측정합니다. 출발선에 오면 다시 180° 돌아 원래 방향으로 맞춥니다.' : retMode === 'reverse' ? '더 센 출력으로 방지턱을 후진으로 넘어 출발선을 볼 때까지 돌아와 위치를 맞춥니다.' : '멈춥니다.'} 이 값들은 '설정 저장'을 누르면 기본값으로 남습니다.</>
+            : <>한 회 약 {(runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (retMode !== 'none' ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s).toFixed(1)}초 · 전체 약 {((runOpts.pre_roll_s + runOpts.run_seconds + runOpts.tail_s + (retMode !== 'none' ? runOpts.run_seconds * runOpts.return_scale + 0.3 : 0) + runOpts.rest_s) * runOpts.repeats).toFixed(0)}초. 후진은 실제로 앞으로 달린 시간만큼 하므로(자동 정지했으면 그 시간), 출발선보다 덜 오면 배율을 늘리고 더 가면 줄이세요. 바닥에 출발선·정지선 테이프를 붙였다면 '멈추는 곳'을 정지선으로 바꾸면 매번 같은 자리에서 서고 출발합니다. 이 값들은 '설정 저장'을 누르면 기본값으로 남습니다.</>}</small>
         </div>
         {!simulated && !sensorReady && <div className="warning">센서 화면에서 MPU-6050 정지 상태 보정을 먼저 하세요. {impact?.recording ? '수동 측정이 진행 중입니다.' : ''} <button className="text-button" onClick={onOpenSensors}>센서 화면으로</button></div>}
         {conditionError && <p className="diagnostic-error">{conditionError}</p>}
@@ -370,7 +398,6 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
         </>}
       </article>
     </section>
-    <CourseCard ctx={ctx} />
 
     {progress && progress.cells.length > 0 && <section className="card experiment-card exp-progress">
       <div className="card-head"><div><h2>실험 진행표 · {progress.done}/{progress.need}회</h2><p>계획(방지턱 × 추가 질량 × 출력 × 반복)에 대비해 본 실험이 몇 회 끝났는지 보여 줍니다. 칸을 누르면 그 조건이 입력되고 아래에 그래프가 나옵니다(여러 칸을 누르면 겹쳐 비교, 다시 누르면 빠짐).{progress.next ? ` 다음 추천: 방지턱 ${progress.next.bump_id}, +${progress.next.added_mass_g} g, 출력 ${progress.next.output_value}` : ' 계획을 모두 마쳤습니다.'}</p></div>

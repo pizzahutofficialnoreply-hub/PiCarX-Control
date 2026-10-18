@@ -33,7 +33,7 @@ from .distance import DistanceLogger
 from .vision import BumpCamera, VisionSettings
 from . import vision as vis
 from . import distance as dist
-from .line_follow import LineSettings, LineTracker
+from .line_follow import GuidedSteer, LineSettings, LineTracker
 from .mpu6050 import mpu6050_service
 from .services.event_log import record_event
 
@@ -108,6 +108,17 @@ class ExperimentSettings(BaseModel):
     wall_stop_cm: float = Field(default=0.0, ge=0, le=200, description="벽까지 이 거리(cm)보다 가까워지면 정지(0 = 끔)")
     vision: "VisionSettings" = Field(default_factory=lambda: VisionSettings())
     course_spin_lead_deg: float = Field(default=12.0, ge=0, le=60, description="코스 제자리 회전에서 배운 '일찍 끄는 각'")
+    # 반복 측정의 '끝내기·복귀' 방식(바닥 테이프 코스)
+    end_mode: Literal["time", "stop_line"] = Field(default="time", description="time: 주행 시간(또는 방지턱 통과 자동 정지), stop_line: 정지선(가로 테이프)을 보면 서서히 멈춤")
+    accel_mode: Literal["instant", "ramp"] = Field(default="instant", description="출발: 바로 목표 출력 / 정해진 시간 동안 순차 가속")
+    accel_s: float = Field(default=0.6, ge=0.05, le=3)
+    decel_s: float = Field(default=0.3, ge=0.05, le=3, description="정지선을 본 순간부터 0까지 줄이는 시간")
+    return_mode: Literal["none", "reverse", "uturn"] | None = Field(default=None, description="복귀: 없음 / 후진 / 제자리 180° 회전(비우면 return_enabled로 정함)")
+    spin_output: float = Field(default=100, ge=30, le=100, description="제자리 회전 출력(앞바퀴가 끌려 돌기 때문에 높게)")
+    spin_direction: Literal["left", "right"] = "left"
+    creep_duty: float = Field(default=40, ge=15, le=100, description="선 위치 맞춤 때 실제 모터 듀티(%)")
+    leg_timeout_s: float = Field(default=8.0, ge=1, le=30, description="정지선 모드에서 정지선을 못 볼 때 최대 주행 시간")
+    cross_threshold: float = Field(default=0.5, ge=0.2, le=0.95, description="세 센서 모두 이 값(0~1) 이상이면 가로 테이프")
     model_id: str = Field(default="auto", max_length=20, description="관계식 모델(auto = 교차검증 오차 최소)")
     plan_added_masses: list[float] = Field(default_factory=lambda: [0.0, 150.0, 300.0])
     plan_outputs: list[float] = Field(default_factory=lambda: [40.0, 55.0, 70.0, 85.0, 100.0])
@@ -151,6 +162,15 @@ class AutoRunRequest(BaseModel):
     ultrasonic: bool | None = None
     wall_stop_cm: float | None = Field(default=None, ge=0, le=200)
     slowdown: "SlowdownRequest | None" = None
+    end_mode: Literal["time", "stop_line"] | None = None
+    accel_mode: Literal["instant", "ramp"] | None = None
+    accel_s: float | None = Field(default=None, ge=0.05, le=3)
+    decel_s: float | None = Field(default=None, ge=0.05, le=3)
+    return_mode: Literal["none", "reverse", "uturn"] | None = None
+    spin_output: float | None = Field(default=None, ge=30, le=100)
+    spin_direction: Literal["left", "right"] | None = None
+    creep_duty: float | None = Field(default=None, ge=15, le=100)
+    leg_timeout_s: float | None = Field(default=None, ge=1, le=30)
 
 
 class SlowdownRequest(BaseModel):
@@ -436,7 +456,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
-                                    "slowdown", "distance_summary", "stopped_by_wall")}
+                                    "slowdown", "distance_summary", "stopped_by_wall", "course", "guided")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -551,7 +571,7 @@ def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) ->
 
 
 # --------------------------------------------------------------------------- 자동 측정 주행
-BUSY_STATES = ("pre_roll", "driving", "tail", "analyzing", "returning", "rest")
+BUSY_STATES = ("pre_roll", "driving", "tail", "analyzing", "returning", "turning", "aligning", "rest")
 MAX_HEADING_CORRECTION_DEG = 12.0
 
 
@@ -717,12 +737,16 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                      bump_watch: "BumpPassWatcher | None" = None, after_bump_s: float = 0.3,
                      slowdown: dict[str, Any] | None = None, distance: "DistanceLogger | None" = None,
                      wall_stop_cm: float = 0.0, slow_tape: Callable[[Any], bool] | None = None,
-                     camera: "BumpCamera | None" = None, stop_on_pass: bool = True) -> dict[str, Any]:
+                     camera: "BumpCamera | None" = None, stop_on_pass: bool = True,
+                     ramp_s: float = 0.0, decel_s: float = 0.0, cross: Any = None, guided: Any = None) -> dict[str, Any]:
     """정해진 시간 동안 일정한 출력으로 직진/후진.
 
     출력은 처음 한 번 정하면 바꾸지 않습니다(관계식이나 방지턱 위치와 무관). 조향만 바뀝니다.
     조향: 라인 추종(테이프) > 자이로 방향 유지 > 조향 없음 순서로 사용합니다.
     ``kick_ms`` 동안은 최대 출력으로 밀어 정지마찰을 넘긴 뒤 설정 출력으로 바꿉니다(기본 끔).
+    ``ramp_s``: 출발할 때 그 시간 동안 실제 듀티를 0→목표로 순차 가속.
+    ``cross``(course.CrossWatcher): 정지선(가로 테이프)을 보면 그 순간부터 ``decel_s`` 동안 0까지 줄여 멈춤.
+    ``guided``(GuidedSteer): 유도선 + 자이로 조향(방지턱 위에서는 자이로로 방향 유지).
     """
     loop = asyncio.get_running_loop()
     start = loop.time()
@@ -755,6 +779,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                     await asyncio.sleep(0.01)
         poller = asyncio.create_task(poll())
     stage_now, stage_prev, stage_log = "approach", None, []
+    decel_at: float | None = None
+    if cross is not None:
+        cross.start(time.monotonic() + min_s)
     slow_seen = asyncio.Event()
     slow_poller: asyncio.Task | None = None
     slowed_at: float | None = None
@@ -776,6 +803,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
           if ctl.stop_generation != generation:
               raise Aborted()
           now = loop.time()
+          if cross is not None and decel_at is None and cross.seen.is_set():
+              decel_at = now
+              end = max(end, now + decel_s + 0.05)
           steer = 0.0
           heading = mpu6050_service.heading_deg() if (heading_hold if track is None else track) else None
           if heading is not None:
@@ -783,10 +813,16 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               worst = max(worst, abs(heading))
               if controller is not None:
                   steer = controller.update(heading, now - prev_t, sign)
-          if line is not None:
-              raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
+          if guided is not None and heading is not None:
+              raw = cross.raw if cross is not None and cross.raw is not None else await asyncio.to_thread(ctl.adapter.read_grayscale)
+              steer, ok = guided.update(raw, heading, mpu6050_service.tilt_deg(), now)
+              if not ok and decel_at is None:
+                  line_lost = True
+                  break
+          elif line is not None:
+              raw = cross.raw if cross is not None and cross.raw is not None else await asyncio.to_thread(ctl.adapter.read_grayscale)
               steer, ok = line.update(raw, direction)
-              if not ok:
+              if not ok and decel_at is None:
                   line_lost = True
                   break
           if bump_watch is not None and passed_at is None and bump_watch.update(mpu6050_service.tilt_deg(), now - start):
@@ -826,10 +862,28 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
           if stage_now != stage_prev:
               stage_log.append([round(now - start, 3), stage_now, round(cur, 1)])
               stage_prev = stage_now
-          out = 100.0 if kick_ms and (now - start) * 1000 < kick_ms else cur
-          if not await ctl.experiment_drive(mode, out, generation, direction, steer):
+          out = 100.0 if kick_ms and not ramp_s and (now - start) * 1000 < kick_ms else cur
+          # 순차 가속·감속은 '실제 듀티'에 비율을 곱합니다(라이브러리 PWM은 듀티 = PWM/2 + 50이라
+          # PWM 숫자만 줄이면 50% 아래로 안 내려가 감속이 거의 안 되기 때문).
+          k = 1.0
+          if decel_at is not None:
+              k = 1.0 - (now - decel_at) / max(0.01, decel_s)
+              if k <= 0:
+                  break
+          elif ramp_s > 0:
+              k = min(1.0, max(0.05, (now - start) / ramp_s))
+          cmd_mode, cmd_out = mode, out
+          if k < 0.999:
+              cmd_mode, cmd_out = "duty", max(0.0, effective_duty(mode, out) * k)
+          if not await ctl.experiment_drive(cmd_mode, cmd_out, generation, direction, steer):
               raise Aborted()
-          log.append([round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)])
+          row = [round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)]
+          if guided is not None and guided.last:
+              p = guided.last.get("position")
+              tl = mpu6050_service.tilt_deg()
+              row += [None if p is None else round(p, 2), guided.last.get("mode"), guided.last.get("ref_deg"), guided.last.get("y_est_mm"),
+                      None if tl is None else round(max(abs(tl[0]), abs(tl[1])), 1)]
+          log.append(row)
           await asyncio.sleep(0.02 if line is not None else 0.05)  # 라인 추종은 50 Hz
     finally:
         if poller is not None:
@@ -838,11 +892,13 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
         if slow_poller is not None:
             slow_seen.set()
             slow_poller.cancel()
+        if cross is not None:
+            cross.stop()
 
     half = [row[2] for row in log if row[0] >= seconds / 2]
     return {"heading_max_deg": round(worst, 2) if last is not None else None,
             "heading_end_deg": round(last, 2) if last is not None else None,
-            "line_lost": line_lost if line is not None else None,
+            "line_lost": line_lost if (line is not None or guided is not None) else None,
             "drive_log": log[:400], "stopped_on_mark": stopped_on_mark, "elapsed_s": round(loop.time() - start, 3),
             "bump_passed_s": round(passed_at - start, 3) if passed_at is not None else None,
             "bump_events": dict(bump_watch.events) if bump_watch is not None else None,
@@ -852,7 +908,18 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "stage_log": stage_log,
             "camera_seen_s": round(camera.seen_at - start, 3) if camera is not None and camera.seen_at is not None else None,
             "stopped_by_wall": stopped_by_wall,
+            "cross_detected": decel_at is not None if cross is not None else None,
+            "cross_detect_s": round(decel_at - start, 3) if decel_at is not None else None,
+            "cross_tilt_blocked": getattr(cross, "blocked", None),
+            "guided": guided.summary() if guided is not None else None,
             "steer_saturated": bool(controller and sum(1 for row in log if abs(row[2]) >= MAX_HEADING_CORRECTION_DEG - 0.01) > len(log) * 0.3)}
+
+
+def effective_duty(mode: str, value: float) -> float:
+    """실제 모터 듀티(%): 라이브러리 PWM은 PWM/2 + 50, 직접 듀티는 그대로."""
+    if value <= 0:
+        return 0.0
+    return min(100.0, value / 2 + 50) if mode == "pwm" else min(100.0, value)
 
 
 def _tape_detector(settings: "ExperimentSettings") -> Callable[[Any], bool] | None:
@@ -1005,13 +1072,30 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         auto_runner._phase("pre_roll", opts["pre_roll"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · 정지 상태 기록 중 (차량을 움직이지 마세요)")
         await _wait(ctl, opts["pre_roll"], gen)
         # 방향은 항상 측정해 직진도를 기록하고, 보정은 설정이 켜져 있을 때만 적용합니다.
-        track = not simulated and mpu6050_service.heading_reset()
+        # 코스(정지선) 모드는 출발 전에 영점을 한 번 잡았으므로 방향만 0으로(멈춘 직후 흔들림이 영점에 섞이지 않게).
+        track = not simulated and (mpu6050_service.heading_zero() if opts.get("keep_bias") else mpu6050_service.heading_reset())
         hold = bool(opts["steering_source"] == "gyro" and track)
         line = LineTracker(settings.line) if opts["steering_source"] == "line" and settings.line.floor and settings.line.line else None
-        if opts["steering_source"] == "line" and line is None:
+        guided = None
+        if line is not None and track and cond.direction != "backward":
+            # 유도선 + 자이로: 방지턱 위에서는 테이프 대신 자이로로 방향을 유지하고, 벗어나면 정해진 각도로 되돌아감
+            # 속도 추정(테이프를 놓쳤을 때 옆으로 밀린 양 계산용): 같은 반복의 지난 회차 실측, 없으면 0.4 m/s
+            last_v = ((auto_runner.last_result or {}).get("analysis") or {}).get("speed_mps") if auto_runner.cycle > 1 else None
+            guided = GuidedSteer(settings.line, polarity=store.load_settings().heading_sign, speed_mps=float(last_v or 0.4),
+                                 ref_deg=opts.pop("ref_offset", None))
+            line = None
+        stop_line = opts.get("end_mode") == "stop_line" and not simulated
+        cross = None
+        if stop_line:
+            from .course import CrossWatcher
+            cross = CrossWatcher(ctl, settings.line, opts["cross_threshold"], 2.0)
+        ramp_s = opts["accel_s"] if opts.get("accel_mode") == "ramp" else 0.0
+        if opts["steering_source"] == "line" and line is None and guided is None:
             raise RuntimeError("라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 하세요.")
         run["heading_hold"] = hold
-        auto_runner._phase("driving", opts["run_seconds"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · {'후진' if cond.direction == 'backward' else '직진'} 측정 중 · {cond.output_mode.upper()} {cond.output_value:g}{' · 직진 보정' if hold else ''}")
+        auto_runner._phase("driving", None if stop_line else opts["run_seconds"],
+                           f"{auto_runner.cycle}/{auto_runner.cycles}회 · {opts.get('leg_label') or ''}{'후진' if cond.direction == 'backward' else '직진'} 측정 중 · {cond.output_mode.upper()} {cond.output_value:g}"
+                           f"{' · 정지선까지' if stop_line else ''}{' · 유도선+자이로' if guided else ' · 직진 보정' if hold else ''}")
         try:
             mdir = cond.direction
             if mdir == "backward":
@@ -1029,12 +1113,14 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                     raise RuntimeError("카메라 방지턱 감지는 '이론·예측·제어 → 감속 제어'에서 바닥 보정을 먼저 하세요.")
                 cam = BumpCamera(camera_service.capture_array, vs)
                 cam.start()
-            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["run_seconds"], mdir, gen, hold,
+            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["leg_timeout"] if stop_line else opts["run_seconds"], mdir, gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
                                           ki=settings.heading_ki, ff=getattr(store.load_settings(), ff_key) if hold else 0.0,
                                           polarity=store.load_settings().heading_sign,
-                                          bump_watch=BumpPassWatcher() if ((settings.stop_after_bump or plan_staged) and track) else None,
-                                          stop_on_pass=settings.stop_after_bump,
+                                          bump_watch=BumpPassWatcher() if (((settings.stop_after_bump and not stop_line) or plan_staged) and track) else None,
+                                          stop_on_pass=settings.stop_after_bump and not stop_line,
+                                          ramp_s=ramp_s, decel_s=opts.get("decel_s") or 0.3, cross=cross, guided=guided,
+                                          min_s=0.3 if stop_line else 0.0,
                                           camera=cam,
                                           after_bump_s=settings.after_bump_s,
                                           slowdown=opts.get("slowdown_plan") if (opts.get("slowdown_plan") or {}).get("needed") else None,
@@ -1044,6 +1130,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                 cam.stop()
                 drive_info["camera_scores"] = cam.scores[-80:]
             auto_runner.last_forward_s = drive_info.get("elapsed_s")
+            if stop_line or ramp_s or opts.get("leg_label"):
+                run["course"] = {"leg": opts.get("leg_label"), "end_mode": opts.get("end_mode"), "accel": opts.get("accel_mode"),
+                                 "accel_s": ramp_s or None, "decel_s": opts.get("decel_s") if stop_line else None,
+                                 "detected": drive_info.get("cross_detected"), "detect_s": drive_info.get("cross_detect_s")}
             if line is not None and line.flipped:
                 st = store.load_settings()
                 st.line.steer_sign = line.sign
@@ -1108,12 +1198,64 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     if drive_info.get("line_lost"):
         run["analysis"].setdefault("flags", []).append("측정 중 테이프를 놓쳐 일찍 멈췄습니다.")
         store.put(run)
+    if drive_info.get("cross_detected") is False and not drive_info.get("line_lost") and not aborted:
+        run["analysis"].setdefault("flags", []).append("정지선을 찾지 못하고 최대 시간에서 멈췄습니다.")
+        store.put(run)
+    auto_runner.last_drive = drive_info
     summary = run_summary(run)
     auto_runner.last_result = summary
     auto_runner.completed.append(run["id"])
     if aborted:
         raise Aborted()
     return summary
+
+
+def _line_dir() -> float:
+    """방금 끝난 측정 구간에서 알아낸 유도선 방향(그 구간 자이로 각, 출발 때 0°)."""
+    g = (getattr(auto_runner, "last_drive", None) or {}).get("guided") or {}
+    return float(g.get("ref_deg") or 0.0)
+
+
+def _next_ref_offset(target: float) -> float | None:
+    """다음 구간 출발 때(방향을 0으로 돌리기 직전) 차가 유도선 방향에서 얼마나 틀어져 있는지 → 다음 구간의 유도선 방향."""
+    h = mpu6050_service.heading_deg()
+    return None if h is None else round((target - h + 180.0) % 360.0 - 180.0, 2)
+
+
+async def _turn_around(ctl, creq: Any, line: LineSettings, cycle: int, cycles: int) -> None:
+    """정지선(또는 출발선) 위에서 제자리 180° 회전 → 유도선 찾기 → 가로 테이프가 센서 밑에 올 때까지 후진."""
+    from . import course as co
+    co.runner.gen = ctl.stop_generation
+    co.runner.target_deg = _line_dir()  # 측정 구간에서 알아낸 유도선 방향(회전 뒤 ±180°를 이 방향에 맞춤)
+    await _wait(ctl, 0.25, ctl.stop_generation)
+    co.runner.gen = ctl.stop_generation
+    auto_runner._phase("turning", None, f"{cycle}/{cycles}회 · 제자리 180° 회전 (출력 {creq.spin_output:g})")
+    turned = await co._spin(ctl, 0, creq, 180.0, creq.spin_direction)
+    if turned is not None:
+        # 멈춘 뒤 더 돈 만큼(관성)을 배워 다음 회전부터 그만큼 일찍 끔
+        creq.spin_lead_deg = max(0.0, min(60.0, creq.spin_lead_deg + 0.6 * (turned - 180.0)))
+        st = store.load_settings()
+        st.course_spin_lead_deg = round(creq.spin_lead_deg, 1)
+        store.save_settings(st)
+    auto_runner.message = f"{cycle}/{cycles}회 · {turned or 0:.0f}° 회전 → 유도선 찾기"
+    await co._find_guide(ctl, 0, creq, line)
+    if await co._on_cross(ctl, creq, line):
+        return
+    # 뒷축 근처를 중심으로 돌았으므로 가로 테이프는 대개 센서 뒤쪽(차 길이만큼)에 있습니다: 조금 빠르게 후진해 찾고 맞춤
+    auto_runner._phase("aligning", None, f"{cycle}/{cycles}회 · 가로 테이프가 센서 밑에 올 때까지 후진")
+    duty_req = creq.model_copy(update={"condition": creq.condition.model_copy(update={"output_mode": "duty"})})
+    pol = store.load_settings().heading_sign
+    duty = min(100.0, creq.creep_duty * 1.25)
+    # 뒤로는 '센서 ~ 뒷축 거리의 2배 + 여유'만큼만 찾고(약 1.4초), 없으면(정지선을 많이 지나쳐 멈췄던 경우) 앞으로 찾습니다.
+    back = await co._drive_until_cross(ctl, 0, duty_req, line, "backward", duty, 0.15, 0.12, 1.4, 0.0, "gyro", polarity=pol, skip=0)
+    first = "forward"
+    if not back["detected"]:
+        auto_runner.message = f"{cycle}/{cycles}회 · 뒤에 없어 앞으로 가로 테이프를 찾습니다"
+        fwd = await co._drive_until_cross(ctl, 0, duty_req, line, "forward", duty, 0.15, 0.12, 3.0, 0.0, "gyro", polarity=pol, skip=0)
+        first = "backward" if fwd["detected"] else "forward"
+    # 감속하며 조금 지나쳤을 수 있으므로 반대로 천천히 맞춤
+    if not await co._align_on_cross(ctl, creq, line, first, 2.0):
+        raise RuntimeError("회전 뒤 가로 테이프를 다시 찾지 못했습니다(회전하며 많이 밀렸거나 유도선에서 벗어남).")
 
 
 async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> None:
@@ -1139,6 +1281,39 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
     source = request.steering_source or (settings.steering_source if request.heading_hold is None else ("gyro" if request.heading_hold else "none"))
     opts["steering_source"] = source
     opts["heading_hold"] = source == "gyro"
+    # 끝내기·복귀 방식
+    rm = request.return_mode
+    if rm is None:
+        if request.return_enabled is not None:
+            rm = "reverse" if request.return_enabled else "none"
+        else:
+            rm = settings.return_mode or ("reverse" if settings.return_enabled else "none")
+    end_mode = pick(request.end_mode, settings.end_mode)
+    if rm == "uturn":
+        end_mode = "stop_line"  # 회전 복귀는 가로 테이프로 위치를 맞추므로 정지선 모드가 필요
+    if simulated:
+        end_mode = "time"
+        rm = "reverse" if rm == "uturn" else rm
+    opts.update({
+        "end_mode": end_mode, "return_mode": rm, "return_enabled": rm != "none",
+        "accel_mode": pick(request.accel_mode, settings.accel_mode), "accel_s": pick(request.accel_s, settings.accel_s),
+        "decel_s": pick(request.decel_s, settings.decel_s), "leg_timeout": pick(request.leg_timeout_s, settings.leg_timeout_s),
+        "cross_threshold": settings.cross_threshold, "keep_bias": end_mode == "stop_line",
+    })
+    stop_line = end_mode == "stop_line"
+    creq = None
+    line = settings.line
+    if stop_line:
+        from . import course as co
+        if not line.floor or not line.line:
+            auto_runner._phase("error", None, "정지선 모드는 라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 해야 합니다.")
+            return
+        creq = co.CourseRequest(
+            condition=cond, decel_s=opts["decel_s"], creep_duty=pick(request.creep_duty, settings.creep_duty),
+            spin_output=pick(request.spin_output, settings.spin_output), spin_direction=pick(request.spin_direction, settings.spin_direction),
+            spin_lead_deg=settings.course_spin_lead_deg, cross_threshold=settings.cross_threshold,
+            leg_timeout_s=opts["leg_timeout"], min_leg_s=0.3, steering=source if source != "line" else "gyro")
+        rev_out = request.return_output or settings.return_output or min(100.0, cond.output_value * 1.3)
     auto_runner.cycles = opts["repeats"]
     auto_runner.completed = []
     try:
@@ -1146,12 +1321,57 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
             # 감속 제어 시행은 관계식을 만드는 데 쓰지 않고 '검증'으로 저장합니다(관계식 → 제어 → 실측 비교).
             opts["slowdown_plan"] = slowdown_plan(cond, settings, request.slowdown, simulated)
             cond = cond.model_copy(update={"purpose": "validation", "note": (cond.note + " · " if cond.note else "") + "감속 제어"})
+        if stop_line:
+            # 출발선 위에서 자이로 영점을 한 번 잡고(이후에는 방향만 0으로), 센서가 출발선 위에 오게 맞춥니다.
+            co.runner.gen = ctl.stop_generation
+            auto_runner._phase("aligning", None, "출발 준비 · 자이로 영점, 출발선 위치 확인")
+            mpu6050_service.heading_stop()
+            await _wait(ctl, 0.6, ctl.stop_generation)
+            mpu6050_service.heading_reset()
+            co.runner.target_deg = 0.0
+            if not await co._on_cross(ctl, creq, line):
+                auto_runner.message = "출발선이 센서 밑에 없어 천천히 후진해 찾습니다."
+                if not await co._align_on_cross(ctl, creq, line, "backward", 2.5):
+                    raise RuntimeError("출발선을 찾지 못했습니다. 바닥 센서가 출발선(가로 테이프) 위에 오도록 차를 놓으세요.")
         for i in range(opts["repeats"]):
             auto_runner.cycle = i + 1
             trial_cond = cond.model_copy(update={"trial": cond.trial + i})
+            label = (("A→B " if i % 2 == 0 else "B→A ") if rm == "uturn" else "")
+            opts["leg_label"] = label
+            if stop_line:
+                co.runner.gen = ctl.stop_generation
+                if not await co._on_cross(ctl, creq, line):
+                    auto_runner._phase("aligning", None, f"{i + 1}/{opts['repeats']}회 · 가로 테이프 위로 위치 맞춤")
+                    if not await co._align_on_cross(ctl, creq, line, "backward", 1.5):
+                        raise RuntimeError("출발 위치(가로 테이프 위)에 차를 맞추지 못했습니다.")
             await _measure_once(ctl, trial_cond, settings, opts, simulated)
             last_cycle = i == opts["repeats"] - 1
-            if opts["return_enabled"]:
+            drv = getattr(auto_runner, "last_drive", {}) or {}
+            if stop_line and drv.get("cross_detected") is not True:
+                raise RuntimeError("측정 주행 중 유도선을 놓쳐 멈췄습니다(정지선 전)." if drv.get("line_lost")
+                                   else f"정지선을 못 보고 최대 {opts['leg_timeout']:g}초에서 멈췄습니다.")
+            if stop_line and rm == "reverse":
+                co.runner.gen = ctl.stop_generation
+                co.runner.target_deg = _line_dir()
+                await _wait(ctl, 0.3, ctl.stop_generation)
+                co.runner.gen = ctl.stop_generation
+                # 순차 감속으로 정지선을 조금 지나쳐 멈췄으면, 후진하며 그 정지선을 한 번 더 지나므로 하나는 건너뜀
+                skip = 0 if await co._on_cross(ctl, creq, line) else 1
+                auto_runner._phase("returning", None, f"{i + 1}/{opts['repeats']}회 · 출발선까지 후진 (출력 {rev_out:g}, 방지턱을 뒤로 넘음)")
+                back = await co._drive_until_cross(ctl, 0, creq, line, "backward", rev_out, 0.3, max(0.1, opts["decel_s"] * 0.6),
+                                                   opts["leg_timeout"] * 1.5, 0.3, "gyro" if source != "none" else "none",
+                                                   polarity=store.load_settings().heading_sign, skip=skip)
+                if not back["detected"]:
+                    raise RuntimeError(f"후진 중 출발선을 찾지 못했습니다(후진 출력을 올리거나, 방지턱에서 멈췄는지 확인). "
+                                       f"[{back['elapsed_s']:.1f}초 후진, 건너뛸 선 {skip}개, 기울어 무시한 읽기 {back.get('tilt_blocked', 0)}]")
+                auto_runner._phase("aligning", None, f"{i + 1}/{opts['repeats']}회 · 출발선 위치 맞춤")
+                if not await co._align_on_cross(ctl, creq, line, "forward", 2.0):
+                    raise RuntimeError("출발선 위에 차를 맞추지 못했습니다.")
+                opts["ref_offset"] = _next_ref_offset(co.runner.target_deg)
+            elif stop_line and rm == "uturn":
+                await _turn_around(ctl, creq, line, i + 1, opts["repeats"])
+                opts["ref_offset"] = _next_ref_offset(co.runner.target_deg)
+            elif opts["return_enabled"]:
                 gen = ctl.stop_generation
                 auto_runner._phase("returning", opts["run_seconds"] * opts["return_scale"] + 0.3,
                                    f"{auto_runner.cycle}/{auto_runner.cycles}회 · 출발선으로 {'전진' if cond.direction == 'backward' else '후진'} 복귀 중")
