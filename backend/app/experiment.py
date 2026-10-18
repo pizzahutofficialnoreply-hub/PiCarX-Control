@@ -874,6 +874,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                   break
           elif ramp_s > 0:
               k = min(1.0, max(0.05, (now - start) / ramp_s))
+          if guided is not None and guided.mode == "lost" and decel_at is None:
+              k = min(k, 0.75)   # 테이프를 찾는 동안은 조금 천천히(방지턱을 이미 지난 뒤라 측정에는 영향 없음)
           cmd_mode, cmd_out = mode, out
           if k < 0.999:
               cmd_mode, cmd_out = "duty", max(0.0, effective_duty(mode, out) * k)
@@ -1083,6 +1085,14 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             # 유도선 + 자이로: 방지턱 위에서는 테이프 대신 자이로로 방향을 유지하고, 벗어나면 정해진 각도로 되돌아감
             # 속도 추정(테이프를 놓쳤을 때 옆으로 밀린 양 계산용): 같은 반복의 지난 회차 실측, 없으면 0.4 m/s
             last_v = ((auto_runner.last_result or {}).get("analysis") or {}).get("speed_mps") if auto_runner.cycle > 1 else None
+            if not last_v:
+                # 첫 회차: 같은 방지턱·출력으로 예전에 잰 실제 속도(중앙값)를 씀(테이프를 놓쳤을 때 옆으로 밀린 거리 추정용)
+                prev = sorted(r["analysis"]["speed_mps"] for r in runs_for_mode(simulated)
+                              if not r.get("excluded") and (r.get("analysis") or {}).get("speed_mps")
+                              and r["condition"].get("bump_id") == cond.bump_id and r["condition"].get("output_mode") == cond.output_mode
+                              and abs(float(r["condition"].get("output_value") or 0) - cond.output_value) < 0.5)[-15:]
+                if prev:
+                    last_v = prev[len(prev) // 2]
             fresh = store.load_settings()   # 직전 회차에서 배운 직진 조향을 바로 씀
             guided = GuidedSteer(fresh.line, polarity=fresh.heading_sign, speed_mps=float(last_v or 0.4),
                                  ref_deg=opts.pop("ref_offset", None))

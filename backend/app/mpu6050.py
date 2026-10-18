@@ -58,7 +58,8 @@ class MPU6050Service:
         self.bad_reads = 0
         self.io_errors = 0
         self.fifo_overflows = 0
-        self.use_fifo = True          # 센서 내장 버퍼로 읽기(실패하면 한 표본씩 직접 읽기로 돌아감)
+        import os
+        self.use_fifo = os.getenv("PICARX_MPU_FIFO", "1") != "0"   # 센서 내장 버퍼로 읽기(실패하면 한 표본씩 직접 읽기로 돌아감)
         self._fifo = False
         self._fifo_dt = 0.001
         self._fifo_k = 0

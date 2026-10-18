@@ -26,7 +26,7 @@ class LineSettings(BaseModel):
     damping: float = Field(default=0.25, ge=0, le=1, description="감쇠(미분) 계수 s: 위치가 빨리 변하면 미리 반대로 조향해 흔들림을 줄임")
     max_steer_deg: float = Field(default=25, ge=5, le=30)
     min_weight: float = Field(default=0.25, ge=0.05, le=0.9, description="이보다 작으면 테이프를 놓친 것으로 봄")
-    lost_timeout_s: float = Field(default=0.6, ge=0.1, le=3)
+    lost_timeout_s: float = Field(default=1.5, ge=0.1, le=5)
     auto_sign: bool = Field(default=True, description="조향 방향 자동 판정 켜기")
     steer_sign: int = Field(default=1, description="테이프가 오른쪽일 때 오른쪽(+1)/왼쪽(−1)으로 꺾기. 센서 순서가 반대인 차는 −1(주행 중 자동 판정)")
     mode: str = Field(default="gentle", description="gentle: 조향 최소(테이프가 가운데 근처면 직진, 벗어날 때만 조금), normal: 적극적으로 따라감")
@@ -235,7 +235,7 @@ class GuidedSteer:
     SENSOR_HALF_M = 0.02     # 가운데 센서 ~ 옆 센서 간격
 
     def __init__(self, settings: LineSettings, polarity: int = 1, kp: float = 1.4, max_heading_deg: float = 15.0,
-                 recover_steer_deg: float = 22.0, tilt_block_deg: float = 1.5, settle_s: float = 0.25, lost_s: float = 1.5,
+                 recover_steer_deg: float = 22.0, tilt_block_deg: float = 1.5, settle_s: float = 0.25, lost_s: float = 4.0,
                  speed_mps: float = 0.4, ref_deg: float | None = None, cam: Any = None) -> None:
         self.s = settings
         self.sign = -1 if settings.steer_sign < 0 else 1
@@ -265,6 +265,12 @@ class GuidedSteer:
         self.calm_sum = 0.0
         self.calm_n = 0
         self.cam_used = 0
+        self.searching = False
+        self.lost_side: float | None = None
+        self.lost_est0 = 0.0
+        self.search_t0: float | None = None
+        self.search_k = 0
+        self.search_end = 0.0
 
     def update(self, raw: list[float] | None, heading: float, tilt: tuple[float, float] | None,
                now: float | None = None) -> tuple[float, bool]:
@@ -304,18 +310,44 @@ class GuidedSteer:
         elif pos is None:
             self.mode = "lost"
             self.lost_since = self.lost_since or now
-            # 테이프가 있을 쪽(추정 위치)으로 비스듬히 다가감. 추정이 0 근처면 유도선 방향으로 곧게.
+            # 테이프가 있을 쪽(추정 위치)으로 비스듬히 다가감.
             est = self.y_est if self.y_est is not None else self.SENSOR_HALF_M * self.last_dir
+            if abs(est) < 0.005:
+                # 추정이 애매하면 '차가 어느 쪽으로 틀어졌는지'로 정함: 오른쪽으로 틀어진 채 달렸으면 테이프는 왼쪽
+                est = -0.01 if phi > 2 else 0.01 if phi < -2 else self.SENSOR_HALF_M * self.last_dir
             g = self.cam.guide(now) if self.cam is not None else None
             if g is not None:
                 # 카메라가 앞쪽 유도선을 보고 있으면 그 위치를 믿음(−1 왼쪽 ~ +1 오른쪽 → 약 ±3 cm)
                 est = 0.03 * g
                 self.y_est = est
                 self.cam_used += 1
-            theta = max(-1.0, min(1.0, est / 0.03)) * self.max_heading
-            ok = now - self.lost_since < self.lost_s
+            lost_t = now - self.lost_since
+            if self.lost_side is None:
+                self.lost_side, self.lost_est0 = (1.0 if est >= 0 else -1.0), abs(est)
+            side = self.lost_side
+            if g is not None:
+                side = 1.0 if est >= 0 else -1.0
+            # 처음 판단한 쪽(차가 틀어진 반대쪽)으로 20°로 꾸준히 다가감. 거리 추정은 속도를 몰라 틀리기 쉽지만
+            # 방향은 확실하고, 테이프를 가로지르면 센서가 반드시 보므로 '찾을 때까지 그쪽으로'가 가장 확실합니다.
+            # 2.5초 안에 못 찾을 때만(방향 판단이 틀린 드문 경우) 좌우로 넓혀 가며 훑습니다.
+            if g is not None or lost_t < 2.5:
+                theta = side * 20.0
+            else:
+                # 추정 위치에 왔는데도 안 보이면 좌우로 20°씩 번갈아 지그재그로 훑음
+                # 한 번 훑을 때마다 0.4 s → 0.8 s → 1.2 s … 로 점점 넓게(추정이 틀렸어도 결국 테이프를 지나감)
+                if self.search_t0 is None:
+                    self.search_t0, self.search_k, self.search_end = now, 0, now + 0.4
+                if now >= self.search_end:
+                    self.search_k += 1
+                    self.search_end = now + 0.4 * (self.search_k + 1)
+                theta = (-side if self.search_k % 2 == 0 else side) * 20.0
+                self.searching = True
+            ok = lost_t < self.lost_s
         else:
             self.lost_since = None
+            self.searching = False
+            self.search_t0 = None
+            self.lost_side = None
             d = self.sign * pos             # + = 테이프가 오른쪽(오른쪽으로 가야 함)
             self.last_dir = d
             self.heading_seen = heading
@@ -421,7 +453,12 @@ class LineRunner:
                 if not ok:
                     self.state, self.message = "lost", "테이프를 놓쳐 정지했습니다. 센서 보정과 테이프 폭을 확인하세요."
                     return
-                if not await ctl.experiment_drive(output_mode, output, gen, "forward", steer):
+                cmd_mode, cmd_out = output_mode, output
+                if self.guided is not None and self.guided.mode == "lost":
+                    # 테이프를 찾는 동안은 실제 듀티 75%로 조금 천천히
+                    duty = min(100.0, output / 2 + 50) if output_mode == "pwm" else output
+                    cmd_mode, cmd_out = "duty", duty * 0.75
+                if not await ctl.experiment_drive(cmd_mode, cmd_out, gen, "forward", steer):
                     self.state, self.message = "stopped", "정지 명령으로 멈췄습니다."
                     return
                 await asyncio.sleep(0.02)  # 50 Hz: 조향 반응을 빠르게

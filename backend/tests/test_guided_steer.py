@@ -106,7 +106,7 @@ def test_lost_after_drift_goes_back_toward_estimated_side():
 
 
 def test_lost_too_long_stops():
-    g = GuidedSteer(S, ref_deg=0.0, lost_s=0.5)
+    g = GuidedSteer(S.model_copy(update={'lost_timeout_s': 0.3}), ref_deg=0.0, lost_s=0.5)
     _, _, t = _run(g, ON, 0.0)
     _, ok, _ = _run(g, OFF, 0.0, n=40, t0=t)
     assert not ok
@@ -150,3 +150,37 @@ def test_corrupt_grayscale_reads_are_ignored():
     _run(g, [1459, 300, 1495], 0.0)
     steer, ok, _ = _run(g, [1459, 49383, 1495], 0.0, n=3)    # 깨진 읽기 → 직전 값 사용, 놓친 것으로 보지 않음
     assert ok and g.mode == "line"
+
+
+def _sim_recover(offset_m: float, heading0: float, speed: float = 0.7, est_speed: float = 0.4, seconds: float = 4.0):
+    """간단한 차 모형: 센서가 유도선에서 offset_m(+ 왼쪽)만큼 벗어나 테이프를 놓친 상태에서 다시 찾는지."""
+    import math
+    g = GuidedSteer(S, ref_deg=0.0, speed_mps=est_speed)
+    t, h, p = 0.0, 0.0, 0.0
+    for _ in range(20):                       # 처음엔 유도선 위
+        t += 0.02
+        g.update(ON, 0.0, (0.0, 0.0), t)
+    # 방지턱에서 틀어지며 옆으로 밀림(그동안 기울어짐)
+    h, p = heading0, offset_m
+    for _ in range(10):
+        t += 0.02
+        g.update(OFF, h, (5.0, 0.0), t)
+    for _ in range(int(seconds / 0.02)):
+        t += 0.02
+        offs = (0.02, 0.0, -0.02)              # 센서 좌·중·우(왼쪽 +)
+        raw = [1200 - 900 * math.exp(-(((p + o) - 0.0) / 0.012) ** 2) for o in offs]
+        steer, ok = g.update(raw, h, (0.0, 0.0), t)
+        if not ok:
+            return False, p
+        if g.mode in ("line", "recover") and abs(p) < 0.02:
+            return True, p
+        h += -math.degrees(speed / 0.095 * math.tan(math.radians(steer))) * 0.02
+        p += speed * 0.02 * math.sin(math.radians(h))
+    return False, p
+
+
+def test_lost_search_finds_tape_even_when_offset_underestimated():
+    # 방지턱 뒤 오른쪽으로 10 cm, 17 cm 밀림(실제 속도 0.7, 추정 속도 0.4로 실제보다 작게 추정) → 다시 찾아야 함
+    for off, h0 in ((-0.10, -15.0), (-0.17, -24.0), (0.12, 18.0)):
+        found, p = _sim_recover(off, h0)
+        assert found, (off, h0, p)

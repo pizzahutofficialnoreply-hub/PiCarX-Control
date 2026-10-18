@@ -155,7 +155,7 @@ def grayscale() -> list[float]:
     sy = state["y"] + SENSOR_AHEAD * math.sin(h)
     for off in TAPE_OFFSETS:
         px, py = sx - off * math.sin(h), sy + off * math.cos(h)
-        guide = math.exp(-(py / 0.012) ** 2) if -0.3 <= px <= 1.5 else 0.0
+        guide = math.exp(-(py / 0.012) ** 2) if -0.3 <= px <= STOP_X + 0.35 else 0.0
         cross = 0.0
         for cx in (START_X, STOP_X):
             if abs(py) <= CROSS_HALF_LEN:
