@@ -45,3 +45,27 @@ def test_speed_model_inverse():
     v = mf.speed_from_output(models, "A", "pwm", 70, 750)
     assert abs(v - (0.1 + 0.56 - 0.075)) < 1e-6
     assert abs(mf.output_from_speed(models, "A", "pwm", v, 750) - 70) < 1e-6
+
+
+def test_glitch_samples_are_replaced():
+    import random
+    random.seed(2)
+    n = 400
+    t = [i / 550 for i in range(n)]
+    az = [1.1 + random.gauss(0, 0.02) for _ in range(n)]
+    gx = [random.gauss(0, 1) for _ in range(n)]
+    cols = {"t_s": t, "ax_g": [0.01] * n, "ay_g": [0.02] * n, "az_g": az, "gx_dps": gx, "gy_dps": list(gx[::-1]), "gz_dps": [0.5] * n,
+            "vertical_g": [a - 0.1 for a in az], "dynamic_g": [0.0] * n}
+    # 통신 오류 모양: az가 정확히 4 g, 0 g / 자이로 세 축 같음
+    for i, val in ((100, 3.9998), (200, -0.0002)):
+        cols["az_g"][i] = val
+        cols["vertical_g"][i] = val - 0.1022 + 0.0002
+        cols["gx_dps"][i] = cols["gy_dps"][i] = cols["gz_dps"][i] = -0.02
+    # 진짜 충격(여러 표본에 걸침)은 그대로
+    for k, extra in zip(range(300, 305), (0.8, 2.0, 3.0, 2.0, 0.8)):
+        cols["vertical_g"][k] += extra
+        cols["az_g"][k] += extra
+    out, n_bad = ia.remove_glitches(cols)
+    assert n_bad == 2
+    assert max(out["vertical_g"][90:110]) < 1.2 and min(out["vertical_g"][190:210]) > 0.8
+    assert max(out["vertical_g"][295:310]) > 3.5

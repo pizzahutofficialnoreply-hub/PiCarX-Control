@@ -1,3 +1,4 @@
+import random
 import time
 import unittest
 from unittest.mock import patch
@@ -17,11 +18,12 @@ class FakeBus:
     def read_i2c_block_data(self, addr, reg, length):
         self.calls += 1
         az = -1.0 - (2.0 if self.spike else 0.0)  # 뒤집힌 장착: 충돌 시 더 음수
-        raw = int(az * 4096)
-        raw &= 0xFFFF
-        g = int(getattr(self, "gz", 0.0) * 65.5) & 0xFFFF
-        out = [0, 0, 0, 0, raw >> 8, raw & 0xFF] + [0] * 6 + [g >> 8, g & 0xFF]
-        return out
+        # 실제 센서처럼 몇 LSB 잡음을 넣습니다(정확히 0인 값은 통신 오류로 걸러지므로).
+        n = lambda: random.randint(3, 9)  # noqa: E731
+        w = lambda v: [(v & 0xFFFF) >> 8, v & 0xFF]  # noqa: E731
+        raw = int(az * 4096) + n()
+        g = int(getattr(self, "gz", 0.0) * 65.5) + n()
+        return w(n()) + w(n()) + w(raw) + [0, 0] + w(n()) + w(n()) + w(g)
 
     def close(self):
         pass

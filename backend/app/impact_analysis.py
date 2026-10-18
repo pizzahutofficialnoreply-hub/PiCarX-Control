@@ -90,6 +90,49 @@ def pick_axle_pair(peaks: list[Peak], wheelbase_mm: float | None) -> tuple[Peak,
     return best[1] if best else None
 
 
+def _near_whole_g(x: float) -> bool:
+    """가속도 원시값의 아래 12비트가 0인 값(정확히 0, 1, 2, 4, 8 g 근처)인지. I²C 전송 오류의 흔적입니다."""
+    return abs(x - round(x)) < 0.0006
+
+
+def remove_glitches(columns: dict[str, list[float]]) -> tuple[dict[str, list[float]], int]:
+    """I²C 통신 오류로 깨진 표본(한 점만 튀는 값)을 앞뒤 값의 평균으로 바꿉니다.
+
+    깨진 표본의 특징(실제 기록에서 확인):
+      - 가속도 한 축이 정확히 0 / 1 / 2 / 4 / 8 g (원시값의 아래쪽 비트가 모두 0)이면서 앞뒤 표본과 0.25 g 넘게 다르거나
+      - 자이로 세 축이 완전히 같은 값(원시값 0)
+    실제 충격은 여러 표본(수 ms)에 걸쳐 오르내리므로, 한 점만 튀고 위 특징이 있는 값만 고칩니다.
+    """
+    t = columns.get("t_s") or []
+    n = len(t)
+    keys = [k for k in ("ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps", "vertical_g", "dynamic_g") if len(columns.get(k) or []) == n]
+    if n < 5 or not all(k in keys for k in ("ax_g", "ay_g", "az_g", "vertical_g")):
+        return columns, 0
+    v = columns["vertical_g"]
+    bad = []
+    for i in range(1, n - 1):
+        gyro_zero = all(k in keys for k in ("gx_dps", "gy_dps", "gz_dps")) and columns["gx_dps"][i] == columns["gy_dps"][i] == columns["gz_dps"][i]
+        jump = abs(v[i] - (v[i - 1] + v[i + 1]) / 2) > 0.25
+        whole = any(_near_whole_g(columns[k][i]) for k in ("ax_g", "ay_g", "az_g"))
+        if gyro_zero or (whole and jump):
+            bad.append(i)
+    if not bad:
+        return columns, 0
+    out = {k: list(vs) for k, vs in columns.items()}
+    badset = set(bad)
+    for i in bad:
+        lo = i - 1
+        while lo > 0 and lo in badset:
+            lo -= 1
+        hi = i + 1
+        while hi < n - 1 and hi in badset:
+            hi += 1
+        w = (t[i] - t[lo]) / (t[hi] - t[lo]) if t[hi] > t[lo] else 0.5
+        for k in keys:
+            out[k][i] = round(columns[k][lo] + (columns[k][hi] - columns[k][lo]) * w, 4)
+    return out, len(bad)
+
+
 def pitch_series(columns: dict[str, Sequence[float]], still_s: float = 0.5) -> list[float] | None:
     """자이로로 앞뒤 기울기(피치, °)를 적분합니다. 처음 정지 구간 평균을 영점으로 씁니다.
 
@@ -527,6 +570,7 @@ def analyze_run(
     짝은 (1) 착지 피크를 빼고 (2) 축간거리로 계산한 속도가 0.03~4 m/s인 쌍 중
     (3) 두 피크 높이의 합이 가장 큰 쌍으로 고릅니다. ``override``로 사람이 직접 지정할 수 있습니다.
     """
+    columns, glitches = remove_glitches(columns)
     t_all = list(columns.get("t_s") or [])
     v_all = list(columns.get("vertical_g") or [])
     v_raw_all = list(v_all)
@@ -554,6 +598,7 @@ def analyze_run(
         "pi": None, "r_eff_m": None, "critical_speed_mps": None,
         "peak_count": 0, "flags": flags, "candidates": [], "pair_source": None,
         "bump_detected": None, "noise_sigma_g": None, "threshold_used_g": None, "standout_ratio": None,
+        "glitches_fixed": glitches, "max_gap_ms": None,
         "params": {"threshold_delta_g": threshold_delta_g, "min_gap_s": min_gap_s, "jump_g": jump_g,
                    "wheelbase_mm": wheelbase_mm, "wheel_radius_mm": wheel_radius_mm, "bump_radius_mm": bump_radius,
                    "filter_hz": filter_hz, "detect_level": detect_level, "peak_keep": True},
@@ -561,6 +606,15 @@ def analyze_run(
     if len(v) < 3:
         flags.append("표본이 너무 적습니다.")
         return result
+    if glitches:
+        flags.append(f"센서 통신 오류로 깨진 표본 {glitches}개(한 점만 튀는 0·2·4·8 g 값)를 앞뒤 값으로 바꿨습니다.")
+    gaps = [(t[i + 1] - t[i]) for i in range(len(t) - 1)]
+    if gaps:
+        mg = max(gaps)
+        result["max_gap_ms"] = round(mg * 1000, 1)
+        if mg > 0.05:
+            n_gap = sum(1 for g in gaps if g > 0.05)
+            flags.append(f"센서 기록이 {n_gap}번 끊겼습니다(가장 긴 공백 {mg * 1000:.0f} ms). 공백 동안 충격을 놓쳤을 수 있습니다(I²C 읽기 오류).")
 
     k = max(range(len(v)), key=lambda i: v[i])
     result.update(peak_g=round(v[k], 4), peak_delta_g=round(v[k] - 1.0, 4), peak_t_s=round(t[k], 4))

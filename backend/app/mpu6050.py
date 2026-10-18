@@ -24,6 +24,10 @@ G = 9.80665
 Sample = tuple[float, float, float, float, float, float, float]
 
 
+class _BadRead(Exception):
+    """깨진 표본(버림)."""
+
+
 def _signed(high: int, low: int) -> int:
     value = (high << 8) | low
     return value - 65536 if value >= 32768 else value
@@ -50,6 +54,10 @@ class MPU6050Service:
         self._error: str | None = None
         self._available = False
         self._bias: tuple[float, float, float] | None = None
+        self._prev_words: list[int] | None = None
+        self.bad_reads = 0
+        self.io_errors = 0
+        self._fail_streak = 0
         self._vertical_axis = 2      # 0=x, 1=y, 2=z (보정 시 중력 방향 축)
         self._vertical_sign = 1.0
         self._samples: deque[Sample] = deque(maxlen=int(self.HISTORY_SECONDS / self.SAMPLE_INTERVAL) + 500)
@@ -87,6 +95,20 @@ class MPU6050Service:
         with self._i2c_lock:
             d = bus.read_i2c_block_data(self.ADDRESS, 0x3B, 14)
         now = time.monotonic()
+        words = [_signed(d[k], d[k + 1]) for k in (0, 2, 4, 8, 10, 12)]
+        prev = self._prev_words
+        self._prev_words = words
+        # I²C 전송 오류로 깨진 값 거르기(실측에서 확인한 모양):
+        #  - 자이로 세 축이 모두 정확히 0
+        #  - 가속도 한 축의 아래 12비트가 0(정확히 0·1·2·4·8 g)이면서 직전 값과 300 LSB(0.07 g) 넘게 다름
+        #  - 여섯 값 중 둘 이상의 아래 바이트가 0
+        if prev is not None and (
+            words[3] == words[4] == words[5] == 0
+            or any((w & 0x0FFF) == 0 and abs(w - p) > 300 for w, p in zip(words[:3], prev[:3]))
+            or sum(1 for w in words if (w & 0xFF) == 0) >= 2
+        ):
+            self._prev_words = prev
+            raise _BadRead()
         a = self.ACCEL_SENSITIVITY
         gs = self.GYRO_SENSITIVITY
         return (
@@ -147,10 +169,18 @@ class MPU6050Service:
                         else:
                             self._recording = False
                             self._error = f"최대 기록 시간 {int(self.MAX_RECORD_SECONDS)}초에 도달해 기록을 멈췄습니다."
+            except _BadRead:
+                self.bad_reads += 1
+                continue  # 바로 다시 읽음(공백 없이)
             except Exception as exc:
+                # 읽기 오류는 대개 한 번뿐이라 곧바로 다시 읽고, 계속 실패할 때만 쉽니다(예전: 매번 0.2초 공백).
+                self.io_errors += 1
+                self._fail_streak += 1
                 with self._lock:
-                    self._error = f"MPU-6050 읽기 실패: {exc}"
-                time.sleep(0.2)
+                    self._error = f"MPU-6050 읽기 실패: {exc}" if self._fail_streak > 20 else self._error
+                time.sleep(0.002 if self._fail_streak <= 20 else 0.2)
+                continue
+            self._fail_streak = 0
             next_tick += self.SAMPLE_INTERVAL
             delay = next_tick - time.monotonic()
             if delay > 0:

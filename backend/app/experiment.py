@@ -350,6 +350,10 @@ def condition_dict(condition: ExperimentCondition) -> dict[str, Any]:
 
 def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings: ExperimentSettings) -> dict[str, Any]:
     a = _analyze_columns(run, columns, settings)
+    yaw = run.get("heading_max_deg")
+    if yaw is not None and abs(yaw) >= 8 and a.get("flags") is not None:
+        a["flags"].append(f"주행 중 차 방향이 최대 {abs(yaw):.0f}° 틀어졌습니다. 좌우 방지턱에 왼쪽·오른쪽 바퀴가 다른 시각에 닿아 "
+                          "피크가 갈라지고 앞·뒤 바퀴 짝(속도)이 틀릴 수 있습니다. '측정 중 조향'을 자이로 직진 보정으로 하세요.")
     # 분석에 딸린 값(초음파 속력 분석, 감속 제어 판정)도 새 분석에 맞춰 다시 계산합니다.
     if run.get("distance"):
         run["distance_summary"] = _distance_summary(run, a)
@@ -1148,7 +1152,7 @@ async def list_runs():
     settings = store.load_settings()
     runs = runs_for_mode(simulated)
     # 평지 오검출 판정(bump_detected)이 생기기 전에 분석된 시행은 저장된 원자료로 한 번 다시 분석합니다.
-    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {}) or "entry_sin" not in (r.get("analysis") or {})
+    stale = [r for r in runs if "bump_detected" not in (r.get("analysis") or {}) or "glitches_fixed" not in (r.get("analysis") or {})
              or ((r.get("analysis") or {}).get("params") or {}).get("filter_hz") and not r["analysis"]["params"].get("peak_keep")]
     for run in stale:
         try:
@@ -1187,6 +1191,7 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
         t0 = a.get("front_t_s") if a.get("front_t_s") is not None else a.get("peak_t_s")
         if t0 is None:
             continue
+        cols, _ = ia.remove_glitches(cols)
         g = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
         idx = [i for i, t in enumerate(cols["t_s"]) if t0 - before <= t <= t0 + after]
         sub = {"t_s": [round(cols["t_s"][i] - t0, 4) for i in idx], "vertical_g": [g[i] for i in idx]}
@@ -1253,6 +1258,7 @@ async def export_bump_windows(ids: str = "", before: float = 0.15, after: float 
         a = r["analysis"]
         c = r["condition"]
         t0 = a["front_t_s"]
+        cols, _ = ia.remove_glitches(cols)
         f = ia.peak_preserving_filter(cols["t_s"], cols["vertical_g"], hz) if hz else cols["vertical_g"]
         info = [r["id"], c.get("bump_id"), c.get("total_mass_g"), c.get("output_mode"), c.get("output_value"),
                 c.get("direction") or "forward", c.get("trial"), c.get("purpose") or "main", "예" if r.get("excluded") else ""]
@@ -1312,6 +1318,7 @@ async def get_run(run_id: str, points: int = 1500):
     same = [r for r in store.list_runs() if r.get("simulated") == run.get("simulated")]
     run = next((r for r in ia.harmonize_pairs(same) if r.get("id") == run_id), run)
     cols = await asyncio.to_thread(store.read_columns, run_id)
+    cols, _ = ia.remove_glitches(cols)
     base = {k: cols[k] for k in ("t_s", "vertical_g", "dynamic_g")}
     hz = store.load_settings().filter_hz
     if hz:
