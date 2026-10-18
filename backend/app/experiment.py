@@ -33,7 +33,7 @@ from .distance import DistanceLogger
 from .vision import BumpCamera, LineCam, LineCamSettings, VisionSettings
 from . import vision as vis
 from . import distance as dist
-from .line_follow import GuidedSteer, LineSettings, LineTracker, calibration_check
+from .line_follow import GuidedSteer, LineSettings, LineTracker, calibration_check, clean_raw
 from .mpu6050 import mpu6050_service
 from .services.event_log import record_event
 
@@ -1352,6 +1352,10 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
         if not line.floor or not line.line:
             auto_runner._phase("error", None, "정지선 모드는 라인 추종 탭에서 바닥·테이프 센서 보정을 먼저 해야 합니다.")
             return
+        bad = calibration_check(line)
+        if any("범위" in m or "본 적이 없" in m for m in bad):
+            auto_runner._phase("error", None, "바닥 센서 보정이 잘못되었습니다: " + bad[0])
+            return
         creq = co.CourseRequest(
             condition=cond, decel_s=opts["decel_s"], creep_duty=pick(request.creep_duty, settings.creep_duty),
             spin_output=pick(request.spin_output, settings.spin_output), spin_direction=pick(request.spin_direction, settings.spin_direction),
@@ -2104,14 +2108,14 @@ class LineCalibrate(BaseModel):
 async def line_calibrate(body: LineCalibrate):
     ctl = control()
     samples = []
-    for _ in range(10):
-        raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-        if raw:
+    for _ in range(15):
+        raw = clean_raw(await asyncio.to_thread(ctl.adapter.read_grayscale))
+        if raw:   # 범위 밖으로 깨진 읽기는 버림
             samples.append(raw)
         await asyncio.sleep(0.02)
-    if not samples:
-        raise HTTPException(503, "그레이스케일 센서값을 읽지 못했습니다.")
-    mean = [round(sum(s[i] for s in samples) / len(samples), 1) for i in range(3)]
+    if len(samples) < 3:
+        raise HTTPException(503, "그레이스케일 센서값을 읽지 못했습니다(값이 계속 깨짐).")
+    mean = [round(sorted(s[i] for s in samples)[len(samples) // 2], 1) for i in range(3)]   # 중앙값
     settings = store.load_settings()
     setattr(settings.line, body.target, mean)
     store.save_settings(settings)
@@ -2137,7 +2141,7 @@ async def line_auto_calibrate():
     if not mpu6050_service.heading_reset():
         raise HTTPException(409, "자동 보정은 자이로가 필요합니다. 센서 화면에서 MPU-6050 정지 보정을 먼저 하세요.")
     auto_cal_state.update(state="running", message="제자리에서 좌우로 돌며 센서값을 모읍니다")
-    lo, hi = [1e9] * 3, [-1e9] * 3
+    vals: list[list[float]] = [[], [], []]
     crun.gen = ctl.stop_generation
     crun.target_deg = 0.0
     try:
@@ -2150,10 +2154,10 @@ async def line_auto_calibrate():
                 if not await ctl.experiment_spin(direction, 60, crun.gen):
                     raise Stopped()
                 for _ in range(4):
-                    raw = await asyncio.to_thread(ctl.adapter.read_grayscale)
-                    if raw:
+                    raw = clean_raw(await asyncio.to_thread(ctl.adapter.read_grayscale))
+                    if raw:   # 범위(0~4095) 밖으로 깨진 읽기는 버림
                         for i in range(3):
-                            lo[i], hi[i] = min(lo[i], raw[i]), max(hi[i], raw[i])
+                            vals[i].append(raw[i])
                     await asyncio.sleep(0.002)
             await ctl.stop(reason="line_auto_cal")
             crun.gen = ctl.stop_generation
@@ -2165,9 +2169,15 @@ async def line_auto_calibrate():
     finally:
         await ctl.stop(reason="line_auto_cal_end")
         mpu6050_service.heading_stop()
-    if min(hi) < 0 or max(lo) > 1e8:
+    if min(len(v) for v in vals) < 20:
         auto_cal_state.update(state="error", message="센서값을 읽지 못했습니다.")
         raise HTTPException(503, "그레이스케일 센서값을 읽지 못했습니다.")
+    # 최댓값·최솟값 대신 상위·하위 3% 값(남은 튀는 값 하나에 휘둘리지 않게)
+    def pct(xs: list[float], q: float) -> float:
+        xs = sorted(xs)
+        return xs[min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))]
+    hi = [pct(v, 0.97) for v in vals]
+    lo = [pct(v, 0.03) for v in vals]
     settings = store.load_settings()
     # 밝은 바닥에 검은 테이프: 바닥 = 가장 밝은 값, 테이프 = 가장 어두운 값(조금 안쪽으로: 잡음 여유 5%)
     settings.line.floor = [round(h - 0.05 * (h - l), 1) for h, l in zip(hi, lo)]
@@ -2202,6 +2212,9 @@ async def line_start(body: LineRunRequest):
     settings = store.load_settings().line
     if not (settings.floor and settings.line):
         raise HTTPException(409, "바닥과 테이프 위에서 센서 보정을 먼저 하세요.")
+    bad = [m for m in calibration_check(settings) if "범위" in m]
+    if bad:
+        raise HTTPException(409, bad[0])
     def save_sign(sign: int) -> None:
         st = store.load_settings()
         st.line.steer_sign = sign

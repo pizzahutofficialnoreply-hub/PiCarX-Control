@@ -39,8 +39,25 @@ class LineSettings(BaseModel):
     camera_assist: bool = Field(default=False, description="카메라로 앞쪽 테이프(유도선·가로선)를 함께 봄")
 
 
+RAW_MAX = 4095.0   # 로봇햇 ADC는 12비트(0~4095). 이 밖의 값은 I²C 통신이 깨진 값
+
+
+def clean_raw(raw: Any) -> list[float] | None:
+    """센서값 3개가 모두 0~4095 범위면 그대로, 하나라도 깨졌으면 None(그 읽기는 버림)."""
+    if not raw or len(raw) < 3:
+        return None
+    try:
+        vals = [float(v) for v in raw[:3]]
+    except (TypeError, ValueError):
+        return None
+    if any(not (0.0 <= v <= RAW_MAX) or v != v for v in vals):
+        return None
+    return vals
+
+
 def weights(raw: list[float], s: LineSettings) -> list[float] | None:
-    if not raw or len(raw) < 3 or not s.floor or not s.line:
+    raw = clean_raw(raw)  # type: ignore[assignment]
+    if raw is None or not s.floor or not s.line:
         return None
     out = []
     for value, floor, line in zip(raw[:3], s.floor[:3], s.line[:3]):
@@ -60,9 +77,11 @@ def calibration_check(s: LineSettings) -> list[str]:
     """
     if not s.floor or not s.line:
         return ["보정 전입니다."]
+    out = []
+    if any(not (0 <= v <= RAW_MAX) for v in list(s.floor[:3]) + list(s.line[:3])):
+        return ["저장된 보정값이 센서 범위(0~4095)를 벗어났습니다(통신이 깨진 값이 섞임). 보정을 다시 하세요."]
     spans = [abs(l - f) for f, l in zip(s.floor[:3], s.line[:3])]
     big = max(spans) if spans else 0.0
-    out = []
     if big < 50:
         out.append("바닥과 테이프 값 차이가 너무 작습니다(센서 높이·밝기 확인).")
     for i, sp in enumerate(spans):
@@ -254,6 +273,11 @@ class GuidedSteer:
         self.t_prev = now
         if self.ref is None:
             self.ref = heading
+        good = clean_raw(raw)
+        if good is None and getattr(self, "_last_raw", None) is not None:
+            raw = self._last_raw          # 깨진 읽기 한 번은 직전 값으로 대신
+        elif good is not None:
+            self._last_raw = good
         w = weights(raw or [], self.s)
         pos = position(w, self.s)
         tilted = self.gate.update(tilt, now)

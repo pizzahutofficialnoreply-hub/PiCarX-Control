@@ -135,3 +135,18 @@ def test_tilt_gate_ignores_slow_drift_and_stuck_offset():
     for i in range(200):
         t += 0.02
         assert not g.update((2.3 + 0.01 * i, 0.0), t)
+
+
+def test_corrupt_grayscale_reads_are_ignored():
+    from app.line_follow import calibration_check, clean_raw, weights
+    assert clean_raw([1459, 49383, 1495]) is None            # I²C가 깨진 값(0~4095 밖)
+    assert clean_raw([1459, 1492, 1495]) == [1459.0, 1492.0, 1495.0]
+    broken = LineSettings(floor=[42042.5, 49383.8, 49798.2], line=[173.4, 290.7, 238.7])
+    assert any("범위" in m for m in calibration_check(broken))
+    good = LineSettings(floor=[1460, 1490, 1495], line=[173, 290, 238])
+    w = weights([1459, 1492, 1495], good)
+    assert w is not None and max(w) < 0.05                    # 바닥 위 → 테이프 0%
+    g = GuidedSteer(good, ref_deg=0.0)
+    _run(g, [1459, 300, 1495], 0.0)
+    steer, ok, _ = _run(g, [1459, 49383, 1495], 0.0, n=3)    # 깨진 읽기 → 직전 값 사용, 놓친 것으로 보지 않음
+    assert ok and g.mode == "line"
