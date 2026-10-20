@@ -124,7 +124,7 @@ export const EVENT_INFO: Record<EventKind, { label: string; short: string; color
   RU: { label: '뒷바퀴 오름', short: '뒤↑', color: '#3c9a5f' }, RD: { label: '뒷바퀴 내림', short: '뒤↓', color: '#1f6b3c' },
 };
 export type SlowdownInfo = {
-  trigger: 'time' | 'tape' | 'distance' | 'camera'; trigger_requested?: string; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
+  trigger: 'time' | 'tape' | 'distance' | 'camera' | 'camera_distance'; trigger_requested?: string; slowed_by?: string; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
   margin?: 'ratio' | 'sigma'; model_error_g?: number; target_delta_g?: number;
   v0_pred_mps: number; pred_delta_v0_g: number; vmax_mps: number; target_v_mps: number; pred_delta_target_g: number; needed: boolean;
   output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null;

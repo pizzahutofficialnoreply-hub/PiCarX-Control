@@ -176,7 +176,7 @@ class AutoRunRequest(BaseModel):
 
 class SlowdownRequest(BaseModel):
     """목표 2: 관계식으로 '허용 기준을 넘지 않는 속도'를 구해, 방지턱 앞에서 그 속도에 맞는 출력으로 줄입니다."""
-    trigger: Literal["time", "tape", "distance", "distance_auto", "camera"] = "time"
+    trigger: Literal["time", "tape", "distance", "distance_auto", "camera", "camera_distance"] = "time"
     at_s: float = Field(default=0.6, ge=0.0, le=6, description="출발 후 이 시간(초)에 감속(trigger=time)")
     at_cm: float = Field(default=60.0, ge=5, le=300, description="벽까지 이 거리(cm)가 되면 감속(trigger=distance)")
     safety: float = Field(default=0.9, ge=0.3, le=1.0, description="v_max에 곱하는 여유율(0.9 = 10% 느리게)")
@@ -787,6 +787,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     slow_seen = asyncio.Event()
     slow_poller: asyncio.Task | None = None
     slowed_at: float | None = None
+    slowed_by: str | None = None
     stopped_by_wall = False
     if slowdown and slowdown.get("trigger") == "tape" and slow_tape is not None:
         # 방지턱 앞에 붙인 '감속 표시 테이프'를 정지선과 같은 방식(수 ms 간격, 2번 연속)으로 찾습니다.
@@ -840,11 +841,12 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               break
           if slowdown and slowed_at is None and slowdown.get("output") is not None:
               trig = slowdown.get("trigger")
-              if (trig == "time" and now - start >= float(slowdown.get("at_s") or 0)) \
-                      or (trig == "distance" and near is not None and near <= float(slowdown.get("at_cm") or 0)) \
-                      or (trig == "tape" and slow_seen.is_set()) \
-                      or (trig == "camera" and camera is not None and camera.seen_at is not None):
+              by_dist = trig in ("distance", "camera_distance") and near is not None and near <= float(slowdown.get("at_cm") or 0)
+              by_cam = trig in ("camera", "camera_distance") and camera is not None and camera.seen_at is not None
+              if (trig == "time" and now - start >= float(slowdown.get("at_s") or 0)) or by_dist or by_cam \
+                      or (trig == "tape" and slow_seen.is_set()):
                   slowed_at = now
+                  slowed_by = "camera" if by_cam and not by_dist else ("distance" if by_dist else trig)
           prev_t = now
           cur = float(slowdown["output"]) if slowed_at is not None and slowdown else value
           st = (slowdown or {}).get("staged") if slowed_at is not None else None
@@ -909,6 +911,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None,
             "heading_flipped": bool(controller and controller.flipped),
             "slowed_at_s": round(slowed_at - start, 3) if slowed_at is not None else None,
+            "slowed_by": slowed_by,
             "stage_log": stage_log,
             "camera_seen_s": round(camera.seen_at - start, 3) if camera is not None and camera.seen_at is not None else None,
             "stopped_by_wall": stopped_by_wall,
@@ -1031,13 +1034,15 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
         raise RuntimeError("목표 속도에 맞는 출력을 계산하지 못했습니다.")
     at_cm = req.at_cm
     trigger = req.trigger
-    if trigger == "distance_auto":
+    if trigger in ("distance_auto", "camera_distance"):
         dists = sorted(r["distance_summary"]["distance_at_front_cm"] for r in runs
                        if r.get("condition", {}).get("bump_id") == bump and (r.get("distance_summary") or {}).get("distance_at_front_cm"))
-        if not dists:
+        if dists:
+            at_cm = round(dists[len(dists) // 2] + req.lead_cm, 1)
+        elif trigger == "distance_auto":
             raise RuntimeError("'거리 자동'은 초음파를 켜고 측정한 회차가 있어야 합니다(앞바퀴 충격 때 벽까지 거리를 배움).")
-        at_cm = round(dists[len(dists) // 2] + req.lead_cm, 1)
-        trigger = "distance"
+        if trigger == "distance_auto":
+            trigger = "distance"
     return {"trigger": trigger, "trigger_requested": req.trigger, "at_s": req.at_s, "at_cm": at_cm, "safety": req.safety,
             "margin": req.margin, "model_error_g": round(err, 4), "target_delta_g": round(d_target, 4),
             "a_limit_g": round(a_lim, 4), "model_id": model["id"], "model_formula": model.get("formula"),
@@ -1066,7 +1071,7 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         status = await asyncio.to_thread(mpu6050_service.start_recording)
         if status.get("error") or not status.get("recording"):
             raise RuntimeError(status.get("error") or "MPU-6050 기록을 시작하지 못했습니다.")
-        if opts.get("ultrasonic") or opts.get("wall_stop_cm") or (opts.get("slowdown_plan") or {}).get("trigger") == "distance":
+        if opts.get("ultrasonic") or opts.get("wall_stop_cm") or (opts.get("slowdown_plan") or {}).get("trigger") in ("distance", "camera_distance"):
             logger = DistanceLogger(ctl.adapter.read_distance, settings.ultrasonic_hz)
             logger.start()
     gen = ctl.stop_generation
@@ -1135,7 +1140,7 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             plan = opts.get("slowdown_plan") or {}
             plan_staged = bool(plan.get("staged"))
             cam = None
-            if plan.get("trigger") == "camera" and not simulated:
+            if plan.get("trigger") in ("camera", "camera_distance") and not simulated:
                 from .camera import camera_service
                 vs = store.load_settings().vision
                 if vs.floor_mean is None:
@@ -1215,6 +1220,7 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             raise RuntimeError("센서 표본이 없어 저장하지 않았습니다.")
     if run.get("slowdown") and drive_info.get("slowed_at_s") is not None:
         run["slowdown"]["slowed_at_s"] = round(drive_info["slowed_at_s"] + opts["pre_roll"], 3)  # 기록 시작 기준
+        run["slowdown"]["slowed_by"] = drive_info.get("slowed_by")
     if run.get("slowdown") and drive_info.get("stage_log"):
         run["slowdown"]["stage_log"] = [[round(t + opts["pre_roll"], 3), st, o] for t, st, o in drive_info["stage_log"]]
     run.update({k: v for k, v in drive_info.items() if k not in ("slowed_at_s", "stage_log")})

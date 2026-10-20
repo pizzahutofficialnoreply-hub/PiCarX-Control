@@ -16,7 +16,7 @@ type VisionTest = { score: [number, number] | null; threshold: number; detected:
 
 export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext; bump: string; pred?: Predictor | null; part: 'control' | 'ultra' }) {
   const { data, settings, condition } = ctx;
-  type Trig = 'time' | 'tape' | 'distance' | 'distance_auto' | 'camera';
+  type Trig = 'time' | 'tape' | 'distance' | 'distance_auto' | 'camera' | 'camera_distance';
   const [trigger, setTrigger] = usePersistentState<Trig>('slow-trigger', 'time');
   const [margin, setMargin] = usePersistentState<'ratio' | 'sigma'>('slow-margin', 'sigma');
   const [staged, setStaged] = usePersistentState('slow-staged', false);
@@ -66,7 +66,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     : !pred ? '관계식이 아직 없습니다.' : v0 == null ? '출력 → 속도 식이 없습니다(출력 2단계 이상 측정).' : !aLimit ? '허용 기준이 없습니다.' : vmax == null ? '이 기준에 맞는 속도를 식으로 풀 수 없습니다.'
     : trigger === 'tape' && !tapeOk ? '감속 테이프를 쓰려면 라인 추종 탭에서 바닥·테이프 보정을 먼저 하세요.'
     : trigger === 'distance_auto' && autoCm == null ? "'거리 자동'은 초음파를 켜고 측정한 회차가 있어야 합니다(앞바퀴 충격 때 벽까지 거리를 배움)."
-    : trigger === 'camera' && !visionOk ? '카메라 감지는 아래에서 바닥 보정을 먼저 하세요.'
+    : (trigger === 'camera' || trigger === 'camera_distance') && !visionOk ? '카메라 감지는 아래에서 바닥 보정을 먼저 하세요.'
     : staged && !haveEvents ? '단계별 식(앞·뒤 바퀴 오름·내림)이 아직 없습니다. 기울기로 4순간이 찾아진 회차가 출력 2단계 이상 필요합니다.'
     : dTarget != null && dTarget <= 0 ? `예측 오차(±${err.toFixed(2)} g)×2가 허용 여유보다 커서 목표를 정할 수 없습니다. 반복 측정을 늘리세요.` : '';
 
@@ -120,10 +120,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="experiment-fields">
         <label>방지턱을 미리 알아채는 방법<select value={trigger} onChange={e => setTrigger(e.target.value as Trig)}>
           <option value="time">출발 후 시간</option><option value="distance_auto">거리 자동 (초음파, 지난 회차에서 방지턱 위치를 배움)</option><option value="distance">벽까지 거리 직접 입력 (초음파)</option>
-          <option value="camera">카메라 (바닥과 색이 다른 물체)</option><option value="tape">감속 표시 테이프 (바닥 센서)</option></select></label>
+          <option value="camera">카메라 (바닥과 색이 다른 물체)</option><option value="camera_distance">카메라 + 초음파 (둘 중 먼저 알아챈 쪽)</option><option value="tape">감속 표시 테이프 (바닥 센서)</option></select></label>
         {trigger === 'time' && <label>출발 후 (s)<NumInput min={0} max={6} step={0.1} value={atS} onChange={e => setAtS(Math.max(0, Number(e.target.value) || 0))} /></label>}
-        {trigger === 'distance' && <label>벽까지 (cm) 가 되면<NumInput min={5} max={300} step={5} value={atCm} onChange={e => setAtCm(Math.max(5, Number(e.target.value) || 60))} /></label>}
-        {trigger === 'distance_auto' && <label>방지턱보다 먼저 감속할 거리 (cm){autoCm != null ? ` → 벽까지 ${autoCm.toFixed(0)} cm에서` : ''}<NumInput min={5} max={150} step={5} value={leadCm} onChange={e => setLeadCm(Math.max(5, Math.min(150, Number(e.target.value) || 30)))} /></label>}
+        {(trigger === 'distance' || (trigger === 'camera_distance' && autoCm == null)) && <label>벽까지 (cm) 가 되면<NumInput min={5} max={300} step={5} value={atCm} onChange={e => setAtCm(Math.max(5, Number(e.target.value) || 60))} /></label>}
+        {(trigger === 'distance_auto' || trigger === 'camera_distance') && <label>방지턱보다 먼저 감속할 거리 (cm){autoCm != null ? ` → 벽까지 ${autoCm.toFixed(0)} cm에서` : ''}<NumInput min={5} max={150} step={5} value={leadCm} onChange={e => setLeadCm(Math.max(5, Math.min(150, Number(e.target.value) || 30)))} /></label>}
         <label>목표 정하는 방식<select value={margin} onChange={e => setMargin(e.target.value as 'ratio' | 'sigma')}><option value="sigma">예측 오차만큼 기준 아래로 (추천)</option><option value="ratio">v_max에 여유율 곱하기</option></select></label>
         {margin === 'ratio' && <label>여유율 (v_max에 곱함)<NumInput min={0.3} max={1} step={0.05} value={safety} onChange={e => setSafety(Math.max(0.3, Math.min(1, Number(e.target.value) || 0.9)))} /></label>}
         <label className="exp-check"><input type="checkbox" checked={staged} onChange={e => setStaged(e.target.checked)} /> 단계별 (앞바퀴 구간·뒷바퀴 구간을 각각의 식으로)</label>
@@ -135,9 +135,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <p className="exp-hint">{trigger === 'time' ? '출발 후 정해진 시간에 줄입니다. 방지턱까지 걸리는 시간보다 0.3~0.5초 일찍 줄여야 속도가 미리 떨어집니다(모터 속도가 바뀌는 데 0.2~0.4초 걸림).'
         : trigger === 'distance' ? '방지턱 뒤쪽에 벽(상자 등, 높이 15 cm 이상)을 두고, 초음파로 벽까지 거리가 이 값이 되면 줄입니다. 측정·분석 탭에서 한 번 달려 보면 "앞바퀴 충격 때 벽까지 거리"가 나오니, 그 값보다 20~40 cm 큰 값을 넣으세요(감속할 거리).'
         : trigger === 'distance_auto' ? '초음파를 켜고 측정한 회차들의 "앞바퀴 충격 때 벽까지 거리"(중앙값)를 방지턱 위치로 보고, 그보다 정한 거리만큼 먼저 줄입니다. 방지턱 뒤쪽에 벽(상자)이 있어야 합니다.'
+        : trigger === 'camera_distance' ? '초음파(벽까지 거리)와 카메라(바닥과 색이 다른 방지턱)를 함께 보고, 둘 중 먼저 알아챈 순간에 줄입니다. 초음파 기록이 있는 회차가 있으면 방지턱 위치를 배워 쓰고, 없으면 입력한 거리를 씁니다. 카메라는 아래에서 바닥 보정을 먼저 하세요. 회차 기록의 \'감속 시작\'에 어느 쪽이 먼저였는지 남습니다.'
         : trigger === 'camera' ? '카메라 화면 아래쪽 양옆(유도선 제외)에 바닥과 색이 다른 물체(방지턱)가 일정 비율 이상 나타나면 줄입니다. 아래에서 방지턱이 보이지 않는 자리(출발선)에서 바닥 보정을 하고, 방지턱 앞 20~30 cm에 차를 두고 시험해 점수가 기준을 넘는지 확인하세요. 카메라 각도를 바꾸면 다시 보정해야 합니다.'
         : '방지턱 20~40 cm 앞에 가로로 검은 테이프를 붙이면, 차 앞쪽 바닥 센서가 테이프를 보는 순간 줄입니다(출발선 테이프와 같은 감지 방식).'} 실제로 얼마나 줄었는지는 각 회차의 '방지턱 통과 속도'로 확인합니다.</p>
-      {trigger === 'camera' && <div className="exp-inverse">
+      {(trigger === 'camera' || trigger === 'camera_distance') && <div className="exp-inverse">
         <b>카메라 방지턱 감지 설정</b>
         <div className="experiment-fields">
           <label>관심 영역 위 (화면 높이 비율)<NumInput min={0} max={0.95} step={0.05} value={settings.vision?.roi_top ?? 0.55} onChange={e => void visionPatch({ roi_top: Number(e.target.value) })} /></label>
@@ -162,7 +163,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           caption="초록 점이 기준선 아래, 목표 속도 근처에 모이면 '관계식 → 속도 결정 → 감속 → 충격 감소'가 실험으로 확인된 것입니다. 점이 목표 속도보다 오른쪽이면 감속할 거리(시간)가 부족했던 것입니다." />
         <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시각</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th></tr></thead>
           <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={s.pass === false ? 'over' : ''}><td>{new Date(r.created_at).toLocaleTimeString()}</td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}</td>
-            <td>{s.trigger === 'time' ? `${s.at_s}s` : s.trigger === 'distance' ? `${s.at_cm}cm${s.trigger_requested === 'distance_auto' ? '(자동)' : ''}` : s.trigger === 'camera' ? '카메라' : '테이프'}{s.slowed_at_s == null && s.needed && !r.simulated ? ' (작동 안 함)' : ''}</td>
+            <td>{s.trigger === 'time' ? `${s.at_s}s` : s.trigger === 'distance' ? `${s.at_cm}cm${s.trigger_requested === 'distance_auto' ? '(자동)' : ''}` : s.trigger === 'camera' ? '카메라' : s.trigger === 'camera_distance' ? `카메라+초음파 ${s.at_cm}cm${s.slowed_by ? ` (${s.slowed_by === 'camera' ? '카메라' : '초음파'} 먼저)` : ''}` : '테이프'}{s.slowed_at_s == null && s.needed && !r.simulated ? ' (작동 안 함)' : ''}</td>
             <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td></tr>; })}</tbody></table></div>
       </>}
     </section>;
