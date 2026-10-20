@@ -2013,7 +2013,9 @@ async def export_summary():
                      "방지턱 못 찾음" if a.get("bump_detected") is False else PAIR_LABEL.get(a.get("pair_source") or "", ""),
                      a.get("sample_rate_hz"), " / ".join(a.get("flags") or [])])
     rows.append([])
-    rows.append(["# 조건별 평균 (가장 큰 값·작은 값 1개씩 뺀 평균)"])
+    method_label = {"trim": "가장 큰 값·작은 값 1개씩 뺀 평균", "sigma2": "평균 ± 2×표준편차 밖의 값을 뺀 평균",
+                    "iqr": "사분위 범위(IQR) 밖의 값을 뺀 평균", "none": "모든 회차 평균"}.get(settings.outlier_method, settings.outlier_method)
+    rows.append([f"# 조건별 평균 ({method_label})"])
     rows.append(["방지턱", "총질량(g)", "출력", "방향", "회차 수(계산에 쓴 수)", "평균 속도(m/s)", "속도 범위(m/s)", "평균 최대 충격(g)",
                  "평균 Δa(g)", "Δa 범위(g)", "바퀴 뜬 회차"])
     for g in bundle["groups"]:
