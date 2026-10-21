@@ -1,7 +1,8 @@
 // 목표 2(관계식으로 정한 속도로 방지턱 앞에서 감속)와 초음파 거리·속력 분석.
 import { useEffect, useState } from 'react';
-import { Gauge, Play, Radar, Square } from 'lucide-react';
-import { EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type RunDetail, type VisionSettings } from '../services/experiment';
+import { Camera, Gauge, Play, Radar, Square } from 'lucide-react';
+import VisionCal from './VisionCal';
+import { EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type RunDetail } from '../services/experiment';
 import HelpBox from '../components/HelpBox';
 import { RunTraceChart, XYChart } from '../components/ExperimentCharts';
 import NumInput from '../components/NumInput';
@@ -12,8 +13,6 @@ import { builtinPredictor, type Predictor } from './theory';
 
 type UsTest = { samples: number; valid: number; mean_cm: number | null; sd_cm: number | null; rate_hz: number; values: (number | null)[]; available: boolean; note: string | null };
 
-type VisionTest = { score: [number, number] | null; threshold: number; detected: boolean; calibrated: boolean };
-
 export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext; bump: string; pred?: Predictor | null; part: 'control' | 'ultra' }) {
   const { data, settings, condition } = ctx;
   type Trig = 'time' | 'tape' | 'distance' | 'distance_auto' | 'camera' | 'camera_distance';
@@ -22,7 +21,6 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const [staged, setStaged] = usePersistentState('slow-staged', false);
   const [resume, setResume] = usePersistentState('slow-resume', true);
   const [leadCm, setLeadCm] = usePersistentState('slow-lead-cm', 30);
-  const [vt2, setVt2] = useState<VisionTest | null>(null);
   const [atS, setAtS] = usePersistentState('slow-at-s', 0.6);
   const [atCm, setAtCm] = usePersistentState('slow-at-cm', 60);
   const [safety, setSafety] = usePersistentState('slow-safety', 1);
@@ -57,7 +55,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const pRear = staged && vRear != null ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, vRear, massG) : null;
   const usAuto = (data?.runs ?? []).filter(r => r.condition.bump_id === bump && r.distance_summary?.distance_at_front_cm).map(r => r.distance_summary?.distance_at_front_cm as number).sort((a, b) => a - b);
   const autoCm = usAuto.length ? usAuto[Math.floor(usAuto.length / 2)] + leadCm : null;
-  const visionOk = !!settings.vision?.floor_mean;
+  const visionOk = !!(settings.vision?.floor_mean || settings.vision?.bump_color);
+  const [camOpen, setCamOpen] = usePersistentState('slow-cam-open', false);
   const need = v0 != null && vt != null && v0 > vt;
   const pRaw = vt != null ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, vt, massG) : null;
   const pSlow = need && pRaw != null ? Math.min(condition.output_value, Math.max(minOut, pRaw)) : null;
@@ -108,11 +107,6 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     });
     ctx.setMessage('감속 제어 측정을 시작했습니다. 진행 상황은 측정·분석 탭에서도 볼 수 있습니다.');
   }
-  async function visionCal() {
-    try { const r = await ctx.request('/api/experiment/vision/calibrate', { method: 'POST', body: JSON.stringify({}), timeoutMs: 10000 }); ctx.setMessage(`카메라 바닥 보정 완료 · 지금 점수 ${r.score ? r.score.map((x: number) => (x * 100).toFixed(0) + '%').join(' / ') : '—'}`); await ctx.loadRuns(); } catch (e) { ctx.fail(e); }
-  }
-  async function visionTest() { try { setVt2(await ctx.request('/api/experiment/vision/test', { timeoutMs: 10000 }) as VisionTest); } catch (e) { ctx.fail(e); } }
-  async function visionPatch(patch: Partial<VisionSettings>) { await ctx.patchSettings({ vision: { ...(settings.vision as VisionSettings), ...patch } }); }
   async function testUs() {
     setTesting(true);
     try { setUsTest(await ctx.request('/api/experiment/ultrasonic/test?seconds=1.5', { timeoutMs: 8000 }) as UsTest); } catch (e) { ctx.fail(e); } finally { setTesting(false); }
@@ -132,7 +126,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="exp-formula-box">
         <div><small>원리</small><b>v* = v_max(m) × 여유율, 출력* = 속도식⁻¹(v*, m)</b><span>{chosen?.kind === 'power' ? `지금 식(거듭제곱)이면 v*/v₀ = (Δa_기준 / Δa(v₀))^(1/n), n = ${chosen.coef.n.toFixed(2)}: 충격을 절반으로 하려면 속도는 ${(0.5 ** (1 / chosen.coef.n) * 100).toFixed(0)}%로` : '관계식 Δa(v, m) = a_기준 − 1 을 v에 대해 풂'}</span></div>
         <div><small>이번 조건 ({condition.bump_id} · {massG} g · {outputLabel(condition.output_mode, condition.output_value)})</small><b>v₀ ≈ {fmt(v0, 3, 'm/s')} → 예측 {d0 == null ? '—' : (1 + d0).toFixed(2) + ' g'}</b><span>허용 기준 {aLimit?.toFixed(2) ?? '—'} g · v_max {fmt(vmax, 3, 'm/s')} · 목표 {fmt(vt, 3, 'm/s')}</span></div>
-        <div className={need ? 'warn' : ''}><small>계획</small><b>{problem ? '—' : need ? `출력 ${condition.output_value} → ${pSlow?.toFixed(1)} 로 감속` : '감속 불필요 (이미 기준 이내)'}</b><span>{need && dT != null ? `감속 후 예측 ${(1 + dT).toFixed(2)} g${pRaw != null && pRaw < minOut ? ` · 계산값 ${pRaw.toFixed(1)}이 최소 출력보다 낮아 ${minOut}로 제한(멈춤 방지) → 기준을 넘을 수 있음` : ''}` : ''}</span></div>
+        <div className={need ? 'warn' : ''}><small>계획</small><b>{problem ? '—' : need ? `출력 ${condition.output_value} → ${pSlow?.toFixed(1)} 로 감속` : '감속 불필요 (이미 기준 이내)'}</b><span>{need && pSlow != null && condition.output_mode === 'pwm' ? `실제 모터 듀티 ${(condition.output_value / 2 + 50).toFixed(0)}% → ${(pSlow / 2 + 50).toFixed(0)}% (속도 ${fmt(v0, 3)} → ${fmt(vt, 3)} m/s, ${v0 && vt ? ((1 - vt / v0) * 100).toFixed(0) : '—'}% 느리게) · ` : ''}{need && dT != null ? `감속 후 예측 ${(1 + dT).toFixed(2)} g${pRaw != null && pRaw < minOut ? ` · 계산값 ${pRaw.toFixed(1)}이 최소 출력보다 낮아 ${minOut}로 제한(멈춤 방지) → 기준을 넘을 수 있음` : ''}` : ''}</span></div>
       </div>
       {(dTarget != null || staged) && <div className="exp-formula-box">
         <div><small>목표 충격 Δa*</small><b>{dTarget == null ? '—' : `${dTarget.toFixed(3)} g`}{aLimit ? ` (기준 +${(aLimit - 1).toFixed(2)} g${margin === 'sigma' ? ` − 2×${err.toFixed(3)}` : ''})` : ''}</b><span>{margin === 'sigma' ? `관계식의 예측 오차(교차검증 RMSE ±${err.toFixed(3)} g)의 2배만큼 기준 아래를 목표로 → 측정이 흔들려도 약 95% 확률로 기준 이내` : `v_max × ${safety} : 속도를 ${((1 - safety) * 100).toFixed(0)}% 낮춰 여유를 둠`}</span></div>
@@ -179,17 +173,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         : trigger === 'camera_distance' ? '초음파(벽까지 거리)와 카메라(바닥과 색이 다른 방지턱)를 함께 보고, 둘 중 먼저 알아챈 순간에 줄입니다. 초음파 기록이 있는 회차가 있으면 방지턱 위치를 배워 쓰고, 없으면 입력한 거리를 씁니다. 카메라는 아래에서 바닥 보정을 먼저 하세요. 회차 기록의 \'감속 시작\'에 어느 쪽이 먼저였는지 남습니다.'
         : trigger === 'camera' ? '카메라 화면 아래쪽 양옆(유도선 제외)에 바닥과 색이 다른 물체(방지턱)가 일정 비율 이상 나타나면 줄입니다. 아래에서 방지턱이 보이지 않는 자리(출발선)에서 바닥 보정을 하고, 방지턱 앞 20~30 cm에 차를 두고 시험해 점수가 기준을 넘는지 확인하세요. 카메라 각도를 바꾸면 다시 보정해야 합니다.'
         : '방지턱 20~40 cm 앞에 가로로 검은 테이프를 붙이면, 차 앞쪽 바닥 센서가 테이프를 보는 순간 줄입니다(출발선 테이프와 같은 감지 방식).'} 실제로 얼마나 줄었는지는 각 회차의 '방지턱 통과 속도'로 확인합니다.</p>
-      {(trigger === 'camera' || trigger === 'camera_distance') && <div className="exp-inverse">
-        <b>카메라 방지턱 감지 설정</b>
-        <div className="experiment-fields">
-          <label>관심 영역 위 (화면 높이 비율)<NumInput min={0} max={0.95} step={0.05} value={settings.vision?.roi_top ?? 0.55} onChange={e => void visionPatch({ roi_top: Number(e.target.value) })} /></label>
-          <label>관심 영역 아래<NumInput min={0.05} max={1} step={0.05} value={settings.vision?.roi_bottom ?? 0.9} onChange={e => void visionPatch({ roi_bottom: Number(e.target.value) })} /></label>
-          <label>가운데 뺄 폭 (유도선)<NumInput min={0} max={0.8} step={0.05} value={settings.vision?.center_gap ?? 0.2} onChange={e => void visionPatch({ center_gap: Number(e.target.value) })} /></label>
-          <label>감지 기준 (바닥 아닌 비율)<NumInput min={0.01} max={0.9} step={0.01} value={settings.vision?.threshold ?? 0.12} onChange={e => void visionPatch({ threshold: Number(e.target.value) })} /></label>
-        </div>
-        <div className="button-row"><button className="secondary" disabled={!ctx.serverAvailable || ctx.busy} onClick={() => void visionCal()}>① 방지턱 없는 곳에서 바닥 보정</button><button className="secondary" disabled={!ctx.serverAvailable || ctx.busy} onClick={() => void visionTest()}>② 지금 점수 보기</button>
-          <span className="exp-hint">{visionOk ? `보정됨 (바닥 색 ${settings.vision?.floor_mean?.map(x => Math.round(x)).join(', ')})` : '보정 필요'}{vt2?.score ? ` · 왼쪽 ${(vt2.score[0] * 100).toFixed(0)}% / 오른쪽 ${(vt2.score[1] * 100).toFixed(0)}% (기준 ${(vt2.threshold * 100).toFixed(0)}%) → ${vt2.detected ? '방지턱 있음' : '없음'}` : ''}</span></div>
-      </div>}
+      <div className="button-row"><button className="secondary" onClick={() => setCamOpen(!camOpen)}><Camera size={14} /> 카메라 보정 {camOpen ? '닫기' : '열기'}</button></div>
+      {(camOpen || ((trigger === 'camera' || trigger === 'camera_distance') && !visionOk)) && <VisionCal ctx={ctx} />}
       {problem && <p className="diagnostic-error">{problem}</p>}
       <div className="button-row"><button className="primary" disabled={!!problem || !ctx.canAutoRun} onClick={() => void runSlow()}><Play size={15} /> 감속 제어 측정 ({repeats}회)</button>
         <button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void ctx.stopNow()}><Square size={14} /> 정지</button>
@@ -203,6 +188,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
             ...(showRun.bump_passed_s != null ? [{ t: showRun.bump_passed_s + (showRun.pre_roll_s ?? 0), label: '다 넘음(기울기)', color: '#3c9a5f' }] : [])]}
           title={`위아래 가속도 – 감속 회차 ${new Date(showRun.created_at).toLocaleTimeString()} · 출력 ${showRun.slowdown?.output_initial} → ${showRun.slowdown?.output ?? '유지'} · 멈춘 이유: ${stopReason(showRun)}`}
           name={`slow_trace_${showRun.id}`} /> : <div className="empty-chart">그래프 불러오는 중…</div>)}
+        {showRun && detail && detail.id === showRun.id && (detail.drive_log?.length ?? 0) > 1 && <XYChart name={`slow_out_${showRun.id}`} title="이 회차에 실제로 낸 출력 (감속이 일어났는지 확인)" xLabel="출발 후 시간 (s)" yLabel={`출력 (${condition.output_mode.toUpperCase()})`}
+          series={[{ name: '명령한 출력', color: '#a04fa0', line: true, dots: false, points: (detail.drive_log ?? []).map(r => ({ x: r[0], y: r[1] })) }]}
+          vLines={[...(showRun.slowdown?.slowed_at_s != null ? [{ x: showRun.slowdown.slowed_at_s - (showRun.pre_roll_s ?? 0), label: '감속 시작', color: '#a04fa0' }] : []), ...(showRun.bump_passed_s != null ? [{ x: showRun.bump_passed_s, label: '다 넘음', color: '#3c9a5f' }] : [])]}
+          caption={showRun.slowdown?.slowed_at_s == null ? '이 회차는 감속 신호가 오지 않아 출력이 그대로였습니다(카메라·초음파가 방지턱을 못 알아챘거나, 시간 방식이면 시간이 주행 시간보다 늦음).' : 'PWM은 실제 듀티 = PWM/2 + 50%라서 100 → 82는 듀티 100% → 91%(속도 약 12% 감소)입니다. 눈으로는 거의 티가 안 나는 게 정상이며, 이 선이 계단처럼 내려갔으면 감속은 된 것입니다.'} />}
         <XYChart name={`slowdown_${bump}`} title="감속 제어 결과: 실제 통과 속도와 최대 충격" xLabel="실제 통과 속도 (m/s, 바퀴 간격)" yLabel="최대 수직 가속도 (g)"
           series={[{ name: `관계식 예측 (${massG} g)`, color: '#2f6fb0', line: true, dots: false, points: curve },
             { name: '기준 이내', color: '#3c9a5f', points: slowRuns.filter(r => r.slowdown?.pass && r.slowdown.measured_speed_mps).map(r => ({ x: r.slowdown?.measured_speed_mps as number, y: r.slowdown?.measured_peak_g as number })) },

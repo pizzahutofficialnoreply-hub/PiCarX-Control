@@ -1163,8 +1163,13 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
             if plan.get("trigger") in ("camera", "camera_distance") and not simulated:
                 from .camera import camera_service
                 vs = store.load_settings().vision
-                if vs.floor_mean is None:
-                    raise RuntimeError("카메라 방지턱 감지는 '이론·예측·제어 → 감속 제어'에서 바닥 보정을 먼저 하세요.")
+                if not vis.ready(vs):
+                    raise RuntimeError("카메라 방지턱 감지는 '이론·예측·제어 → 감속 제어'에서 카메라 보정(바닥 보정 또는 방지턱 학습)을 먼저 하세요.")
+                if vs.tilt_deg is not None:
+                    try:
+                        ctl.adapter.set_camera_view(0, int(round(vs.tilt_deg)))
+                    except Exception:
+                        pass
                 cam = BumpCamera(camera_service.capture_array, vs)
                 cam.start()
             # 감속 회차: 방지턱 앞에서 출력만 줄이고(멈추지 않음), 다 넘으면(resume) 원래 출력으로 다시 가속.
@@ -1645,6 +1650,65 @@ async def vision_calibrate(body: VisionUpdate | None = None):
     return {"vision": settings.vision.model_dump(), "score": vis.score(arr, settings.vision)}
 
 
+class VisionTeach(BaseModel):
+    x0: float = Field(ge=0, le=1)
+    y0: float = Field(ge=0, le=1)
+    x1: float = Field(ge=0, le=1)
+    y1: float = Field(ge=0, le=1)
+
+
+async def _vision_frame(step: int = 4):
+    from .camera import camera_service
+    vs = store.load_settings().vision
+    if vs.tilt_deg is not None:
+        try:
+            await asyncio.to_thread(control().adapter.set_camera_view, 0, int(round(vs.tilt_deg)))
+            await asyncio.sleep(0.25)
+        except Exception:
+            pass
+    arr = await asyncio.to_thread(camera_service.capture_array, step)
+    if arr is None:
+        raise HTTPException(503, "카메라 영상을 가져오지 못했습니다(카메라 연결·모의 모드 확인).")
+    return arr
+
+
+def _vision_view(arr: Any, vs: VisionSettings, note: str | None = None) -> dict[str, Any]:
+    sc = vis.score(arr, vs)
+    return {"image": vis.preview_jpeg(arr), "score": sc, "threshold": vs.threshold, "detected": vis.detected(sc, vs),
+            "box": vis.bump_box(arr, vs), "mode": "taught" if vs.bump_color is not None else "floor" if vs.floor_mean is not None else None,
+            "calibrated": vis.ready(vs), "roi": {"top": vs.roi_top, "bottom": vs.roi_bottom, "center_gap": vs.center_gap},
+            "vision": vs.model_dump(), "note": note}
+
+
+@router.get("/vision/snapshot")
+async def vision_snapshot():
+    """카메라 보정 화면: 지금 화면 + 감지 영역 + 방지턱으로 본 곳(초록 네모) + 점수."""
+    arr = await _vision_frame()
+    return _vision_view(arr, store.load_settings().vision)
+
+
+@router.post("/vision/teach")
+async def vision_teach(body: VisionTeach):
+    """화면에서 방지턱을 네모로(또는 한 점 클릭) 고르면 그 색을 방지턱 색으로 배웁니다."""
+    arr = await _vision_frame()
+    settings = store.load_settings()
+    try:
+        settings.vision, note = vis.teach(arr, (body.x0, body.y0, body.x1, body.y1), settings.vision)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.save_settings(settings)
+    return _vision_view(arr, settings.vision, note)
+
+
+@router.post("/vision/forget")
+async def vision_forget():
+    """학습한 방지턱 색을 지우고 바닥 비교 방식으로 돌아감."""
+    settings = store.load_settings()
+    settings.vision = settings.vision.model_copy(update={"bump_color": None, "bump_tol": None})
+    store.save_settings(settings)
+    return {"vision": settings.vision.model_dump()}
+
+
 @router.get("/vision/test")
 async def vision_test():
     """지금 화면의 방지턱 점수(왼쪽, 오른쪽). 방지턱 앞에 차를 두고 점수가 기준을 넘는지 확인하세요."""
@@ -1654,7 +1718,7 @@ async def vision_test():
     if arr is None:
         raise HTTPException(503, "카메라 영상을 가져오지 못했습니다(카메라 연결·모의 모드 확인).")
     sc = vis.score(arr, vs)
-    return {"score": sc, "threshold": vs.threshold, "detected": bool(sc and min(sc) >= vs.threshold), "calibrated": vs.floor_mean is not None,
+    return {"score": sc, "threshold": vs.threshold, "detected": vis.detected(sc, vs), "calibrated": vis.ready(vs),
             "roi": {"top": vs.roi_top, "bottom": vs.roi_bottom, "center_gap": vs.center_gap}}
 
 

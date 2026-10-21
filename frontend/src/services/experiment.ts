@@ -138,7 +138,7 @@ export const eventSolve = (em: EventModel, delta: number, mKg: number): number |
   const base = em.k * (em.uses_mass ? mKg ** em.p : 1);
   return delta > 0 && em.n > 0 && base > 0 ? (delta / base) ** (1 / em.n) : null;
 };
-export type VisionSettings = { floor_mean: number[] | null; floor_std: number | null; roi_top: number; roi_bottom: number; center_gap: number; k_sigma: number; threshold: number };
+export type VisionSettings = { floor_mean: number[] | null; floor_std: number | null; roi_top: number; roi_bottom: number; center_gap: number; k_sigma: number; threshold: number; bump_color?: number[] | null; bump_tol?: number | null; tilt_deg?: number | null };
 export type DistanceSummary = {
   n_samples: number; n_valid: number; n_removed: number; rate_hz: number | null; approach_speed_mps: number | null; bump_speed_mps: number | null;
   min_speed_mps: number | null; drop_pct: number | null; us_bump_t_s: number | null; us_vs_imu_s: number | null; us_dip_pct?: number | null;
