@@ -172,6 +172,7 @@ class AutoRunRequest(BaseModel):
     spin_direction: Literal["left", "right"] | None = None
     creep_duty: float | None = Field(default=None, ge=15, le=100)
     leg_timeout_s: float | None = Field(default=None, ge=1, le=30)
+    start_delay_s: float | None = Field(default=None, ge=0, le=60, description="측정 시작을 누른 뒤 첫 회 출발까지 기다리는 시간(s)")
 
 
 class SlowdownRequest(BaseModel):
@@ -186,6 +187,7 @@ class SlowdownRequest(BaseModel):
     staged: bool = Field(default=False, description="단계별: 앞바퀴(오름·내림) 구간과 뒷바퀴 구간을 각각의 식으로 정한 속도로")
     resume: bool = Field(default=True, description="방지턱을 다 넘으면 원래 출력으로 다시 가속")
     lead_cm: float = Field(default=30.0, ge=5, le=150, description="distance_auto: 지난 회차의 '앞바퀴 충격 때 벽까지 거리'보다 이만큼 먼저 감속")
+    output: float | None = Field(default=None, ge=1, le=100, description="시험용: 감속 출력을 직접 지정(비우면 관계식으로 계산)")
 
 
 AutoRunRequest.model_rebuild()
@@ -1063,6 +1065,11 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
         target_v = v_front
     need = v0 > target_v
     out_slow, clipped = out_for(target_v) if need else (cond.output_value, False)
+    manual = req.output is not None
+    if manual:
+        # 시험용으로 감속 출력을 직접 넣은 경우: 그 출력으로 줄이고, 목표 속도는 속도식으로 환산해 기록
+        out_slow, clipped, need, stages = float(req.output), False, True, None
+        target_v = mf.speed_from_output(models, bump, cond.output_mode, out_slow, m_g) or target_v
     if out_slow is None:
         raise RuntimeError("목표 속도에 맞는 출력을 계산하지 못했습니다.")
     at_cm = req.at_cm
@@ -1083,7 +1090,7 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
             "vmax_mps": round(vmax, 4), "target_v_mps": round(target_v, 4),
             "pred_delta_target_g": round(mf.predict(model, target_v, mk), 4),
             "needed": need or bool(stages), "output": round(out_slow, 1) if (need or stages) else None, "output_initial": cond.output_value,
-            "output_clipped": clipped, "staged": stages, "resume": req.resume,
+            "output_clipped": clipped, "staged": stages, "resume": req.resume, "manual_output": manual,
             "ratio": round(target_v / v0, 4) if v0 else None}
 
 
@@ -1448,6 +1455,13 @@ async def _auto_run(request: AutoRunRequest, settings: ExperimentSettings) -> No
                 auto_runner.message = "출발선이 센서 밑에 없어 천천히 후진해 찾습니다."
                 if not await co._align_on_cross(ctl, creq, line, "backward", 2.5):
                     raise RuntimeError("출발선을 찾지 못했습니다. 바닥 센서가 출발선(가로 테이프) 위에 오도록 차를 놓으세요.")
+        delay = float(request.start_delay_s or 0)
+        if delay > 0:
+            # 출발 전 대기: 차에서 손을 떼고 영상 촬영 준비할 시간
+            end_wait, wgen = time.monotonic() + delay, ctl.stop_generation
+            while (left := end_wait - time.monotonic()) > 0:
+                auto_runner._phase("rest", left, f"출발 대기 {left:.0f}초 · 차에서 손을 떼세요")
+                await _wait(ctl, min(0.5, left), wgen)
         for i in range(opts["repeats"]):
             auto_runner.cycle = i + 1
             trial_cond = cond.model_copy(update={"trial": cond.trial + i})
