@@ -127,7 +127,7 @@ export type SlowdownInfo = {
   trigger: 'time' | 'tape' | 'distance' | 'camera' | 'camera_distance'; trigger_requested?: string; slowed_by?: string; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
   margin?: 'ratio' | 'sigma'; model_error_g?: number; target_delta_g?: number;
   v0_pred_mps: number; pred_delta_v0_g: number; vmax_mps: number; target_v_mps: number; pred_delta_target_g: number; needed: boolean;
-  output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null;
+  output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null; drive_s?: number | null;
   staged?: { v_by_event: Record<EventKind, number>; v_front_mps: number; v_rear_mps: number; output_front: number | null; output_rear: number | null; clipped: boolean; pred_by_event_g: Record<EventKind, number> } | null;
   resume?: boolean; stage_log?: [number, string, number][];
   measured_speed_mps?: number | null; measured_peak_g?: number | null; pass?: boolean;
@@ -155,7 +155,7 @@ export type RunSummary = {
   battery_v?: number | null; steering_source?: string | null; data_source?: string | null; line_lost?: boolean | null; kick_ms?: number | null;
   peak_override?: { front_t_s: number; rear_t_s: number } | null;
   steer_mean_late?: number | null; heading_ff_learned?: number | null;
-  slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null;
+  slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null; pre_roll_s?: number | null;
   /** 정지선 코스로 잰 회차: 구간(A→B/B→A), 정지선 인식 시각 */
   course?: { leg?: string | null; end_mode?: string | null; accel?: string | null; detected?: boolean | null; detect_s?: number | null } | null;
   /** 유도선+자이로 조향 요약: 방지턱 위 방향 유지 시간, 유도선 복귀 시간, 최대 방향 차이 */

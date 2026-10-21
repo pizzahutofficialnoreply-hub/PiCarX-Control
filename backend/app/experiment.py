@@ -458,7 +458,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
                                     "slowdown", "distance_summary", "stopped_by_wall", "course", "guided",
-                                    "camera_line", "steer_ff_learned")}
+                                    "camera_line", "steer_ff_learned", "pre_roll_s")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -789,6 +789,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     slowed_at: float | None = None
     slowed_by: str | None = None
     stopped_by_wall = False
+    wall_hits, wall_last = 0, -1
     if slowdown and slowdown.get("trigger") == "tape" and slow_tape is not None:
         # 방지턱 앞에 붙인 '감속 표시 테이프'를 정지선과 같은 방식(수 ms 간격, 2번 연속)으로 찾습니다.
         async def poll_slow() -> None:
@@ -836,9 +837,17 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               stopped_on_mark = True
               break
           near = distance.latest() if distance is not None else None
-          if wall_stop_cm and near is not None and near <= wall_stop_cm:
-              stopped_by_wall = True
-              break
+          # 초음파가 바닥·방지턱에 튄 값 한 번으로 멈추지 않도록 새 값이 2번 연속 가까울 때만 정지
+          if wall_stop_cm and near is not None and near <= wall_stop_cm and distance is not None:
+              key = len(distance.samples)
+              if key != wall_last:
+                  wall_last = key
+                  wall_hits += 1
+              if wall_hits >= 2:
+                  stopped_by_wall = True
+                  break
+          elif wall_stop_cm:
+              wall_hits = 0
           if slowdown and slowed_at is None and slowdown.get("output") is not None:
               trig = slowdown.get("trigger")
               by_dist = trig in ("distance", "camera_distance") and near is not None and near <= float(slowdown.get("at_cm") or 0)
@@ -1147,17 +1156,28 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                     raise RuntimeError("카메라 방지턱 감지는 '이론·예측·제어 → 감속 제어'에서 바닥 보정을 먼저 하세요.")
                 cam = BumpCamera(camera_service.capture_array, vs)
                 cam.start()
-            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, opts["leg_timeout"] if stop_line else opts["run_seconds"], mdir, gen, hold,
+            # 감속 회차: 느려진 만큼 방지턱까지·방지턱 위에서 시간이 더 걸리므로, 주행 시간을 속도 비율만큼 늘리고
+            # (예: 0.26 → 0.18 m/s면 1.4배 + 1초) 기울기로 '다 넘음'을 보면 그때 멈춥니다. 예전에는 원래 주행 시간이
+            # 끝나면 방지턱 위에서도 그냥 멈췄습니다.
+            sp = plan if plan.get("needed") else None
+            drive_s = opts["leg_timeout"] if stop_line else opts["run_seconds"]
+            if sp and not stop_line:
+                tv = float(sp.get("target_v_mps") or 0) or None
+                v0p = float(sp.get("v0_pred_mps") or 0) or None
+                stretch = max(1.0, (v0p / tv) if tv and v0p else 1.5)
+                drive_s = min(12.0, drive_s * stretch + 1.0)
+                run["slowdown"]["drive_s"] = round(drive_s, 2)
+            drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, drive_s, mdir, gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
                                           ki=settings.heading_ki, ff=getattr(store.load_settings(), ff_key) if hold else 0.0,
                                           polarity=store.load_settings().heading_sign,
-                                          bump_watch=BumpPassWatcher() if (((settings.stop_after_bump and not stop_line) or plan_staged) and track) else None,
-                                          stop_on_pass=settings.stop_after_bump and not stop_line,
+                                          bump_watch=BumpPassWatcher() if (((settings.stop_after_bump and not stop_line) or plan_staged or sp) and track) else None,
+                                          stop_on_pass=(settings.stop_after_bump or bool(sp)) and not stop_line,
                                           ramp_s=ramp_s, decel_s=opts.get("decel_s") or 0.3, cross=cross, guided=guided,
                                           min_s=0.3 if stop_line else 0.0,
                                           camera=cam,
-                                          after_bump_s=settings.after_bump_s,
-                                          slowdown=opts.get("slowdown_plan") if (opts.get("slowdown_plan") or {}).get("needed") else None,
+                                          after_bump_s=max(settings.after_bump_s, 0.5) if sp else settings.after_bump_s,
+                                          slowdown=sp,
                                           distance=logger, wall_stop_cm=opts.get("wall_stop_cm") or 0.0,
                                           slow_tape=_tape_detector(settings) if not simulated else None)
             if cam is not None:

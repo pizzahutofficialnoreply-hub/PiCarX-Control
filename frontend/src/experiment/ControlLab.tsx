@@ -1,9 +1,9 @@
 // 목표 2(관계식으로 정한 속도로 방지턱 앞에서 감속)와 초음파 거리·속력 분석.
-import { useState } from 'react';
-import { Gauge, Play, Radar } from 'lucide-react';
-import { EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type VisionSettings } from '../services/experiment';
+import { useEffect, useState } from 'react';
+import { Gauge, Play, Radar, Square } from 'lucide-react';
+import { EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type RunDetail, type VisionSettings } from '../services/experiment';
 import HelpBox from '../components/HelpBox';
-import { XYChart } from '../components/ExperimentCharts';
+import { RunTraceChart, XYChart } from '../components/ExperimentCharts';
 import NumInput from '../components/NumInput';
 import { usePersistentState } from '../services/persist';
 import type { ExperimentContext } from './context';
@@ -18,14 +18,14 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const { data, settings, condition } = ctx;
   type Trig = 'time' | 'tape' | 'distance' | 'distance_auto' | 'camera' | 'camera_distance';
   const [trigger, setTrigger] = usePersistentState<Trig>('slow-trigger', 'time');
-  const [margin, setMargin] = usePersistentState<'ratio' | 'sigma'>('slow-margin', 'sigma');
+  const [margin, setMargin] = usePersistentState<'ratio' | 'sigma'>('slow-margin', 'ratio');
   const [staged, setStaged] = usePersistentState('slow-staged', false);
   const [resume, setResume] = usePersistentState('slow-resume', true);
   const [leadCm, setLeadCm] = usePersistentState('slow-lead-cm', 30);
   const [vt2, setVt2] = useState<VisionTest | null>(null);
   const [atS, setAtS] = usePersistentState('slow-at-s', 0.6);
   const [atCm, setAtCm] = usePersistentState('slow-at-cm', 60);
-  const [safety, setSafety] = usePersistentState('slow-safety', 0.9);
+  const [safety, setSafety] = usePersistentState('slow-safety', 1);
   const [minOut, setMinOut] = usePersistentState('slow-min-out', 10);
   const [targetG, setTargetG] = usePersistentState<number | ''>('slow-target-g', '');
   const [repeats, setRepeats] = usePersistentState('slow-repeats', 3);
@@ -75,6 +75,31 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const judged = slowRuns.filter(r => r.slowdown?.pass != null).length;
   const curve = pred ? Array.from({ length: 40 }, (_, i) => 0.05 + i * ((Math.max(v0 ?? 1, ...slowRuns.map(r => r.slowdown?.measured_speed_mps ?? 0)) * 1.2) - 0.05) / 39).map(v => ({ x: v, y: 1 + (pred.delta(v, mKg) ?? NaN) })).filter(p => Number.isFinite(p.y)) : [];
 
+  // 결과 그래프: 가장 최근 감속 회차(또는 표에서 누른 회차)의 위아래 가속도를 바로 보여 줌
+  const [pickId, setPickId] = useState<string | null>(null);
+  const showId = pickId && slowRuns.some(r => r.id === pickId) ? pickId : slowRuns[0]?.id ?? null;
+  const showRun = slowRuns.find(r => r.id === showId) ?? null;
+  const [detail, setDetail] = useState<RunDetail | null>(null);
+  useEffect(() => {
+    if (!showId || !ctx.serverAvailable) { setDetail(null); return; }
+    let off = false;
+    ctx.request(`/api/experiment/runs/${showId}`, { timeoutMs: 10000 }).then(d => { if (!off) setDetail(d as RunDetail); }).catch(() => { if (!off) setDetail(null); });
+    return () => { off = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showId, ctx.serverAvailable]);
+  const powerModel = cmp?.models.find(m => m.kind === 'power') ?? null;
+  async function reportPreset() {
+    setMargin('ratio'); setSafety(1); setTargetG('');
+    if (powerModel && data?.chosen_models?.[bump] !== powerModel.id) await ctx.patchSettings({ model_id: powerModel.id });
+    ctx.setMessage(`보고서와 같은 방식으로 맞췄습니다: ${powerModel ? powerModel.formula : '거듭제곱 식'} · 기준 그대로(여유율 1.0).`);
+  }
+  function stopReason(r: typeof slowRuns[number]): string {
+    if (r.aborted) return '정지 버튼';
+    if (r.stopped_by_wall) return '벽 앞 정지';
+    if (r.bump_passed_s != null) return '다 넘고 정지';
+    return '시간 끝';
+  }
+
   async function runSlow() {
     await ctx.startAutoRun(undefined, {
       repeats, ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
@@ -119,6 +144,18 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           <li><b>여유율 방식</b>: 속도를 v_max의 90%처럼 정해진 비율로 낮춤. 간단하지만 얼마나 안전한지 숫자로 말하기 어렵습니다.</li>
           <li><b>단계별</b>: 앞바퀴 오름·내림, 뒷바퀴 오름·내림의 충격이 서로 다르므로 각각의 식으로 '그 단계에서 넘지 않는 속도'를 구합니다. 앞바퀴 두 단계 중 더 엄격한 속도로 들어가고, 앞바퀴가 다 내려오면(기울기가 수평으로 돌아옴) 뒷바퀴 단계 속도로 바꾼 뒤, 다 넘으면 다시 가속합니다. 다만 모터 속도가 바뀌는 데 0.2~0.4초가 걸려, 앞바퀴→뒷바퀴 사이(이 방지턱에서 약 0.1~0.2초) 안에 속도를 크게 바꾸기는 어렵습니다. 실제 결과는 각 회차의 '실제 전환' 기록과 단계별 충격으로 확인하세요.</li></ul>
       </HelpBox>
+      <div className="exp-inverse">
+        <b>시작 출력과 관계식</b>
+        <div className="experiment-fields">
+          <label>시작 출력 ({condition.output_mode.toUpperCase()}, 방지턱 전·후 속도)<NumInput min={1} max={100} value={condition.output_value} onChange={e => ctx.setCondition({ output_value: Math.max(1, Math.min(100, Number(e.target.value) || condition.output_value)) })} /></label>
+          <label>쓸 관계식<select value={settings.model_id ?? 'auto'} onChange={e => void ctx.patchSettings({ model_id: e.target.value })}>
+            <option value="auto">자동 (교차검증 오차 최소{cmp?.best ? ` → ${cmp.models.find(m => m.id === cmp.best)?.name ?? ''}` : ''})</option>
+            {(cmp?.models ?? []).map(m => <option key={m.id} value={m.id}>{m.name}: {m.formula}</option>)}</select></label>
+        </div>
+        <div className="button-row"><button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void reportPreset()}>보고서 방식으로 맞추기 (거듭제곱 식 · 기준 그대로)</button>
+          <span className="exp-hint">지금 식: <b>{chosen ? chosen.formula : '—'}</b>{margin === 'sigma' ? ' · 목표를 기준보다 2×오차만큼 낮게 잡는 중' : ` · 여유율 ${safety}`}</span></div>
+        <p className="exp-hint">출력을 정한 값으로만 달리고 싶으면(감속 없음) 측정·분석 탭에서 출력만 바꿔 측정하세요. 이 버튼은 '시작 출력으로 달리다가 방지턱 앞에서 계산된 출력으로 줄이는' 시험입니다. 주행 시간은 느려진 만큼 자동으로 늘어나고, 기울기로 방지턱을 다 넘은 것을 확인하면 0.5초 뒤 멈춥니다.</p>
+      </div>
       <div className="experiment-fields">
         <label>방지턱을 미리 알아채는 방법<select value={trigger} onChange={e => setTrigger(e.target.value as Trig)}>
           <option value="time">출발 후 시간</option><option value="distance_auto">거리 자동 (초음파, 지난 회차에서 방지턱 위치를 배움)</option><option value="distance">벽까지 거리 직접 입력 (초음파)</option>
@@ -153,9 +190,17 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       </div>}
       {problem && <p className="diagnostic-error">{problem}</p>}
       <div className="button-row"><button className="primary" disabled={!!problem || !ctx.canAutoRun} onClick={() => void runSlow()}><Play size={15} /> 감속 제어 측정 ({repeats}회)</button>
+        <button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void ctx.stopNow()}><Square size={14} /> 정지</button>
         {ctx.auto && ctx.busy && <span className="exp-hint">{ctx.auto.message}</span>}</div>
       {slowRuns.length > 0 && <>
-        <p className="exp-hint">감속 제어 {slowRuns.length}회 중 기준 이내 <b>{passN}/{judged}</b>회.</p>
+        <p className="exp-hint">감속 제어 {slowRuns.length}회 중 기준 이내 <b>{passN}/{judged}</b>회. 표에서 회차를 누르면 그 회차 그래프로 바뀝니다.</p>
+        {showRun && (detail && detail.id === showRun.id ? <RunTraceChart key={showRun.id} series={detail.series} analysis={showRun.analysis} aLimit={aLimit}
+          thresholdDelta={Number(showRun.analysis.threshold_used_g ?? showRun.analysis.params?.threshold_delta_g ?? settings.threshold_delta_g)} jumpG={Number(showRun.analysis.params?.jump_g ?? settings.jump_g)}
+          zoom="all"
+          extraMarks={[...(showRun.slowdown?.slowed_at_s != null ? [{ t: showRun.slowdown.slowed_at_s, label: `감속 시작 (출력 ${showRun.slowdown.output})`, color: '#a04fa0' }] : []),
+            ...(showRun.bump_passed_s != null ? [{ t: showRun.bump_passed_s + (showRun.pre_roll_s ?? 0), label: '다 넘음(기울기)', color: '#3c9a5f' }] : [])]}
+          title={`위아래 가속도 – 감속 회차 ${new Date(showRun.created_at).toLocaleTimeString()} · 출력 ${showRun.slowdown?.output_initial} → ${showRun.slowdown?.output ?? '유지'} · 멈춘 이유: ${stopReason(showRun)}`}
+          name={`slow_trace_${showRun.id}`} /> : <div className="empty-chart">그래프 불러오는 중…</div>)}
         <XYChart name={`slowdown_${bump}`} title="감속 제어 결과: 실제 통과 속도와 최대 충격" xLabel="실제 통과 속도 (m/s, 바퀴 간격)" yLabel="최대 수직 가속도 (g)"
           series={[{ name: `관계식 예측 (${massG} g)`, color: '#2f6fb0', line: true, dots: false, points: curve },
             { name: '기준 이내', color: '#3c9a5f', points: slowRuns.filter(r => r.slowdown?.pass && r.slowdown.measured_speed_mps).map(r => ({ x: r.slowdown?.measured_speed_mps as number, y: r.slowdown?.measured_peak_g as number })) },
@@ -163,10 +208,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           hLines={aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : []}
           vLines={vt != null ? [{ x: vt, label: '목표 속도', color: '#a04fa0' }] : []}
           caption="초록 점이 기준선 아래, 목표 속도 근처에 모이면 '관계식 → 속도 결정 → 감속 → 충격 감소'가 실험으로 확인된 것입니다. 점이 목표 속도보다 오른쪽이면 감속할 거리(시간)가 부족했던 것입니다." />
-        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시각</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th></tr></thead>
-          <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={s.pass === false ? 'over' : ''}><td>{new Date(r.created_at).toLocaleTimeString()}</td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}</td>
+        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시각</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th><th>멈춘 이유</th></tr></thead>
+          <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={(s.pass === false ? 'over ' : '') + (r.id === showId ? 'selected' : '')} style={{ cursor: 'pointer' }} onClick={() => setPickId(r.id)}><td>{new Date(r.created_at).toLocaleTimeString()}</td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}</td>
             <td>{s.trigger === 'time' ? `${s.at_s}s` : s.trigger === 'distance' ? `${s.at_cm}cm${s.trigger_requested === 'distance_auto' ? '(자동)' : ''}` : s.trigger === 'camera' ? '카메라' : s.trigger === 'camera_distance' ? `카메라+초음파 ${s.at_cm}cm${s.slowed_by ? ` (${s.slowed_by === 'camera' ? '카메라' : '초음파'} 먼저)` : ''}` : '테이프'}{s.slowed_at_s == null && s.needed && !r.simulated ? ' (작동 안 함)' : ''}</td>
-            <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td></tr>; })}</tbody></table></div>
+            <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td><td>{stopReason(r)}</td></tr>; })}</tbody></table></div>
       </>}
     </section>;
 
