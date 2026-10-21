@@ -93,7 +93,14 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
   const keyOfRun = (cond: RunSummary['condition']) => cells.find(c => c.bump_id === cond.bump_id && Math.round(c.added_mass_g) === Math.round(cond.added_mass_g) && Math.round(c.output_value) === Math.round(cond.output_value));
 
   // 맞춤 기준: 'peak'면 각 회차의 최댓값 시각을 0초로 옮김 → 평균해도 피크 높이가 낱개 그래프와 비슷하게 유지됨
-  const good = traces.filter(s => s.bump_detected !== false && s.aligned_on === 'front' && (align === 'front' || s.peak_rel_s != null))
+  // 서버가 최댓값 시각(peak_rel_s)을 주지 않으면(구버전) 받은 파형에서 직접 가장 큰 점을 찾음
+  const withPeak = traces.map(s => {
+    if (s.peak_rel_s != null && s.peak_g != null) return s;
+    let k = 0;
+    s.g.forEach((v, i) => { if (v > s.g[k]) k = i; });
+    return s.g.length ? { ...s, peak_rel_s: s.t[k], peak_g: s.peak_g ?? s.g[k] } : s;
+  });
+  const good = withPeak.filter(s => s.bump_detected !== false && s.aligned_on === 'front' && (align === 'front' || s.peak_rel_s != null))
     .map(s => align === 'peak' ? { ...s, t: s.t.map(x => Number((x - (s.peak_rel_s as number)).toFixed(4))), peak_rel_s: 0 } : s);
   const series: XYSeries[] = [];
   const sorted = [...cells].sort((a, b) => by === 'speed' ? a.output_value - b.output_value || a.added_mass_g - b.added_mass_g : a.added_mass_g - b.added_mass_g || a.output_value - b.output_value);
