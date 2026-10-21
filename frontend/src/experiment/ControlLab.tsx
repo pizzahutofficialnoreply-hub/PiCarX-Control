@@ -29,6 +29,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const [minOut, setMinOut] = usePersistentState('slow-min-out', 10);
   const [targetG, setTargetG] = usePersistentState<number | ''>('slow-target-g', '');
   const [repeats, setRepeats] = usePersistentState('slow-repeats', 3);
+  const [runS, setRunS] = usePersistentState('slow-run-s', 4);
   const [usTest, setUsTest] = useState<UsTest | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -102,7 +103,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
 
   async function runSlow() {
     await ctx.startAutoRun(undefined, {
-      repeats, ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
+      repeats, run_seconds: runS, ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
       slowdown: { trigger, at_s: atS, at_cm: atCm, safety, min_output: minOut, target_g: targetG === '' ? null : targetG, margin, staged, resume, lead_cm: leadCm },
     });
     ctx.setMessage('감속 제어 측정을 시작했습니다. 진행 상황은 측정·분석 탭에서도 볼 수 있습니다.');
@@ -148,13 +149,14 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         <b>시작 출력과 관계식</b>
         <div className="experiment-fields">
           <label>시작 출력 ({condition.output_mode.toUpperCase()}, 방지턱 전·후 속도)<NumInput min={1} max={100} value={condition.output_value} onChange={e => ctx.setCondition({ output_value: Math.max(1, Math.min(100, Number(e.target.value) || condition.output_value)) })} /></label>
+          <label>주행 시간 (s, 출발부터 멈출 때까지)<NumInput min={0.5} max={12} step={0.5} value={runS} onChange={e => setRunS(Math.max(0.5, Math.min(12, Number(e.target.value) || 4)))} /></label>
           <label>쓸 관계식<select value={settings.model_id ?? 'auto'} onChange={e => void ctx.patchSettings({ model_id: e.target.value })}>
             <option value="auto">자동 (교차검증 오차 최소{cmp?.best ? ` → ${cmp.models.find(m => m.id === cmp.best)?.name ?? ''}` : ''})</option>
             {(cmp?.models ?? []).map(m => <option key={m.id} value={m.id}>{m.name}: {m.formula}</option>)}</select></label>
         </div>
         <div className="button-row"><button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void reportPreset()}>보고서 방식으로 맞추기 (거듭제곱 식 · 기준 그대로)</button>
           <span className="exp-hint">지금 식: <b>{chosen ? chosen.formula : '—'}</b>{margin === 'sigma' ? ' · 목표를 기준보다 2×오차만큼 낮게 잡는 중' : ` · 여유율 ${safety}`}</span></div>
-        <p className="exp-hint">출력을 정한 값으로만 달리고 싶으면(감속 없음) 측정·분석 탭에서 출력만 바꿔 측정하세요. 이 버튼은 '시작 출력으로 달리다가 방지턱 앞에서 계산된 출력으로 줄이는' 시험입니다. 주행 시간은 느려진 만큼 자동으로 늘어나고, 기울기로 방지턱을 다 넘은 것을 확인하면 0.5초 뒤 멈춥니다.</p>
+        <p className="exp-hint">출력을 정한 값으로만 달리고 싶으면(감속 없음) 측정·분석 탭에서 출력만 바꿔 측정하세요. 이 버튼은 '시작 출력으로 달리다가 방지턱 앞에서 계산된 출력으로 줄이는' 시험입니다. 방지턱 앞에서는 출력만 줄이고 멈추지 않습니다. '다 넘으면 다시 가속'을 켜 두면 방지턱을 넘은 뒤 시작 출력으로 돌아가고, 위에 정한 주행 시간이 끝나야 멈춥니다. 방지턱을 넘고도 충분히 갈 만큼 시간을 넉넉히 주세요(측정 탭의 주행 시간과 따로).</p>
       </div>
       <div className="experiment-fields">
         <label>방지턱을 미리 알아채는 방법<select value={trigger} onChange={e => setTrigger(e.target.value as Trig)}>

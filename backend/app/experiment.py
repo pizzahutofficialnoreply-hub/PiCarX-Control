@@ -148,7 +148,7 @@ class ExperimentCondition(BaseModel):
 
 class AutoRunRequest(BaseModel):
     condition: ExperimentCondition
-    run_seconds: float | None = Field(default=None, ge=0.3, le=6)
+    run_seconds: float | None = Field(default=None, ge=0.3, le=12)
     pre_roll_s: float | None = Field(default=None, ge=0.3, le=5)
     tail_s: float | None = Field(default=None, ge=0.1, le=3)
     repeats: int | None = Field(default=None, ge=1, le=20)
@@ -1167,27 +1167,22 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
                     raise RuntimeError("카메라 방지턱 감지는 '이론·예측·제어 → 감속 제어'에서 바닥 보정을 먼저 하세요.")
                 cam = BumpCamera(camera_service.capture_array, vs)
                 cam.start()
-            # 감속 회차: 느려진 만큼 방지턱까지·방지턱 위에서 시간이 더 걸리므로, 주행 시간을 속도 비율만큼 늘리고
-            # (예: 0.26 → 0.18 m/s면 1.4배 + 1초) 기울기로 '다 넘음'을 보면 그때 멈춥니다. 예전에는 원래 주행 시간이
-            # 끝나면 방지턱 위에서도 그냥 멈췄습니다.
+            # 감속 회차: 방지턱 앞에서 출력만 줄이고(멈추지 않음), 다 넘으면(resume) 원래 출력으로 다시 가속.
+            # 주행 시간은 감속 제어 화면에서 정한 값(run_seconds)을 그대로 씁니다.
             sp = plan if plan.get("needed") else None
             drive_s = opts["leg_timeout"] if stop_line else opts["run_seconds"]
-            if sp and not stop_line:
-                tv = float(sp.get("target_v_mps") or 0) or None
-                v0p = float(sp.get("v0_pred_mps") or 0) or None
-                stretch = max(1.0, (v0p / tv) if tv and v0p else 1.5)
-                drive_s = min(12.0, drive_s * stretch + 1.0)
+            if sp:
                 run["slowdown"]["drive_s"] = round(drive_s, 2)
             drive_info = await _drive_for(ctl, cond.output_mode, cond.output_value, drive_s, mdir, gen, hold,
                                           settings.heading_gain, track, line, opts["kick_ms"],
                                           ki=settings.heading_ki, ff=getattr(store.load_settings(), ff_key) if hold else 0.0,
                                           polarity=store.load_settings().heading_sign,
                                           bump_watch=BumpPassWatcher() if (((settings.stop_after_bump and not stop_line) or plan_staged or sp) and track) else None,
-                                          stop_on_pass=(settings.stop_after_bump or bool(sp)) and not stop_line,
+                                          stop_on_pass=settings.stop_after_bump and not stop_line and not sp,
                                           ramp_s=ramp_s, decel_s=opts.get("decel_s") or 0.3, cross=cross, guided=guided,
                                           min_s=0.3 if stop_line else 0.0,
                                           camera=cam,
-                                          after_bump_s=max(settings.after_bump_s, 0.5) if sp else settings.after_bump_s,
+                                          after_bump_s=settings.after_bump_s,
                                           slowdown=sp,
                                           distance=logger, wall_stop_cm=opts.get("wall_stop_cm") or 0.0,
                                           slow_tape=_tape_detector(settings) if not simulated else None)
