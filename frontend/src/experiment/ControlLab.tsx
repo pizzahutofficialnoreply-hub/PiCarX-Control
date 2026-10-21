@@ -29,6 +29,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const [repeats, setRepeats] = usePersistentState('slow-repeats', 3);
   const [runS, setRunS] = usePersistentState('slow-run-s', 4);
   const [manualOut, setManualOut] = usePersistentState<number | ''>('slow-manual-out', '');
+  const [manualV, setManualV] = usePersistentState<number | ''>('slow-manual-v', '');
+  const [exactDuty, setExactDuty] = usePersistentState('slow-exact-duty', true);
   const [startDelay, setStartDelay] = usePersistentState('slow-start-delay', 3);
   const [restS, setRestS] = usePersistentState('slow-rest-s', 3);
   const [usTest, setUsTest] = useState<UsTest | null>(null);
@@ -55,15 +57,17 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const vRear = vEv && vEv.RU != null && vEv.RD != null ? Math.min(vEv.RU, vEv.RD) * fac : null;
   const vmax = vmaxAll;
   const vtCalc = staged ? vFront : vmax != null ? vmax * fac : null;
-  const vt = manualOut !== '' ? speedFromOutput(data?.speed_models, bump, condition.output_mode, manualOut, massG) : vtCalc;
+  const manualFromV = manualOut === '' && manualV !== '' ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, manualV, massG) : null;
+  const manualEff: number | '' = manualOut !== '' ? manualOut : manualFromV != null ? Math.max(1, Math.min(100, manualFromV)) : '';
+  const vt = manualEff !== '' ? speedFromOutput(data?.speed_models, bump, condition.output_mode, manualEff, massG) : vtCalc;
   const pRear = staged && vRear != null ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, vRear, massG) : null;
   const usAuto = (data?.runs ?? []).filter(r => r.condition.bump_id === bump && r.distance_summary?.distance_at_front_cm).map(r => r.distance_summary?.distance_at_front_cm as number).sort((a, b) => a - b);
   const autoCm = usAuto.length ? usAuto[Math.floor(usAuto.length / 2)] + leadCm : null;
   const visionOk = !!(settings.vision?.floor_mean || settings.vision?.bump_color);
   const [camOpen, setCamOpen] = usePersistentState('slow-cam-open', false);
-  const need = manualOut !== '' || (v0 != null && vt != null && v0 > vt);
+  const need = manualEff !== '' || (v0 != null && vt != null && v0 > vt);
   const pRaw = vt != null ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, vt, massG) : null;
-  const pSlow = manualOut !== '' ? manualOut : need && pRaw != null ? Math.min(condition.output_value, Math.max(minOut, pRaw)) : null;
+  const pSlow = manualEff !== '' ? manualEff : need && pRaw != null ? Math.min(condition.output_value, Math.max(minOut, pRaw)) : null;
   const dT = pred && vt ? pred.delta(vt, mKg) : null;
   const tapeOk = !!(settings.line?.floor && settings.line?.line);
   const problem = condition.bump_id !== bump ? `실험 조건의 방지턱(${condition.bump_id})이 이 탭에서 보는 방지턱(${bump})과 다릅니다. 측정·분석 탭에서 조건을 맞추세요.`
@@ -93,7 +97,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   }, [showId, ctx.serverAvailable]);
   const powerModel = cmp?.models.find(m => m.kind === 'power') ?? null;
   async function reportPreset() {
-    setMargin('ratio'); setSafety(0.9); setTargetG(''); setManualOut('');
+    setMargin('ratio'); setSafety(0.9); setTargetG(''); setManualOut(''); setManualV('');
     if (powerModel && data?.chosen_models?.[bump] !== powerModel.id) await ctx.patchSettings({ model_id: powerModel.id });
     ctx.setMessage(`보고서 식(${powerModel ? powerModel.formula : '거듭제곱 식'})으로 v_max를 구하고, 그 90% 속도로 들어가도록 맞췄습니다(여유 10%).`);
   }
@@ -121,7 +125,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   async function runSlow() {
     await ctx.startAutoRun(undefined, {
       repeats, run_seconds: runS, start_delay_s: startDelay, rest_s: Math.max(0.3, restS), ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
-      slowdown: { trigger, at_s: atS, at_cm: atCm, safety, min_output: minOut, target_g: targetG === '' ? null : targetG, margin, staged, resume, lead_cm: leadCm, output: manualOut === '' ? null : manualOut },
+      slowdown: { trigger, at_s: atS, at_cm: atCm, safety, min_output: minOut, target_g: targetG === '' ? null : targetG, margin, staged, resume, lead_cm: leadCm, output: manualOut === '' ? null : manualOut, target_speed: manualOut === '' && manualV !== '' ? manualV : null, exact_duty: exactDuty },
     });
     ctx.setMessage('감속 제어 측정을 시작했습니다. 진행 상황은 측정·분석 탭에서도 볼 수 있습니다.');
   }
@@ -151,6 +155,15 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         {staged && <div><small>단계별 최대 속도 (각 단계식으로 Δa* 를 풂)</small><b>{vEv ? kinds.map(k => `${EVENT_INFO[k].short} ${vEv[k] == null ? '—' : vEv[k]!.toFixed(3)}`).join(' · ') : '— (단계식 없음)'}</b>
           <span>앞바퀴 구간 v = {fmt(vFront, 3, 'm/s')}(출력 {pSlow?.toFixed(1) ?? '—'}) → 앞바퀴가 다 내려오면 뒷바퀴 구간 v = {fmt(vRear, 3, 'm/s')}(출력 {pRear == null ? '—' : Math.min(condition.output_value, Math.max(minOut, pRear)).toFixed(1)}){vFront != null && haveEvents ? ` · 예측: ${kinds.map(k => `${EVENT_INFO[k].short} +${eventPredict(em[k]!, k === 'FU' || k === 'FD' ? vFront : (vRear ?? vFront), mKg).toFixed(2)}g`).join(', ')}` : ''}</span></div>}
       </div>}
+      {pred && v0 != null && <details className="exp-tips" open={false}><summary>기준을 바꾸면 감속이 얼마나 되나 (눈에 보이는 감속을 원할 때)</summary>
+        <p className="exp-hint">PWM은 실제 듀티 = PWM/2 + 50% 라서 PWM 100 → 84 는 듀티 100% → 92%, 속도로 약 10%만 줄어 눈으로는 거의 같습니다. 눈에 띄려면 속도가 25~30% 이상(PWM 50~60) 줄어야 하고, 그러려면 기준이 더 엄격해야 합니다. 아래는 지금 식으로 계산한 값입니다(여유율 {margin === 'ratio' ? safety : 1} 적용). 누르면 이 화면의 시험 기준만 바뀝니다(분석 탭 기준은 그대로).</p>
+        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>기준 (총 / Δa)</th><th>v_max</th><th>목표 속도</th><th>감속 출력</th><th>실제 듀티</th><th>시작 대비 속도</th><th></th></tr></thead>
+          <tbody>{[1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3].map(da => { const vm = solveFor(v => pred.delta(v, mKg) ?? NaN, da); const vv = vm != null ? vm * (margin === 'ratio' ? safety : 1) : null; const o = vv != null ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, vv, massG) : null;
+            const cur = aLimit != null && Math.abs(aLimit - 1 - da) < 0.005;
+            return <tr key={da} className={cur ? 'selected' : ''}><td>{(1 + da).toFixed(1)} g / {da.toFixed(1)} g</td><td>{fmt(vm, 3)}</td><td>{fmt(vv, 3)}</td><td>{o == null ? '—' : o > condition.output_value ? '감속 불필요' : o.toFixed(1)}</td>
+              <td>{o == null || o > condition.output_value ? '—' : condition.output_mode === 'pwm' ? `${(o / 2 + 50).toFixed(0)}%` : `${o.toFixed(0)}%`}</td><td>{vv != null && v0 ? `${((vv / v0) * 100).toFixed(0)}%` : '—'}</td>
+              <td><button className="secondary" onClick={() => { setTargetG(Number((1 + da).toFixed(2))); setManualOut(''); setManualV(''); }}>이 기준으로</button></td></tr>; })}</tbody></table></div>
+      </details>}
       <HelpBox id="slow-margin" title="'기준 바로 밑(0.9999…)'으로 맞추면 안 되는 이유" defaultOpen={false}>
         <p>식은 평균을 예측합니다. 같은 속도로 달려도 회차마다 충격이 흔들리므로(이번 실험에서 표준편차 0.5~0.9 g), 예측값을 기준과 똑같이(또는 0.9999배로) 맞추면 <b>절반쯤은 기준을 넘습니다</b>. 그래서 '얼마나 확실하게 넘지 않을지'를 정해야 합니다.</p>
         <ul><li><b>예측 오차 방식(추천)</b>: 목표 = 기준 − 2 × 예측 오차. 오차가 정규분포라면 약 95%(한쪽 97.5%)는 기준 이내. 반복을 늘려 식이 정확해질수록 목표가 기준에 가까워져 더 빨리 지날 수 있습니다.</li>
@@ -163,6 +176,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           <label>시작 출력 ({condition.output_mode.toUpperCase()}, 방지턱 전·후 속도)<NumInput min={1} max={100} value={condition.output_value} onChange={e => ctx.setCondition({ output_value: Math.max(1, Math.min(100, Number(e.target.value) || condition.output_value)) })} /></label>
           <label>주행 시간 (s, 출발부터 멈출 때까지)<NumInput min={0.5} max={12} step={0.5} value={runS} onChange={e => setRunS(Math.max(0.5, Math.min(12, Number(e.target.value) || 4)))} /></label>
           <label>감속 출력 직접 지정 (시험용, 빈칸 = 식으로 계산)<NumInput min={1} max={100} step={1} value={manualOut} placeholder={pRaw != null ? `계산값 ${Math.min(condition.output_value, Math.max(minOut, pRaw)).toFixed(1)}` : ''} onChange={e => setManualOut(e.target.value === '' ? '' : Math.max(1, Math.min(100, Number(e.target.value))))} /></label>
+          <label>감속 목표 속도 직접 지정 (m/s, 시험용)<NumInput min={0.02} max={2} step={0.01} value={manualV} placeholder={vtCalc != null ? `계산값 ${vtCalc.toFixed(3)}` : ''} onChange={e => setManualV(e.target.value === '' ? '' : Math.max(0.02, Math.min(2, Number(e.target.value))))} /></label>
+          <label className="exp-check"><input type="checkbox" checked={exactDuty} onChange={e => setExactDuty(e.target.checked)} /> 감속 출력을 정확한 듀티로 명령 (라이브러리 PWM은 2단위로 잘림)</label>
           <label>출발 전 대기 (s, 측정 누른 뒤)<NumInput min={0} max={60} step={1} value={startDelay} onChange={e => setStartDelay(Math.max(0, Math.min(60, Number(e.target.value) || 0)))} /></label>
           <label>회차 사이 쉬는 시간 (s)<NumInput min={0.3} max={10} step={0.5} value={restS} onChange={e => setRestS(Math.max(0.3, Math.min(10, Number(e.target.value) || 3)))} /></label>
           <label>쓸 관계식<select value={settings.model_id ?? 'auto'} onChange={e => void ctx.patchSettings({ model_id: e.target.value })}>
@@ -198,6 +213,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="button-row"><button className="secondary" onClick={() => setCamOpen(!camOpen)}><Camera size={14} /> 카메라 보정 {camOpen ? '닫기' : '열기'}</button></div>
       {(camOpen || ((trigger === 'camera' || trigger === 'camera_distance') && !visionOk)) && <VisionCal ctx={ctx} />}
       {problem && <p className="diagnostic-error">{problem}</p>}
+      {(() => { const outs = (data?.groups ?? []).filter(g => g.bump_id === bump && g.output_mode === condition.output_mode).map(g => g.output_value); const lo = outs.length ? Math.min(...outs) : null;
+        return pSlow != null && lo != null && pSlow < lo - 0.5 ? <p className="diagnostic-error">감속 출력 {pSlow.toFixed(1)}은 측정한 범위({lo} 이상) 밖이라 속도식을 연장해 쓴 값입니다. 실제 속도가 다를 수 있으니 이 출력으로 몇 번 일반 측정해 속도식을 보강하세요.</p> : null; })()}
       <div className="button-row"><button className="primary" disabled={!!problem || !ctx.canAutoRun} onClick={() => void runSlow()}><Play size={15} /> 감속 제어 측정 ({repeats}회)</button>
         <button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void ctx.stopNow()}><Square size={14} /> 정지</button>
         {ctx.auto && ctx.busy && <span className="exp-hint">{ctx.auto.message}</span>}</div>

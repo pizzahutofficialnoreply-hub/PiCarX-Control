@@ -188,6 +188,8 @@ class SlowdownRequest(BaseModel):
     resume: bool = Field(default=True, description="방지턱을 다 넘으면 원래 출력으로 다시 가속")
     lead_cm: float = Field(default=30.0, ge=5, le=150, description="distance_auto: 지난 회차의 '앞바퀴 충격 때 벽까지 거리'보다 이만큼 먼저 감속")
     output: float | None = Field(default=None, ge=1, le=100, description="시험용: 감속 출력을 직접 지정(비우면 관계식으로 계산)")
+    target_speed: float | None = Field(default=None, gt=0.01, le=2, description="시험용: 감속 목표 속도(m/s)를 직접 지정 → 속도식으로 출력 환산")
+    exact_duty: bool = Field(default=True, description="감속 출력을 라이브러리 PWM(2단위로 잘림) 대신 같은 값의 듀티(PWM/2+50, 소수점까지)로 직접 명령")
 
 
 AutoRunRequest.model_rebuild()
@@ -903,6 +905,10 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
           if guided is not None and guided.mode == "lost" and decel_at is None:
               k = min(k, 0.75)   # 테이프를 찾는 동안은 조금 천천히(방지턱을 이미 지난 뒤라 측정에는 영향 없음)
           cmd_mode, cmd_out = mode, out
+          if slowdown and slowed_at is not None and slowdown.get("exact_duty") and mode == "pwm":
+              # 라이브러리 PWM은 듀티 = int(PWM/2) + 50 이라 PWM 2단위로 잘립니다(82.3 → 91%). 같은 식을 소수점까지 계산해
+              # 듀티로 직접 명령(82.3 → 91.15%)해 감속 출력을 정확히 냅니다.
+              cmd_mode, cmd_out = "duty", effective_duty(mode, out)
           if k < 0.999:
               cmd_mode, cmd_out = "duty", max(0.0, effective_duty(mode, out) * k)
           if not await ctl.experiment_drive(cmd_mode, cmd_out, generation, direction, steer):
@@ -1065,6 +1071,11 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
         target_v = v_front
     need = v0 > target_v
     out_slow, clipped = out_for(target_v) if need else (cond.output_value, False)
+    if req.output is None and req.target_speed is not None:
+        o = mf.output_from_speed(models, bump, cond.output_mode, req.target_speed, m_g)
+        if o is None:
+            raise RuntimeError("목표 속도를 출력으로 바꾸지 못했습니다(속도식 없음).")
+        req = req.model_copy(update={"output": max(1.0, min(100.0, o))})
     manual = req.output is not None
     if manual:
         # 시험용으로 감속 출력을 직접 넣은 경우: 그 출력으로 줄이고, 목표 속도는 속도식으로 환산해 기록
@@ -1091,6 +1102,9 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
             "pred_delta_target_g": round(mf.predict(model, target_v, mk), 4),
             "needed": need or bool(stages), "output": round(out_slow, 1) if (need or stages) else None, "output_initial": cond.output_value,
             "output_clipped": clipped, "staged": stages, "resume": req.resume, "manual_output": manual,
+            "target_speed_manual": req.target_speed, "exact_duty": req.exact_duty and cond.output_mode == "pwm",
+            "duty_initial": round(effective_duty(cond.output_mode, cond.output_value), 2),
+            "duty_slow": round(effective_duty(cond.output_mode, out_slow), 2) if (need or stages) else None,
             "ratio": round(target_v / v0, 4) if v0 else None}
 
 
