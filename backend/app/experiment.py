@@ -1590,6 +1590,7 @@ async def runs_series(ids: str, before: float = 0.15, after: float = 0.4, points
                     "rear_t_s": None if a.get("rear_t_s") is None or a.get("front_t_s") is None else round(a["rear_t_s"] - a["front_t_s"], 4),
                     "peak_g": a.get("peak_g"), "front_g": a.get("front_g"), "rear_g": a.get("rear_g"),
                     "peak_rel_s": None if a.get("peak_t_s") is None else round(a["peak_t_s"] - t0, 4),
+                    "events_rel_s": {e["kind"]: round(e["peak_t_s"] - t0, 4) for e in (a.get("events") or []) if e.get("peak_t_s") is not None and e.get("kind")},
                     "speed_mps": a.get("speed_mps"), "bump_detected": a.get("bump_detected"),
                     "pair_source": a.get("pair_source"), "excluded": run.get("excluded"),
                     "t": sub["t_s"], "g": sub["vertical_g"], **({"raw": sub["raw_g"]} if "raw_g" in sub else {})})

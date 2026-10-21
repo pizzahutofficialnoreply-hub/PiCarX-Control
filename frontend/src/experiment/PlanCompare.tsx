@@ -7,7 +7,7 @@ import { MASS_COLORS, XYChart, type XYSeries } from '../components/ExperimentCha
 export type CellKey = { bump_id: string; added_mass_g: number; output_value: number };
 export const cellId = (c: CellKey) => `${c.bump_id}|${c.added_mass_g}|${c.output_value}`;
 
-type Trace = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; bump_detected: boolean | null; aligned_on?: 'front' | 'peak'; peak_g: number | null; peak_rel_s?: number | null; speed_mps: number | null };
+type Trace = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; bump_detected: boolean | null; aligned_on?: 'front' | 'peak'; peak_g: number | null; peak_rel_s?: number | null; events_rel_s?: Record<string, number>; speed_mps: number | null };
 type Props = {
   cells: CellKey[]; runs: RunSummary[]; settings: ExperimentSettings; aLimit: number | null;
   request: (path: string, options?: RequestInit & { timeoutMs?: number }) => Promise<any>;
@@ -41,6 +41,18 @@ function outlierFlags(values: number[], method: string): boolean[] {
   }
   return out.every(Boolean) ? values.map(() => false) : out;
 }
+const EVENT_ORDER = ['FU', 'FD', 'RU', 'RD'];
+const eventTimes = (s: { events_rel_s?: Record<string, number> }) => {
+  const e = s.events_rel_s ?? {};
+  const ts = EVENT_ORDER.map(k => e[k]);
+  return ts.every(x => typeof x === 'number') && ts.every((x, i) => i === 0 || x > ts[i - 1]) ? ts as number[] : null;
+};
+// 구간별 시간 늘이기·줄이기: 이 회차의 네 순간(src)이 기준 시각(dst)에 오도록 시간축을 조각마다 선형으로 옮김
+function warp(t: number, src: number[], dst: number[]): number {
+  if (t <= src[0]) return dst[0] + (t - src[0]);
+  for (let i = 1; i < src.length; i++) if (t <= src[i]) return dst[i - 1] + (t - src[i - 1]) * (dst[i] - dst[i - 1]) / (src[i] - src[i - 1]);
+  return dst[dst.length - 1] + (t - src[src.length - 1]);
+}
 const mean = (xs: number[]) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
 const sd = (xs: number[]) => { const m = mean(xs); return m == null || xs.length < 2 ? null : Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1)); };
 
@@ -55,7 +67,7 @@ function interp(t: number[], g: number[], x: number): number | null {
 export default function PlanCompare({ cells, runs, settings, aLimit, request, onClear, onRemove }: Props) {
   const [show, setShow] = useState<'mean' | 'all'>(() => { try { return localStorage.getItem('picarx-compare-show') === 'all' ? 'all' : 'mean'; } catch { return 'mean'; } });
   const [by, setBy] = useState<'speed' | 'mass'>(() => { try { return localStorage.getItem('picarx-compare-by') === 'mass' ? 'mass' : 'speed'; } catch { return 'speed'; } });
-  const [align, setAlign] = useState<'peak' | 'front'>(() => { try { return localStorage.getItem('picarx-compare-align') === 'front' ? 'front' : 'peak'; } catch { return 'peak'; } });
+  const [align, setAlign] = useState<'events' | 'peak' | 'front'>(() => { try { const v = localStorage.getItem('picarx-compare-align'); return v === 'front' || v === 'peak' ? v : 'events'; } catch { return 'events'; } });
   const [traces, setTraces] = useState<Trace[]>([]);
   const [loading, setLoading] = useState(false);
   useEffect(() => { try { localStorage.setItem('picarx-compare-show', show); localStorage.setItem('picarx-compare-by', by); localStorage.setItem('picarx-compare-align', align); } catch { /* 무시 */ } }, [show, by, align]);
@@ -100,12 +112,21 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
     s.g.forEach((v, i) => { if (v > s.g[k]) k = i; });
     return s.g.length ? { ...s, peak_rel_s: s.t[k], peak_g: s.peak_g ?? s.g[k] } : s;
   });
-  const good = withPeak.filter(s => s.bump_detected !== false && s.aligned_on === 'front' && (align === 'front' || s.peak_rel_s != null))
+  const good = withPeak.filter(s => s.bump_detected !== false && s.aligned_on === 'front' && (align === 'front' || (align === 'peak' ? s.peak_rel_s != null : eventTimes(s) != null)))
     .map(s => align === 'peak' ? { ...s, t: s.t.map(x => Number((x - (s.peak_rel_s as number)).toFixed(4))), peak_rel_s: 0 } : s);
+  // 네 순간 맞춤: 조건마다 네 순간의 평균 시각을 구하고, 각 회차를 그 시각에 맞춰 늘이고 줄임
+  const warpCond = (list: Trace[]): Trace[] => {
+    const evs = list.map(eventTimes).filter((x): x is number[] => x != null);
+    if (!evs.length) return list;
+    const dst = EVENT_ORDER.map((_, i) => evs.reduce((s, e) => s + e[i], 0) / evs.length);
+    return list.map(s => { const src = eventTimes(s); if (!src) return s;
+      return { ...s, t: s.t.map(x => Number(warp(x, src, dst).toFixed(4))), peak_rel_s: s.peak_rel_s != null ? warp(s.peak_rel_s, src, dst) : s.peak_rel_s }; });
+  };
   const series: XYSeries[] = [];
   const sorted = [...cells].sort((a, b) => by === 'speed' ? a.output_value - b.output_value || a.added_mass_g - b.added_mass_g : a.added_mass_g - b.added_mass_g || a.output_value - b.output_value);
   for (const c of sorted) {
-    const all = good.filter(s => keyOfRun(s.condition) && cellId(keyOfRun(s.condition) as CellKey) === cellId(c));
+    const all0 = good.filter(s => keyOfRun(s.condition) && cellId(keyOfRun(s.condition) as CellKey) === cellId(c));
+    const all = align === 'events' ? warpCond(all0) : all0;
     if (!all.length) continue;
     const flags = outlierFlags(all.map(s => (s.peak_g ?? 1) - 1), method);
     const mine = all.filter((_, i) => !flags[i]);
@@ -148,17 +169,17 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
   return <div className="exp-compare">
     <div className="exp-compare-bar">
       <div className="segmented"><button type="button" className={show === 'mean' ? 'selected' : ''} onClick={() => setShow('mean')}>평균값</button><button type="button" className={show === 'all' ? 'selected' : ''} onClick={() => setShow('all')}>모든 값</button></div>
-      <div className="segmented"><button type="button" className={align === 'peak' ? 'selected' : ''} onClick={() => setAlign('peak')}>최댓값에 맞춤</button><button type="button" className={align === 'front' ? 'selected' : ''} onClick={() => setAlign('front')}>앞바퀴에 맞춤</button></div>
+      <div className="segmented"><button type="button" className={align === 'events' ? 'selected' : ''} onClick={() => setAlign('events')}>네 순간 맞춤</button><button type="button" className={align === 'peak' ? 'selected' : ''} onClick={() => setAlign('peak')}>최댓값에 맞춤</button><button type="button" className={align === 'front' ? 'selected' : ''} onClick={() => setAlign('front')}>앞바퀴에 맞춤</button></div>
       <div className="segmented"><button type="button" className={by === 'speed' ? 'selected' : ''} onClick={() => setBy('speed')}>속도(출력)별 비교</button><button type="button" className={by === 'mass' ? 'selected' : ''} onClick={() => setBy('mass')}>질량별 비교</button></div>
       <div className="exp-compare-chips">{sorted.map(c => <span key={cellId(c)} className="exp-chip" style={{ borderColor: colorOf(c) }}><i style={{ background: colorOf(c) }} />{label(c)}<button type="button" aria-label="선택 빼기" onClick={() => onRemove(c)}><X size={11} /></button></span>)}</div>
       <button type="button" className="secondary" onClick={onClear}>선택 모두 해제</button>
     </div>
     {loading ? <div className="empty-chart">불러오는 중…</div> : series.length === 0 ? <div className="empty-chart">고른 조건에 방지턱 통과가 확인된 시행이 없습니다.</div> :
       <XYChart name={`compare_${show}_${by}`} title={`${show === 'mean' ? '조건별 평균 충격 파형' : '조건별 모든 회차 충격 파형'} (${by === 'speed' ? '색 = 출력, 선 모양 = 질량' : '색 = 질량, 선 모양 = 출력'})`}
-        xLabel={align === 'peak' ? '각 회차 최댓값 기준 시간 (s)' : '앞바퀴 기준 시간 (s)'} yLabel="위아래 가속도 (g, 정지 = 1)" series={series} legendMax={show === 'mean' ? 12 : 0}
+        xLabel={align === 'peak' ? '각 회차 최댓값 기준 시간 (s)' : align === 'events' ? '앞바퀴 기준 시간 (s, 네 순간을 평균 시각에 맞춤)' : '앞바퀴 기준 시간 (s)'} yLabel="위아래 가속도 (g, 정지 = 1)" series={series} legendMax={show === 'mean' ? 12 : 0}
         hLines={[{ y: 1, label: '정지 1 g', color: '#9aa3ad' }, ...(aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : [])]}
-        vLines={[{ x: 0, label: align === 'peak' ? '최댓값' : '앞바퀴', color: '#d0782a' }]}
-        caption={show === 'mean' ? (align === 'peak' ? `선 = 각 회차의 최댓값 순간을 0초로 맞춰 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 최댓값입니다. 피크끼리 겹쳐 평균하므로 높이가 낱개 그래프와 비슷하게 유지됩니다. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : '선 = 각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 실제 최댓값입니다. 가장 큰 충격(내려올 때)은 회차마다 생기는 시각이 조금씩 달라 평균하면 서로 상쇄되어 선이 낮게 보이므로, 충격의 크기는 점으로 판단하세요. 앞바퀴 내림은 약 0.3~0.5초, 뒷바퀴 내림은 약 0.7~1.2초에 나타납니다.') : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다(점 = 각 회차의 최댓값). 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
+        vLines={[{ x: 0, label: align === 'peak' ? '최댓값' : '앞바퀴 오름', color: '#d0782a' }]}
+        caption={show === 'mean' ? (align === 'events' ? `회차마다 앞바퀴 오름·내림, 뒷바퀴 오름·내림의 네 순간이 생기는 시각이 조금씩 다르므로, 각 회차의 시간축을 구간별로 늘이고 줄여 네 순간을 조건별 평균 시각에 맞춘 뒤 평균했습니다. 그래서 네 피크가 모두 살아 낱개 그래프와 비슷한 모양이 됩니다. 점 = 각 회차의 최댓값. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : align === 'peak' ? `선 = 각 회차의 최댓값 순간을 0초로 맞춰 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 최댓값입니다. 피크끼리 겹쳐 평균하므로 높이가 낱개 그래프와 비슷하게 유지됩니다. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : '선 = 각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 실제 최댓값입니다. 가장 큰 충격(내려올 때)은 회차마다 생기는 시각이 조금씩 달라 평균하면 서로 상쇄되어 선이 낮게 보이므로, 충격의 크기는 점으로 판단하세요. 앞바퀴 내림은 약 0.3~0.5초, 뒷바퀴 내림은 약 0.7~1.2초에 나타납니다.') : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다(점 = 각 회차의 최댓값). 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
     {summarySeries.length > 0 && <XYChart name={`compare_summary_${show}_${by}`} title={by === 'speed' ? '통과 속도에 따른 충격 (선택 조건)' : '총 질량에 따른 충격 (선택 조건)'}
       xLabel={by === 'speed' ? '방지턱 통과 속도 v (m/s)' : '차 전체 질량 (g)'} yLabel="평소보다 더 받은 가속도 Δa (g)" series={summarySeries} yZero
       hLines={aLimit ? [{ y: aLimit - 1, label: `허용 기준 +${(aLimit - 1).toFixed(2)} g`, color: '#c33' }] : undefined}
