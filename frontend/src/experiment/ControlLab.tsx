@@ -94,10 +94,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     ctx.setMessage(`보고서와 같은 방식으로 맞췄습니다: ${powerModel ? powerModel.formula : '거듭제곱 식'} · 기준 그대로(여유율 1.0).`);
   }
   function stopReason(r: typeof slowRuns[number]): string {
-    if (r.aborted) return '정지 버튼';
-    if (r.stopped_by_wall) return '벽 앞 정지';
-    if (r.bump_passed_s != null) return '다 넘고 정지';
-    return '시간 끝';
+    const t = r.elapsed_s != null ? ` (${r.elapsed_s.toFixed(1)}s${r.slowdown?.drive_s ? ` / ${r.slowdown.drive_s}s` : ''})` : '';
+    if (r.aborted) return '정지 버튼' + t;
+    const why = r.end_reason ?? (r.stopped_by_wall ? 'wall' : r.bump_passed_s != null ? 'bump_passed' : 'time');
+    return ({ wall: '벽 앞 자동 정지(초음파)', bump_passed: '다 넘고 정지', time: '주행 시간 끝', line_lost: '유도선 놓침', mark: '정지선', cross: '정지선' } as Record<string, string>)[why] + t;
   }
 
   async function runSlow() {

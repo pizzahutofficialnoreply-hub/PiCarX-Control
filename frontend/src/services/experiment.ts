@@ -155,7 +155,7 @@ export type RunSummary = {
   battery_v?: number | null; steering_source?: string | null; data_source?: string | null; line_lost?: boolean | null; kick_ms?: number | null;
   peak_override?: { front_t_s: number; rear_t_s: number } | null;
   steer_mean_late?: number | null; heading_ff_learned?: number | null;
-  slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null; pre_roll_s?: number | null;
+  slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null; pre_roll_s?: number | null; end_reason?: string | null;
   /** 정지선 코스로 잰 회차: 구간(A→B/B→A), 정지선 인식 시각 */
   course?: { leg?: string | null; end_mode?: string | null; accel?: string | null; detected?: boolean | null; detect_s?: number | null } | null;
   /** 유도선+자이로 조향 요약: 방지턱 위 방향 유지 시간, 유도선 복귀 시간, 최대 방향 차이 */

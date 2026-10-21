@@ -458,7 +458,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
                                     "slowdown", "distance_summary", "stopped_by_wall", "course", "guided",
-                                    "camera_line", "steer_ff_learned", "pre_roll_s")}
+                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -790,6 +790,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     slowed_by: str | None = None
     stopped_by_wall = False
     wall_hits, wall_last = 0, -1
+    tilt_base: tuple[float, float] | None = None
     if slowdown and slowdown.get("trigger") == "tape" and slow_tape is not None:
         # 방지턱 앞에 붙인 '감속 표시 테이프'를 정지선과 같은 방식(수 ms 간격, 2번 연속)으로 찾습니다.
         async def poll_slow() -> None:
@@ -829,7 +830,15 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               if not ok and decel_at is None:
                   line_lost = True
                   break
-          if bump_watch is not None and passed_at is None and bump_watch.update(mpu6050_service.tilt_deg(), now - start):
+          # 감속 회차는 감속을 시작하고 0.3초 뒤부터 '다 넘음'을 봅니다. 출발할 때 차가 뒤로 젖혔다 돌아오는 기울기
+          # (+ → − → 수평)를 방지턱으로 착각해 출발 직후 멈추던 문제를 막기 위해서입니다.
+          watch_armed = slowdown is None or (slowed_at is not None and now - slowed_at >= 0.3)
+          tl_now = mpu6050_service.tilt_deg() if bump_watch is not None else None
+          if slowdown is not None and watch_armed and tl_now is not None and tilt_base is None:
+              tilt_base = tl_now   # 지켜보기 시작한 순간의 기울기를 0으로(자이로 적분이 조금 흘러도 오판 안 하게)
+          if tilt_base is not None and tl_now is not None:
+              tl_now = (tl_now[0] - tilt_base[0], tl_now[1] - tilt_base[1])
+          if bump_watch is not None and watch_armed and passed_at is None and bump_watch.update(tl_now, now - start):
               passed_at = now
               if stop_on_pass:
                   end = min(end, now + after_bump_s)
@@ -924,6 +933,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "stage_log": stage_log,
             "camera_seen_s": round(camera.seen_at - start, 3) if camera is not None and camera.seen_at is not None else None,
             "stopped_by_wall": stopped_by_wall,
+            "end_reason": "wall" if stopped_by_wall else "line_lost" if line_lost else "mark" if stopped_on_mark
+                          else "bump_passed" if passed_at is not None and stop_on_pass else "cross" if decel_at is not None else "time",
             "cross_detected": decel_at is not None if cross is not None else None,
             "cross_detect_s": round(decel_at - start, 3) if decel_at is not None else None,
             "cross_tilt_blocked": getattr(cross, "blocked", None),
