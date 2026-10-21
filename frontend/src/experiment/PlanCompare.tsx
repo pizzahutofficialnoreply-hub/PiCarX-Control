@@ -7,7 +7,7 @@ import { MASS_COLORS, XYChart, type XYSeries } from '../components/ExperimentCha
 export type CellKey = { bump_id: string; added_mass_g: number; output_value: number };
 export const cellId = (c: CellKey) => `${c.bump_id}|${c.added_mass_g}|${c.output_value}`;
 
-type Trace = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; bump_detected: boolean | null; aligned_on?: 'front' | 'peak'; peak_g: number | null; speed_mps: number | null };
+type Trace = { id: string; condition: RunSummary['condition']; t: number[]; g: number[]; bump_detected: boolean | null; aligned_on?: 'front' | 'peak'; peak_g: number | null; peak_rel_s?: number | null; speed_mps: number | null };
 type Props = {
   cells: CellKey[]; runs: RunSummary[]; settings: ExperimentSettings; aLimit: number | null;
   request: (path: string, options?: RequestInit & { timeoutMs?: number }) => Promise<any>;
@@ -17,7 +17,9 @@ type Props = {
 const EXTRA = ['#1f9e9e', '#8c6d1f', '#c2185b', '#455a64'];
 const COLORS = [...MASS_COLORS, ...EXTRA];
 const DASHES = [undefined, '6 3', '2 3', '8 3 2 3'];
-const GRID = Array.from({ length: Math.round((0.4 + 0.15) / 0.002) + 1 }, (_, i) => Number((-0.15 + i * 0.002).toFixed(4)));
+// 앞바퀴 기준 −0.2 ~ 1.4초: 앞바퀴 내림(0.3~0.5초)과 뒷바퀴 오름·내림(0.7~1.2초)까지 모두 보이도록
+const BEFORE = 0.2, AFTER = 1.4;
+const GRID = Array.from({ length: Math.round((AFTER + BEFORE) / 0.002) + 1 }, (_, i) => Number((-BEFORE + i * 0.002).toFixed(4)));
 const mean = (xs: number[]) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
 const sd = (xs: number[]) => { const m = mean(xs); return m == null || xs.length < 2 ? null : Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1)); };
 
@@ -49,7 +51,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
     if (!ids) { setTraces([]); return; }
     let cancelled = false;
     setLoading(true);
-    request(`/api/experiment/series?ids=${ids}&before=0.15&after=0.4&points=280`, { timeoutMs: 30000 })
+    request(`/api/experiment/series?ids=${ids}&before=${BEFORE}&after=${AFTER}&points=900`, { timeoutMs: 30000 })
       .then(r => { if (!cancelled) setTraces(r.series as Trace[]); })
       .catch(() => { if (!cancelled) setTraces([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -79,6 +81,9 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
       const pts = GRID.map(x => { const vals = mine.map(s => interp(s.t, s.g, x)).filter((v): v is number => v != null); return vals.length >= Math.max(1, Math.ceil(mine.length / 2)) ? { x, y: mean(vals) as number } : null; }).filter((p): p is { x: number; y: number } => p != null);
       series.push({ name: `${label(c)} (평균 n=${mine.length})`, color: colorOf(c), dash: dashOf(c), line: true, dots: false, width: 2, points: pts });
     }
+    // 각 회차의 실제 최댓값(점): 평균 파형은 회차마다 다른 시각의 피크가 서로 상쇄돼 낮아지므로, 진짜 크기는 점으로 보여 줌
+    const peaks = mine.filter(s => s.peak_g != null && s.peak_rel_s != null).map(s => ({ x: s.peak_rel_s as number, y: s.peak_g as number }));
+    if (peaks.length) series.push({ name: `${label(c)} 회차별 최댓값`, color: colorOf(c), line: false, dots: true, points: peaks });
   }
 
   // 조건별 요약값(평균 ± 표준편차)
@@ -116,7 +121,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
         xLabel="앞바퀴 기준 시간 (s)" yLabel="위아래 가속도 (g, 정지 = 1)" series={series} legendMax={show === 'mean' ? 12 : 0}
         hLines={[{ y: 1, label: '정지 1 g', color: '#9aa3ad' }, ...(aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : [])]}
         vLines={[{ x: 0, label: '앞바퀴', color: '#d0782a' }]}
-        caption={show === 'mean' ? '각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤, 같은 시각끼리 평균 낸 파형입니다. 평균하면 회차마다 다른 주행 진동은 줄고 방지턱 충격 모양만 남습니다. 그래프 위에 마우스를 올리면 그 시각의 각 조건 값이 나옵니다.' : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다. 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
+        caption={show === 'mean' ? '선 = 각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 실제 최댓값입니다. 가장 큰 충격(내려올 때)은 회차마다 생기는 시각이 조금씩 달라 평균하면 서로 상쇄되어 선이 낮게 보이므로, 충격의 크기는 점으로 판단하세요. 앞바퀴 내림은 약 0.3~0.5초, 뒷바퀴 내림은 약 0.7~1.2초에 나타납니다.' : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다(점 = 각 회차의 최댓값). 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
     {summarySeries.length > 0 && <XYChart name={`compare_summary_${show}_${by}`} title={by === 'speed' ? '통과 속도에 따른 충격 (선택 조건)' : '총 질량에 따른 충격 (선택 조건)'}
       xLabel={by === 'speed' ? '방지턱 통과 속도 v (m/s)' : '차 전체 질량 (g)'} yLabel="평소보다 더 받은 가속도 Δa (g)" series={summarySeries} yZero
       hLines={aLimit ? [{ y: aLimit - 1, label: `허용 기준 +${(aLimit - 1).toFixed(2)} g`, color: '#c33' }] : undefined}
