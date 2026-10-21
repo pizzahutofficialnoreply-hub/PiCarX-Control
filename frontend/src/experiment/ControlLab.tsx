@@ -94,8 +94,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
 
   const usRuns = (data?.runs ?? []).filter(r => r.distance_summary && r.condition.bump_id === bump && !r.excluded);
   const found = usRuns.filter(r => r.distance_summary?.us_vs_imu_s != null && Math.abs(r.distance_summary.us_vs_imu_s) <= 0.3).length;
-  const cmpPts = usRuns.filter(r => r.analysis.speed_mps && r.distance_summary?.bump_speed_mps).map(r => ({ x: r.analysis.speed_mps as number, y: r.distance_summary?.bump_speed_mps as number, label: `${r.condition.output_value}` }));
-  const dropPts = usRuns.filter(r => r.distance_summary?.approach_speed_mps && r.distance_summary?.drop_pct != null && !r.slowdown).map(r => ({ x: r.distance_summary?.approach_speed_mps as number, y: r.distance_summary?.drop_pct as number }));
+  // 초음파 속력이 물리적으로 말이 안 되는 회차(음수·0 근처·2 m/s 초과 = 벽이 없거나 반사가 흔들림)는 그래프에서 뺌
+  const usOk = (v: number | null | undefined) => v != null && v > 0.03 && v < 2;
+  const cmpPts = usRuns.filter(r => r.analysis.speed_mps && usOk(r.distance_summary?.bump_speed_mps)).map(r => ({ x: r.analysis.speed_mps as number, y: r.distance_summary?.bump_speed_mps as number, label: `${r.condition.output_value}` }));
+  const dropPts = usRuns.filter(r => usOk(r.distance_summary?.approach_speed_mps) && r.distance_summary?.drop_pct != null && Math.abs(r.distance_summary?.drop_pct as number) <= 100 && !r.slowdown).map(r => ({ x: r.distance_summary?.approach_speed_mps as number, y: r.distance_summary?.drop_pct as number }));
   const errs = cmpPts.map(p => Math.abs(p.y / p.x - 1) * 100);
 
   if (part === 'control') return <section className="card experiment-card">
@@ -192,7 +194,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         <p className="exp-hint">초음파를 기록한 {usRuns.length}회 중 속력 골을 MPU 충격 ±0.3초 안에서 찾은 회차 <b>{found}</b>회 ({(found / usRuns.length * 100).toFixed(0)}%){errs.length ? <> · 바퀴 간격 속도와 초음파 속력 차이 평균 <b>{(errs.reduce((a, b) => a + b, 0) / errs.length).toFixed(1)}%</b></> : ''}.</p>
         <div className="exp-theory-grid">
           {cmpPts.length > 0 && <XYChart name={`us_vs_axle_${bump}`} title="두 방법으로 구한 통과 속도" xLabel="바퀴 간격으로 구한 속도 (m/s)" yLabel="초음파로 구한 속력 (m/s)" identity band={0.1}
-            series={[{ name: '회차', color: '#1f9e9e', points: cmpPts }]} caption="대각선 위에 있으면 두 방법이 같은 속도를 냅니다. 바퀴 간격 속도(Δt)를 검증하는 독립적인 방법입니다." />}
+            series={[{ name: '회차', color: '#1f9e9e', points: cmpPts }]} caption={`대각선 위에 있으면 두 방법이 같은 속도를 냅니다. 바퀴 간격 속도(Δt)를 검증하는 독립적인 방법입니다.${usRuns.length - cmpPts.length > 0 ? ` 초음파 값이 비정상(음수·0 근처·2 m/s 초과)인 ${usRuns.length - cmpPts.length}회는 뺐습니다 — 앞에 벽이 없거나 초음파가 흔들린 회차입니다.` : ''}`} />}
           {dropPts.length > 0 && <XYChart name={`us_drop_${bump}`} title="진입 속력과 방지턱에서 느려진 정도" xLabel="방지턱 직전 속력 (m/s)" yLabel="감소율 (%)" yZero
             series={[{ name: '회차', color: '#a04fa0', points: dropPts }]} caption="바퀴가 턱 모서리에 부딪히며 앞으로 가는 운동량 일부를 잃고, 차체를 들어 올리는 일도 해야 해서 잠깐 느려집니다. 모터가 계속 밀어 주므로 턱을 넘으면 다시 빨라집니다. 감소율이 클수록 바퀴가 턱에 세게 부딪힌 것입니다." />}
         </div>
