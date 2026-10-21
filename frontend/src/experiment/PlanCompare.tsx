@@ -68,6 +68,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
   const [show, setShow] = useState<'mean' | 'all'>(() => { try { return localStorage.getItem('picarx-compare-show') === 'all' ? 'all' : 'mean'; } catch { return 'mean'; } });
   const [by, setBy] = useState<'speed' | 'mass'>(() => { try { return localStorage.getItem('picarx-compare-by') === 'mass' ? 'mass' : 'speed'; } catch { return 'speed'; } });
   const [align, setAlign] = useState<'events' | 'peak' | 'front'>(() => { try { const v = localStorage.getItem('picarx-compare-align'); return v === 'front' || v === 'peak' ? v : 'events'; } catch { return 'events'; } });
+  const [showDots, setShowDots] = useState(false);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [loading, setLoading] = useState(false);
   useEffect(() => { try { localStorage.setItem('picarx-compare-show', show); localStorage.setItem('picarx-compare-by', by); localStorage.setItem('picarx-compare-align', align); } catch { /* 무시 */ } }, [show, by, align]);
@@ -138,7 +139,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
     }
     // 각 회차의 실제 최댓값(점): 평균 파형은 회차마다 다른 시각의 피크가 서로 상쇄돼 낮아지므로, 진짜 크기는 점으로 보여 줌
     const peaks = mine.filter(s => s.peak_g != null && s.peak_rel_s != null).map(s => ({ x: s.peak_rel_s as number, y: s.peak_g as number }));
-    if (peaks.length) series.push({ name: `${label(c)} 회차별 최댓값`, color: colorOf(c), line: false, dots: true, points: peaks });
+    if (peaks.length && showDots) series.push({ name: `${label(c)} 회차별 최댓값`, color: colorOf(c), line: false, dots: true, points: peaks });
   }
 
   // 조건별 요약값(평균 ± 표준편차)
@@ -172,6 +173,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
       <div className="segmented"><button type="button" className={align === 'events' ? 'selected' : ''} onClick={() => setAlign('events')}>네 순간 맞춤</button><button type="button" className={align === 'peak' ? 'selected' : ''} onClick={() => setAlign('peak')}>최댓값에 맞춤</button><button type="button" className={align === 'front' ? 'selected' : ''} onClick={() => setAlign('front')}>앞바퀴에 맞춤</button></div>
       <div className="segmented"><button type="button" className={by === 'speed' ? 'selected' : ''} onClick={() => setBy('speed')}>속도(출력)별 비교</button><button type="button" className={by === 'mass' ? 'selected' : ''} onClick={() => setBy('mass')}>질량별 비교</button></div>
       <div className="exp-compare-chips">{sorted.map(c => <span key={cellId(c)} className="exp-chip" style={{ borderColor: colorOf(c) }}><i style={{ background: colorOf(c) }} />{label(c)}<button type="button" aria-label="선택 빼기" onClick={() => onRemove(c)}><X size={11} /></button></span>)}</div>
+      <label className="exp-check"><input type="checkbox" checked={showDots} onChange={e => setShowDots(e.target.checked)} /> 회차별 최댓값 점 보기</label>
       <button type="button" className="secondary" onClick={onClear}>선택 모두 해제</button>
     </div>
     {loading ? <div className="empty-chart">불러오는 중…</div> : series.length === 0 ? <div className="empty-chart">고른 조건에 방지턱 통과가 확인된 시행이 없습니다.</div> :
@@ -179,7 +181,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
         xLabel={align === 'peak' ? '각 회차 최댓값 기준 시간 (s)' : align === 'events' ? '앞바퀴 기준 시간 (s, 네 순간을 평균 시각에 맞춤)' : '앞바퀴 기준 시간 (s)'} yLabel="위아래 가속도 (g, 정지 = 1)" series={series} legendMax={show === 'mean' ? 12 : 0}
         hLines={[{ y: 1, label: '정지 1 g', color: '#9aa3ad' }, ...(aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : [])]}
         vLines={[{ x: 0, label: align === 'peak' ? '최댓값' : '앞바퀴 오름', color: '#d0782a' }]}
-        caption={show === 'mean' ? (align === 'events' ? `회차마다 앞바퀴 오름·내림, 뒷바퀴 오름·내림의 네 순간이 생기는 시각이 조금씩 다르므로, 각 회차의 시간축을 구간별로 늘이고 줄여 네 순간을 조건별 평균 시각에 맞춘 뒤 평균했습니다. 그래서 네 피크가 모두 살아 낱개 그래프와 비슷한 모양이 됩니다. 점 = 각 회차의 최댓값. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : align === 'peak' ? `선 = 각 회차의 최댓값 순간을 0초로 맞춰 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 최댓값입니다. 피크끼리 겹쳐 평균하므로 높이가 낱개 그래프와 비슷하게 유지됩니다. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : '선 = 각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 실제 최댓값입니다. 가장 큰 충격(내려올 때)은 회차마다 생기는 시각이 조금씩 달라 평균하면 서로 상쇄되어 선이 낮게 보이므로, 충격의 크기는 점으로 판단하세요. 앞바퀴 내림은 약 0.3~0.5초, 뒷바퀴 내림은 약 0.7~1.2초에 나타납니다.') : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다(점 = 각 회차의 최댓값). 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
+        caption={show === 'mean' ? (align === 'events' ? `회차마다 앞바퀴 오름·내림, 뒷바퀴 오름·내림의 네 순간이 생기는 시각이 조금씩 다르므로, 각 회차의 시간축을 구간별로 늘이고 줄여 네 순간을 조건별 평균 시각에 맞춘 뒤 평균했습니다. 그래서 네 피크가 모두 살아 낱개 그래프와 비슷한 모양이 됩니다. ('회차별 최댓값 점 보기'를 켜면 각 회차의 최댓값이 점으로 나옵니다.) 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : align === 'peak' ? `선 = 각 회차의 최댓값 순간을 0초로 맞춰 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 최댓값입니다. 피크끼리 겹쳐 평균하므로 높이가 낱개 그래프와 비슷하게 유지됩니다. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : '선 = 각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 실제 최댓값입니다. 가장 큰 충격(내려올 때)은 회차마다 생기는 시각이 조금씩 달라 평균하면 서로 상쇄되어 선이 낮게 보이므로, 충격의 크기는 점으로 판단하세요. 앞바퀴 내림은 약 0.3~0.5초, 뒷바퀴 내림은 약 0.7~1.2초에 나타납니다.') : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다(점 = 각 회차의 최댓값). 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
     {summarySeries.length > 0 && <XYChart name={`compare_summary_${show}_${by}`} title={by === 'speed' ? '통과 속도에 따른 충격 (선택 조건)' : '총 질량에 따른 충격 (선택 조건)'}
       xLabel={by === 'speed' ? '방지턱 통과 속도 v (m/s)' : '차 전체 질량 (g)'} yLabel="평소보다 더 받은 가속도 Δa (g)" series={summarySeries} yZero
       hLines={aLimit ? [{ y: aLimit - 1, label: `허용 기준 +${(aLimit - 1).toFixed(2)} g`, color: '#c33' }] : undefined}
