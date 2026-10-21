@@ -7,6 +7,7 @@ import type { ExperimentContext } from './context';
 import NumInput from '../components/NumInput';
 import { usePersistentState } from '../services/persist';
 import HelpBox from '../components/HelpBox';
+import Projects from './Projects';
 
 type Check = { ok: boolean; text: string };
 type DataCheck = { mode: string; real_runs: number; simulated_runs: number; mean_sample_rate_hz: number | null; checks: Check[]; last_real_run: { id: string; created_at: string } | null };
@@ -205,6 +206,8 @@ export default function ToolsTab({ ctx }: { ctx: ExperimentContext }) {
         <div className="button-row"><button className="secondary" onClick={() => void saveDrive({ trim_forward: 1, trim_backward: 1 })}><RotateCcw size={14} /> 전진·후진 배율 1.0으로</button><span className="exp-hint">현재: {drive.mapping === 'duty' ? '직접 듀티' : '라이브러리'} · 전진 ×{drive.trim_forward} · 후진 ×{drive.trim_backward} · 예: {outputLabel('pwm', 100)} → 전진 {Math.round(100 * drive.trim_forward)} / 후진 {Math.round(100 * drive.trim_backward)}</span></div>
       </div>}
     </section>
+
+    <Projects ctx={ctx} />
 
     <section className="experiment-layout">
       <article className="card experiment-card">

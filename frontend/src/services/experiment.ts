@@ -208,6 +208,8 @@ export type AutoRunState = {
   state: 'idle' | 'pre_roll' | 'driving' | 'tail' | 'analyzing' | 'returning' | 'turning' | 'aligning' | 'rest' | 'done' | 'error' | 'aborted';
   message: string; run_id: string | null; phase_remaining_s: number | null; result: RunSummary | null;
   cycle?: number; cycles?: number; completed_run_ids?: string[]; heading_deg?: number | null;
+  live?: { t: number; output: number; mode: string; duty: number; base_output: number; slowed: boolean; slowed_by: string | null; slowed_at: number | null; stage: string;
+    passed: boolean; camera: [number, number] | null; camera_seen: boolean; distance_cm: number | null; seconds: number; ended?: boolean } | null;
 };
 
 export const EXPERIMENT_CONDITION_KEY = 'picarx-impact-experiment-condition-v2';

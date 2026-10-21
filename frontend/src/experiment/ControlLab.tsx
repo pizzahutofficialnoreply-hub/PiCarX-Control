@@ -1,5 +1,5 @@
 // 목표 2(관계식으로 정한 속도로 방지턱 앞에서 감속)와 초음파 거리·속력 분석.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Camera, Gauge, Play, Radar, Square } from 'lucide-react';
 import VisionCal from './VisionCal';
 import { EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type RunDetail } from '../services/experiment';
@@ -100,6 +100,20 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     return ({ wall: '벽 앞 자동 정지(초음파)', bump_passed: '다 넘고 정지', time: '주행 시간 끝', line_lost: '유도선 놓침', mark: '정지선', cross: '정지선' } as Record<string, string>)[why] + t;
   }
 
+  // 실시간 값: 측정 중 0.3초마다 서버에서 받은 '지금 낸 출력'. 끝난 뒤에도 마지막 값을 남겨 둠
+  const liveRef = useRef<NonNullable<typeof ctx.auto>['live']>(null);
+  if (ctx.auto?.live) liveRef.current = ctx.auto.live;
+  const live = ctx.auto?.live ?? liveRef.current;
+  function leadText(r: typeof slowRuns[number]): { text: string; bad: boolean } {
+    const s0 = r.slowdown;
+    if (!s0?.needed) return { text: '—', bad: false };
+    if (s0.slowed_at_s == null) return { text: r.simulated ? '—' : '감속 안 됨', bad: !r.simulated };
+    const f = r.analysis.front_t_s;
+    if (f == null) return { text: `${(s0.slowed_at_s - (r.pre_roll_s ?? 0)).toFixed(2)}s에 감속 (충격 못 찾음)`, bad: false };
+    const lead = f - s0.slowed_at_s;
+    return lead < 0 ? { text: `충격 ${(-lead).toFixed(2)}s 뒤 (늦음)`, bad: true } : { text: `충격 ${lead.toFixed(2)}s 전${lead < 0.3 ? ' (짧음)' : ''}`, bad: lead < 0.3 };
+  }
+
   async function runSlow() {
     await ctx.startAutoRun(undefined, {
       repeats, run_seconds: runS, ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
@@ -179,6 +193,14 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="button-row"><button className="primary" disabled={!!problem || !ctx.canAutoRun} onClick={() => void runSlow()}><Play size={15} /> 감속 제어 측정 ({repeats}회)</button>
         <button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void ctx.stopNow()}><Square size={14} /> 정지</button>
         {ctx.auto && ctx.busy && <span className="exp-hint">{ctx.auto.message}</span>}</div>
+      {live && <div className="exp-formula-box">
+        <div className={live.slowed ? 'warn' : ''}><small>{ctx.busy && !live.ended ? '지금 출력 (실시간)' : '마지막 주행의 끝 출력'} · {live.t.toFixed(1)} / {live.seconds.toFixed(1)} s</small>
+          <b style={{ fontSize: '1.8em' }}>{live.mode.toUpperCase()} {live.output.toFixed(1)}</b>
+          <span>실제 듀티 {live.duty.toFixed(0)}% · {live.slowed ? `감속 중 (${live.slowed_at?.toFixed(2)}s에 ${live.slowed_by === 'camera' ? '카메라' : live.slowed_by === 'distance' ? '초음파' : live.slowed_by === 'time' ? '시간' : live.slowed_by ?? ''}로 시작)` : `원래 출력 ${live.base_output}`}{live.stage === 'resume' ? ' · 다 넘어 다시 가속' : ''}</span>
+          <div style={{ height: 8, background: 'rgba(127,127,127,0.25)', borderRadius: 4, marginTop: 6 }}><div style={{ width: `${Math.min(100, live.duty)}%`, height: '100%', background: live.slowed ? '#a04fa0' : '#2f6fb0', borderRadius: 4, transition: 'width 0.2s' }} /></div></div>
+        <div><small>방지턱 감지</small><b>{live.camera ? `카메라 ${(live.camera[0] * 100).toFixed(0)}% / ${(live.camera[1] * 100).toFixed(0)}%` : '카메라 안 씀'}{live.camera_seen ? ' → 감지' : ''}</b>
+          <span>{live.distance_cm != null ? `초음파 벽까지 ${live.distance_cm.toFixed(0)} cm` : '초음파 값 없음'}{live.passed ? ' · 방지턱 다 넘음(기울기)' : ''}</span></div>
+      </div>}
       {slowRuns.length > 0 && <>
         <p className="exp-hint">감속 제어 {slowRuns.length}회 중 기준 이내 <b>{passN}/{judged}</b>회. 표에서 회차를 누르면 그 회차 그래프로 바뀝니다.</p>
         {showRun && (detail && detail.id === showRun.id ? <RunTraceChart key={showRun.id} series={detail.series} analysis={showRun.analysis} aLimit={aLimit}
@@ -199,10 +221,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           hLines={aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : []}
           vLines={vt != null ? [{ x: vt, label: '목표 속도', color: '#a04fa0' }] : []}
           caption="초록 점이 기준선 아래, 목표 속도 근처에 모이면 '관계식 → 속도 결정 → 감속 → 충격 감소'가 실험으로 확인된 것입니다. 점이 목표 속도보다 오른쪽이면 감속할 거리(시간)가 부족했던 것입니다." />
-        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시각</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th><th>멈춘 이유</th></tr></thead>
+        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시각</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th><th>감속 시점</th><th>멈춘 이유</th></tr></thead>
           <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={(s.pass === false ? 'over ' : '') + (r.id === showId ? 'selected' : '')} style={{ cursor: 'pointer' }} onClick={() => setPickId(r.id)}><td>{new Date(r.created_at).toLocaleTimeString()}</td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}</td>
             <td>{s.trigger === 'time' ? `${s.at_s}s` : s.trigger === 'distance' ? `${s.at_cm}cm${s.trigger_requested === 'distance_auto' ? '(자동)' : ''}` : s.trigger === 'camera' ? '카메라' : s.trigger === 'camera_distance' ? `카메라+초음파 ${s.at_cm}cm${s.slowed_by ? ` (${s.slowed_by === 'camera' ? '카메라' : '초음파'} 먼저)` : ''}` : '테이프'}{s.slowed_at_s == null && s.needed && !r.simulated ? ' (작동 안 함)' : ''}</td>
-            <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td><td>{stopReason(r)}</td></tr>; })}</tbody></table></div>
+            <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td><td style={leadText(r).bad ? { color: '#c62828', fontWeight: 600 } : undefined}>{leadText(r).text}</td><td>{stopReason(r)}</td></tr>; })}</tbody></table></div>
       </>}
     </section>;
 

@@ -234,6 +234,29 @@ class ExperimentApiTests(unittest.TestCase):
             saved = client.put("/api/experiment/settings", json=other).json()
             self.assertEqual((saved["heading_ff_forward"], saved["heading_ff_backward"], saved["jump_g"]), (2.5, -1.5, 0.25))
 
+    def test_project_save_moves_runs_and_open_copies_back(self):
+        from app.main import app
+        with TestClient(app) as client:
+            body = {"condition": {"trial": 1, "bump_id": "A", "base_mass_g": 1000, "added_mass_g": 0, "output_mode": "pwm", "output_value": 60},
+                    "pre_roll_s": 0.3, "run_seconds": 0.3, "tail_s": 0.1, "repeats": 2, "return_enabled": False}
+            self.assertEqual(client.post("/api/experiment/auto-run", json=body).status_code, 200)
+            self.assertEqual(self._wait(client)["state"], "done")
+            r = client.post("/api/experiment/projects", json={"title": "1차 실험", "date": "2026-10-21", "note": "PWM 60"})
+            self.assertEqual(r.status_code, 200, r.text)
+            pid = r.json()["project"]["id"]
+            self.assertEqual(r.json()["moved"], 2)
+            self.assertEqual(len(client.get("/api/experiment/runs").json()["runs"]), 0)
+            lst = client.get("/api/experiment/projects").json()["projects"]
+            self.assertEqual((lst[0]["title"], lst[0]["runs"], lst[0]["date"]), ("1차 실험", 2, "2026-10-21"))
+            self.assertEqual(client.post("/api/experiment/projects", json={"title": "빈"}).status_code, 409)
+            self.assertEqual(client.post(f"/api/experiment/projects/{pid}/open").json()["opened"], 2)
+            self.assertEqual(len(client.get("/api/experiment/runs").json()["runs"]), 2)
+            self.assertEqual(client.post(f"/api/experiment/projects/{pid}/open").status_code, 409)
+            self.assertEqual(client.patch(f"/api/experiment/projects/{pid}", json={"note": "수정"}).json()["project"]["note"], "수정")
+            self.assertEqual(client.get(f"/api/experiment/projects/{pid}/download.zip").status_code, 200)
+            self.assertEqual(client.delete(f"/api/experiment/projects/{pid}").status_code, 422)
+            self.assertEqual(client.delete(f"/api/experiment/projects/{pid}?confirm=삭제").status_code, 200)
+
     def test_mock_auto_run_saves_analyzes_and_exports(self):
         from app.main import app
         with TestClient(app) as client:

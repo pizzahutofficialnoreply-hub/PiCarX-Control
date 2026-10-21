@@ -588,6 +588,8 @@ class AutoRunner:
         self.cycle = 0
         self.cycles = 0
         self.completed: list[str] = []
+        # 주행 중 실시간 값(지금 낸 출력·감속 여부·카메라 점수·초음파 거리). 화면에서 0.3초마다 읽음
+        self.live: dict[str, Any] | None = None
 
     @property
     def busy(self) -> bool:
@@ -601,7 +603,8 @@ class AutoRunner:
         return {"state": self.state, "message": self.message, "run_id": self.run_id,
                 "phase_remaining_s": remaining, "result": self.last_result,
                 "cycle": self.cycle, "cycles": self.cycles, "completed_run_ids": list(self.completed),
-                "heading_deg": round(heading, 2) if heading is not None else None}
+                "heading_deg": round(heading, 2) if heading is not None else None,
+                "live": self.live if self.busy else None}
 
     def _phase(self, state: str, seconds: float | None, message: str) -> None:
         self.state, self.message = state, message
@@ -754,6 +757,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
     start = loop.time()
     end = start + seconds
     sign = 1.0 if direction == "forward" else -1.0
+    auto_runner.live = None
     worst = 0.0
     last = None
     line_lost = False
@@ -908,8 +912,17 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               row += [None if p is None else round(p, 2), guided.last.get("mode"), guided.last.get("ref_deg"), guided.last.get("y_est_mm"),
                       None if tl is None else round(max(abs(tl[0]), abs(tl[1])), 1)]
           log.append(row)
+          cs = camera.scores[-1] if camera is not None and camera.scores else None
+          auto_runner.live = {"t": round(now - start, 2), "output": round(out, 1), "mode": mode, "duty": round(effective_duty(mode, out) * k, 1),
+                              "base_output": value, "slowed": slowed_at is not None, "slowed_by": slowed_by,
+                              "slowed_at": round(slowed_at - start, 2) if slowed_at is not None else None, "stage": stage_now,
+                              "passed": passed_at is not None, "camera": [cs[1], cs[2]] if cs else None,
+                              "camera_seen": camera is not None and camera.seen_at is not None,
+                              "distance_cm": round(near, 1) if near is not None else None, "seconds": seconds}
           await asyncio.sleep(0.02 if line is not None else 0.05)  # 라인 추종은 50 Hz
     finally:
+        if auto_runner.live is not None:
+            auto_runner.live = {**auto_runner.live, "ended": True}
         if poller is not None:
             mark_seen.set()
             poller.cancel()
@@ -1924,6 +1937,141 @@ async def trash_restore(batch: str):
 async def trash_purge(batch: str):
     store.purge_batch(batch)
     return {"purged": batch}
+
+
+# --------------------------------------------------------------------------- 프로젝트 보관
+# 지금까지의 실험 기록(시행 원자료)과 설정 사본을 data/projects/<id>/ 로 옮겨 영구 보관하고, 메인은 빈 상태로 둡니다.
+# 초기화(휴지통)와 달리 제목·실험 날짜·메모를 붙여 두고, 나중에 '불러오기'로 메인에 복사해 다시 볼 수 있습니다.
+class ProjectSave(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    date: str = Field(default="", max_length=20, description="실험 날짜(YYYY-MM-DD)")
+    note: str = Field(default="", max_length=2000)
+    reset_settings: bool = Field(default=False, description="설정(기준·모델 선택 등)도 기본값으로. 센서 보정·방지턱 목록은 유지")
+
+
+class ProjectEdit(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=80)
+    date: str | None = Field(default=None, max_length=20)
+    note: str | None = Field(default=None, max_length=2000)
+
+
+PROJECT_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[a-f0-9]{4}$")
+
+
+def _projects_dir() -> Path:
+    return store.root / "projects"
+
+
+def _project_dir(pid: str) -> Path:
+    d = _projects_dir() / pid
+    if not PROJECT_ID.match(pid) or not d.is_dir():
+        raise HTTPException(404, "프로젝트를 찾을 수 없습니다.")
+    return d
+
+
+def _project_meta(d: Path) -> dict[str, Any]:
+    try:
+        meta = json.loads((d / "project.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {"id": d.name, "title": d.name}
+    runs = list((d / "experiments").glob("*.json")) if (d / "experiments").is_dir() else []
+    meta["runs"] = len(runs)
+    meta["size_kb"] = round(sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) / 1024)
+    return meta
+
+
+@router.get("/projects")
+async def projects_list():
+    root = _projects_dir()
+    items = [_project_meta(d) for d in sorted(root.iterdir(), reverse=True) if d.is_dir() and PROJECT_ID.match(d.name)] if root.is_dir() else []
+    return {"projects": items, "main_runs": len(store.list_runs())}
+
+
+@router.post("/projects")
+async def projects_save(body: ProjectSave):
+    """메인의 시행 기록을 새 프로젝트 폴더로 옮기고(설정은 사본), 메인은 비웁니다."""
+    if auto_runner.busy:
+        raise HTTPException(409, "측정 중에는 프로젝트로 저장할 수 없습니다.")
+    runs = store.list_runs()
+    if not runs:
+        raise HTTPException(409, "메인에 저장할 시행 기록이 없습니다.")
+    pid = datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+    d = _projects_dir() / pid
+    (d / "experiments").mkdir(parents=True, exist_ok=True)
+    settings = store.load_settings()
+    (d / "experiment_settings.json").write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+    meta = {"id": pid, "title": body.title.strip(), "date": body.date.strip() or datetime.now().strftime("%Y-%m-%d"), "note": body.note.strip(),
+            "saved_at": datetime.now(timezone.utc).isoformat(), "run_count": len(runs),
+            "first_run": runs[-1].get("created_at"), "last_run": runs[0].get("created_at")}
+    (d / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    moved = 0
+    for path in list(store.runs_dir.iterdir()):
+        if path.suffix in (".json", ".csv"):
+            shutil.move(str(path), str(d / "experiments" / path.name))
+            moved += path.suffix == ".json"
+    if body.reset_settings:
+        fresh = ExperimentSettings()
+        keep = {k: getattr(settings, k) for k in ("bumps", "base_mass_g", "line", "linecam", "vision", "heading_sign", "heading_ff_forward", "heading_ff_backward", "wheelbase_mm", "wheel_radius_mm") if hasattr(settings, k)}
+        store.save_settings(fresh.model_copy(update=keep))
+    record_event("experiment", "Project saved", details={"id": pid, "runs": moved})
+    return {"project": _project_meta(d), "moved": moved}
+
+
+@router.patch("/projects/{pid}")
+async def projects_edit(pid: str, body: ProjectEdit):
+    d = _project_dir(pid)
+    meta = _project_meta(d)
+    meta.update({k: v.strip() for k, v in body.model_dump().items() if v is not None})
+    meta.pop("runs", None); meta.pop("size_kb", None)
+    (d / "project.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"project": _project_meta(d)}
+
+
+@router.post("/projects/{pid}/open")
+async def projects_open(pid: str, settings_too: bool = False):
+    """보관한 프로젝트를 메인으로 복사해 다시 봅니다(프로젝트 폴더는 그대로 남음). 메인이 비어 있어야 합니다."""
+    d = _project_dir(pid)
+    if auto_runner.busy:
+        raise HTTPException(409, "측정 중에는 불러올 수 없습니다.")
+    if store.list_runs():
+        raise HTTPException(409, "메인에 시행 기록이 있습니다. 먼저 지금 기록을 프로젝트로 저장(또는 초기화)한 뒤 불러오세요.")
+    store.runs_dir.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for path in (d / "experiments").iterdir():
+        if path.suffix in (".json", ".csv"):
+            shutil.copy2(path, store.runs_dir / path.name)
+            n += path.suffix == ".json"
+    if settings_too and (d / "experiment_settings.json").exists():
+        try:
+            store.save_settings(ExperimentSettings.model_validate_json((d / "experiment_settings.json").read_text(encoding="utf-8")))
+        except ValueError:
+            pass
+    return {"opened": n}
+
+
+@router.get("/projects/{pid}/download.zip")
+async def projects_download(pid: str):
+    d = _project_dir(pid)
+
+    def build() -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in sorted(d.rglob("*")):
+                if f.is_file():
+                    z.write(f, str(f.relative_to(d)))
+        return buf.getvalue()
+    data = await asyncio.to_thread(build)
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="picarx_project_{pid}.zip"'})
+
+
+@router.delete("/projects/{pid}")
+async def projects_delete(pid: str, confirm: str = ""):
+    d = _project_dir(pid)
+    if confirm.strip() != "삭제":
+        raise HTTPException(422, "확인 문구 '삭제'를 입력하세요.")
+    shutil.rmtree(d, ignore_errors=True)
+    return {"deleted": pid}
 
 
 @router.get("/backup.zip")
