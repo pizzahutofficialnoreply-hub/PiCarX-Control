@@ -16,6 +16,7 @@ export default function Projects({ ctx }: { ctx: ExperimentContext }) {
   const [resetSettings, setResetSettings] = useState(false);
   const [edit, setEdit] = useState<Project | null>(null);
   const [saving, setSaving] = useState(false);
+  const [pick, setPick] = useState<'' | 'main' | 'validation' | 'pilot'>('');
 
   async function refresh() {
     try { const r = await ctx.request('/api/experiment/projects'); setList(r.projects); setMainRuns(r.main_runs); } catch (e) { ctx.fail(e); }
@@ -32,10 +33,10 @@ export default function Projects({ ctx }: { ctx: ExperimentContext }) {
       setTitle(''); setNote(''); await ctx.loadRuns(null); await refresh();
     } catch (e) { ctx.fail(e); } finally { setSaving(false); }
   }
-  async function open(p: Project, settingsToo: boolean) {
+  async function open(p: Project, settingsToo: boolean, merge: boolean) {
     try {
-      const r = await ctx.request(`/api/experiment/projects/${p.id}/open?settings_too=${settingsToo}`, { method: 'POST', timeoutMs: 60000 });
-      ctx.setMessage(`'${p.title}'의 시행 ${r.opened}개를 메인으로 불러왔습니다(보관본은 그대로 남아 있습니다).`);
+      const r = await ctx.request(`/api/experiment/projects/${p.id}/open?settings_too=${settingsToo}&merge=${merge}&purposes=${pick}`, { method: 'POST', timeoutMs: 60000 });
+      ctx.setMessage(`'${p.title}'의 ${pick ? { main: '본 실험', validation: '식 검증', pilot: '예비' }[pick] + ' ' : ''}시행 ${r.opened}개를 ${merge ? '지금 기록에 더했습니다' : '메인으로 불러왔습니다'}${r.skipped ? ` (이미 있는 ${r.skipped}개 건너뜀)` : ''}. 보관본은 그대로입니다.`);
       await ctx.loadRuns(null); await refresh();
     } catch (e) { ctx.fail(e); }
   }
@@ -69,11 +70,13 @@ export default function Projects({ ctx }: { ctx: ExperimentContext }) {
           : <tr key={p.id}><td>{p.date}</td><td><b>{p.title}</b>{p.note && <><br /><small style={{ whiteSpace: 'pre-wrap' }}>{p.note}</small></>}</td><td>{p.runs}개<br /><small>{p.size_kb} KB</small></td>
               <td><small>{new Date(p.saved_at).toLocaleString()}</small></td>
               <td><div className="button-row">
-                <button className="secondary" disabled={ctx.busy || mainRuns > 0} title={mainRuns > 0 ? '메인에 기록이 있으면 먼저 프로젝트로 저장하세요' : '보관본을 메인으로 복사'} onClick={() => void open(p, false)}><FolderOpen size={14} /> 불러오기</button>
-                <button className="secondary" disabled={ctx.busy || mainRuns > 0} title="그때의 설정(기준·관계식 선택 등)까지 함께" onClick={() => void open(p, true)}>설정까지 불러오기</button>
+                {mainRuns === 0 ? <><button className="secondary" disabled={ctx.busy} title="보관본을 빈 메인으로 복사" onClick={() => void open(p, false, false)}><FolderOpen size={14} /> 불러오기</button>
+                  <button className="secondary" disabled={ctx.busy} title="그때의 설정(기준·관계식 선택 등)까지 함께" onClick={() => void open(p, true, false)}>설정까지</button></>
+                  : <button className="secondary" disabled={ctx.busy} title="지금 메인 기록은 그대로 두고 보관본 시행을 더함" onClick={() => void open(p, false, true)}><FolderOpen size={14} /> 지금 기록에 더하기</button>}
                 <button className="secondary" onClick={() => ctx.download(`/api/experiment/projects/${p.id}/download.zip`, `picarx_project_${p.date}_${p.title}.zip`)}><Download size={14} /> ZIP</button>
                 <button className="secondary" onClick={() => setEdit(p)}><Pencil size={14} /></button>
                 <button className="secondary" onClick={() => void remove(p)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>}
-    {list.length > 0 && mainRuns > 0 && <p className="exp-hint">불러오기는 메인이 비어 있을 때만 됩니다(섞이지 않게). 지금 기록을 먼저 프로젝트로 저장하세요.</p>}
+    {list.length > 0 && <div className="button-row"><label className="exp-inline">불러올 시행<select value={pick} onChange={e => setPick(e.target.value as typeof pick)}><option value="">전부</option><option value="main">본 실험만 (관계식 만들기용)</option><option value="validation">식 검증만</option><option value="pilot">예비만</option></select></label>
+      <span className="exp-hint">예: 지난 프로젝트의 '본 실험만'을 지금 기록에 더하면 그 데이터로 관계식이 만들어지고, 지금 측정하는 감속 시험(식 검증)은 따로 쌓입니다. 메인이 비어 있으면 '불러오기', 기록이 있으면 '지금 기록에 더하기'가 나옵니다.</span></div>}
   </article>;
 }

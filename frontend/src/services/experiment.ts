@@ -127,7 +127,7 @@ export type SlowdownInfo = {
   trigger: 'time' | 'tape' | 'distance' | 'camera' | 'camera_distance'; trigger_requested?: string; slowed_by?: string; at_s: number; at_cm: number; safety: number; a_limit_g: number; model_id: string; model_formula?: string;
   margin?: 'ratio' | 'sigma'; model_error_g?: number; target_delta_g?: number;
   v0_pred_mps: number; pred_delta_v0_g: number; vmax_mps: number; target_v_mps: number; pred_delta_target_g: number; needed: boolean;
-  output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null; drive_s?: number | null;
+  output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null; drive_s?: number | null; resumed_at_s?: number | null; resumed_by?: string | null;
   staged?: { v_by_event: Record<EventKind, number>; v_front_mps: number; v_rear_mps: number; output_front: number | null; output_rear: number | null; clipped: boolean; pred_by_event_g: Record<EventKind, number> } | null;
   resume?: boolean; stage_log?: [number, string, number][];
   measured_speed_mps?: number | null; measured_peak_g?: number | null; pass?: boolean;

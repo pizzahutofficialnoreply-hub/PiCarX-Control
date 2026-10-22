@@ -239,6 +239,18 @@ class PiCarXAdapter:
     def _clamp_f(value: float, low: float, high: float) -> float:
         return max(low, min(high, float(value)))
 
+    def settle_steering(self) -> None:
+        """조향 서보를 한쪽(+6°)으로 갔다가 가운데로 돌아오게 해, 매번 같은 방향에서 중심에 서게 합니다.
+
+        서보 기어에는 유격(백래시)이 있어 어느 쪽에서 왔는지에 따라 '0°'가 0.5~1°씩 다르게 섭니다. 서버를 다시 켜면
+        서보가 초기화 동작 뒤 다른 쪽에서 중심으로 오기 때문에, 출력 보정이 같아도 차가 다른 쪽으로 틀어질 수 있습니다.
+        """
+        self._set_steering(6.0)
+        time.sleep(0.2)
+        self._set_steering(0.0)
+        time.sleep(0.2)
+        self._last_angle = 0.0
+
     def _set_steering(self, angle: float) -> None:
         car = self._require_car()
         # 0.1° 단위까지 보냅니다(서보 라이브러리는 실수 각도를 펄스 폭으로 바꿈). 보정 중심값도 소수 가능.
@@ -265,7 +277,8 @@ class PiCarXAdapter:
             raise ValueError(f"Unsupported direction: {direction}")
         if mapping not in OUTPUT_MAPPINGS:
             raise ValueError(f"Unsupported output mapping: {mapping}")
-        output = self._clamp(round(max(0.0, value) * max(0.1, trim)), 0, MAX_PWM)
+        # 소수점 출력(예: 82.3)을 정수로 자르지 않습니다. 실제 듀티는 아래에서 소수 둘째 자리까지 계산해 핀에 씁니다.
+        output = round(max(0.0, min(float(MAX_PWM), max(0.0, value) * max(0.1, trim))), 2)
         move = car.forward if direction == "forward" else car.backward
         angle = round(self._clamp_f(steering, -MAX_STEERING, MAX_STEERING), 1)
         tl, tr = getattr(self, "wheel_trim", (1.0, 1.0)) or (1.0, 1.0)
@@ -297,13 +310,16 @@ class PiCarXAdapter:
                 else:
                     r_out *= scale
             pins = getattr(car, "motor_speed_pins", None)
-            if (tl != 1.0 or tr != 1.0) and pins and len(pins) >= 2 and all(callable(getattr(p, "pulse_width_percent", None)) for p in pins):
+            if pins and len(pins) >= 2 and all(callable(getattr(p, "pulse_width_percent", None)) for p in pins):
                 # 좌우 배율을 쓰면 라이브러리처럼 듀티 = 출력/2 + 50(%)로 계산하되 정수로 자르지 않고 핀에 직접 씁니다
                 # (정수화하면 출력 2 단위마다 1%씩만 바뀌어 1~3% 미세 조정이 사라짐). 방향 핀은 라이브러리 호출로 정합니다.
                 set_speed(1, sign * max(1.0, l_out))
                 set_speed(2, -sign * max(1.0, r_out))
-                pins[0].pulse_width_percent(round(l_out / 2 + 50, 2) if l_out > 0 else 0)
-                pins[1].pulse_width_percent(round(r_out / 2 + 50, 2) if r_out > 0 else 0)
+                # 라이브러리 set_motor_speed와 같은 계산(듀티 = 출력/2 + 50 − cali_speed_value)을 소수점까지.
+                # 라이브러리는 int(출력/2)라 PWM 2단위로만 바뀌어(82.3 → 91 %, 83 → 91 %) 미세 조정이 안 됐습니다.
+                cal = list(getattr(car, "cali_speed_value", None) or [0, 0]) + [0, 0]
+                pins[0].pulse_width_percent(max(0.0, round(l_out / 2 + 50 - float(cal[0] or 0), 2)) if l_out > 0 else 0)
+                pins[1].pulse_width_percent(max(0.0, round(r_out / 2 + 50 - float(cal[1] or 0), 2)) if r_out > 0 else 0)
             else:
                 set_speed(1, sign * l_out)
                 set_speed(2, -sign * r_out)
@@ -476,8 +492,8 @@ def _read_pins(car) -> dict | None:
 def describe_command(direction: str, mapping: str, value: float, trim: float, steering: float, car) -> dict:
     """화면에 보여 줄 마지막 모터 명령. 전진과 후진의 실제 듀티가 같은지 확인하는 데 씁니다."""
     requested = max(0.0, float(value))
-    applied = max(0, min(MAX_PWM, round(requested * max(0.1, trim))))
-    expected = applied if mapping == "duty" else (applied // 2 + 50 if applied > 0 else 0)
+    applied = max(0.0, min(float(MAX_PWM), round(requested * max(0.1, trim), 2)))
+    expected = applied if mapping == "duty" else (round(applied / 2 + 50, 2) if applied > 0 else 0)
     return {
         "direction": direction, "mapping": mapping, "requested": round(requested, 1), "trim": round(trim, 3),
         "applied": applied, "expected_duty_percent": expected, "steering": round(float(steering), 1),

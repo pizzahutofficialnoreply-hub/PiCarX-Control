@@ -186,6 +186,7 @@ class SlowdownRequest(BaseModel):
     margin: Literal["ratio", "sigma"] = Field(default="ratio", description="ratio: v_max × 여유율, sigma: 기준 − 2×예측오차(교차검증 RMSE)로 목표 충격을 낮춤")
     staged: bool = Field(default=False, description="단계별: 앞바퀴(오름·내림) 구간과 뒷바퀴 구간을 각각의 식으로 정한 속도로")
     resume: bool = Field(default=True, description="방지턱을 다 넘으면 원래 출력으로 다시 가속")
+    resume_after_s: float = Field(default=2.0, ge=0, le=10, description="기울기로 '다 넘음'을 못 알아채도 감속 후 이 시간(초)이 지나면 다시 가속(0 = 기울기만)")
     lead_cm: float = Field(default=30.0, ge=5, le=150, description="distance_auto: 지난 회차의 '앞바퀴 충격 때 벽까지 거리'보다 이만큼 먼저 감속")
     output: float | None = Field(default=None, ge=1, le=100, description="시험용: 감속 출력을 직접 지정(비우면 관계식으로 계산)")
     target_speed: float | None = Field(default=None, gt=0.01, le=2, description="시험용: 감속 목표 속도(m/s)를 직접 지정 → 속도식으로 출력 환산")
@@ -789,6 +790,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                     await asyncio.sleep(0.01)
         poller = asyncio.create_task(poll())
     stage_now, stage_prev, stage_log = "approach", None, []
+    resume_at: float | None = None
+    resume_by: str | None = None
     decel_at: float | None = None
     if cross is not None:
         cross.start(time.monotonic() + min_s)
@@ -875,6 +878,8 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                   slowed_by = "camera" if by_cam and not by_dist else ("distance" if by_dist else trig)
           prev_t = now
           cur = float(slowdown["output"]) if slowed_at is not None and slowdown else value
+          if slowed_at is not None and slowdown and stage_now == "approach":
+              stage_now = "slow"
           st = (slowdown or {}).get("staged") if slowed_at is not None else None
           if st and bump_watch is not None:
               # 단계별: 앞바퀴가 다 내려와 수평으로 돌아오면 뒷바퀴 구간 출력으로
@@ -884,9 +889,16 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               elif st.get("output_front") is not None:
                   cur = float(st["output_front"])
                   stage_now = "front"
-          if slowdown and passed_at is not None and slowdown.get("resume"):
-              # 다 넘었으면 원래 출력으로 0.4초에 걸쳐 다시 가속
-              k = min(1.0, (now - passed_at) / 0.4)
+          if slowdown and slowdown.get("resume") and resume_at is None and slowed_at is not None:
+              # 다시 가속: 기울기로 '다 넘음'을 알아챈 순간. 못 알아채도 감속 후 정한 시간이 지나면 가속(멈춘 채 남지 않게)
+              ra = float(slowdown.get("resume_after_s") or 0)
+              if passed_at is not None:
+                  resume_at, resume_by = now, "tilt"
+              elif ra > 0 and now - slowed_at >= ra:
+                  resume_at, resume_by = now, "timer"
+          if slowdown and resume_at is not None:
+              # 원래 출력으로 0.4초에 걸쳐 다시 가속
+              k = min(1.0, (now - resume_at) / 0.4)
               cur = cur + (value - cur) * k
               stage_now = "resume"
           if stage_now != stage_prev:
@@ -905,10 +917,6 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
           if guided is not None and guided.mode == "lost" and decel_at is None:
               k = min(k, 0.75)   # 테이프를 찾는 동안은 조금 천천히(방지턱을 이미 지난 뒤라 측정에는 영향 없음)
           cmd_mode, cmd_out = mode, out
-          if slowdown and slowed_at is not None and slowdown.get("exact_duty") and mode == "pwm":
-              # 라이브러리 PWM은 듀티 = int(PWM/2) + 50 이라 PWM 2단위로 잘립니다(82.3 → 91%). 같은 식을 소수점까지 계산해
-              # 듀티로 직접 명령(82.3 → 91.15%)해 감속 출력을 정확히 냅니다.
-              cmd_mode, cmd_out = "duty", effective_duty(mode, out)
           if k < 0.999:
               cmd_mode, cmd_out = "duty", max(0.0, effective_duty(mode, out) * k)
           if not await ctl.experiment_drive(cmd_mode, cmd_out, generation, direction, steer):
@@ -951,6 +959,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "heading_flipped": bool(controller and controller.flipped),
             "slowed_at_s": round(slowed_at - start, 3) if slowed_at is not None else None,
             "slowed_by": slowed_by,
+            "resumed_at_s": round(resume_at - start, 3) if resume_at is not None else None, "resumed_by": resume_by,
             "stage_log": stage_log,
             "camera_seen_s": round(camera.seen_at - start, 3) if camera is not None and camera.seen_at is not None else None,
             "stopped_by_wall": stopped_by_wall,
@@ -1102,7 +1111,7 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
             "pred_delta_target_g": round(mf.predict(model, target_v, mk), 4),
             "needed": need or bool(stages), "output": round(out_slow, 1) if (need or stages) else None, "output_initial": cond.output_value,
             "output_clipped": clipped, "staged": stages, "resume": req.resume, "manual_output": manual,
-            "target_speed_manual": req.target_speed, "exact_duty": req.exact_duty and cond.output_mode == "pwm",
+            "target_speed_manual": req.target_speed, "resume_after_s": req.resume_after_s,
             "duty_initial": round(effective_duty(cond.output_mode, cond.output_value), 2),
             "duty_slow": round(effective_duty(cond.output_mode, out_slow), 2) if (need or stages) else None,
             "ratio": round(target_v / v0, 4) if v0 else None}
@@ -1132,6 +1141,11 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     aborted = False
     drive_info: dict[str, Any] = {}
     try:
+        if not simulated and opts.get("steering_source") == "none" and callable(getattr(ctl.adapter, "settle_steering", None)):
+            try:
+                await asyncio.to_thread(ctl.adapter.settle_steering)   # 조향 없음: 서보 유격 때문에 회마다 틀어지는 것을 줄임
+            except Exception:
+                pass
         auto_runner._phase("pre_roll", opts["pre_roll"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · 정지 상태 기록 중 (차량을 움직이지 마세요)")
         await _wait(ctl, opts["pre_roll"], gen)
         # 방향은 항상 측정해 직진도를 기록하고, 보정은 설정이 켜져 있을 때만 적용합니다.
@@ -1286,9 +1300,12 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     if run.get("slowdown") and drive_info.get("slowed_at_s") is not None:
         run["slowdown"]["slowed_at_s"] = round(drive_info["slowed_at_s"] + opts["pre_roll"], 3)  # 기록 시작 기준
         run["slowdown"]["slowed_by"] = drive_info.get("slowed_by")
+    if run.get("slowdown") and drive_info.get("resumed_at_s") is not None:
+        run["slowdown"]["resumed_at_s"] = round(drive_info["resumed_at_s"] + opts["pre_roll"], 3)
+        run["slowdown"]["resumed_by"] = drive_info.get("resumed_by")
     if run.get("slowdown") and drive_info.get("stage_log"):
         run["slowdown"]["stage_log"] = [[round(t + opts["pre_roll"], 3), st, o] for t, st, o in drive_info["stage_log"]]
-    run.update({k: v for k, v in drive_info.items() if k not in ("slowed_at_s", "stage_log")})
+    run.update({k: v for k, v in drive_info.items() if k not in ("slowed_at_s", "stage_log", "resumed_at_s", "resumed_by")})
     run["data_source"] = "synthetic" if simulated else "mpu6050"
     run = await asyncio.to_thread(finalize_run, run, columns, meta, settings)
     if simulated and opts.get("ultrasonic"):
@@ -1951,6 +1968,25 @@ async def reset(body: ResetRequest):
     return {"moved": len(runs), "batch": batch}
 
 
+class PurposeClear(BaseModel):
+    purpose: Literal["main", "validation", "pilot"]
+    confirm: str
+
+
+@router.post("/runs/clear-purpose")
+async def runs_clear_purpose(body: PurposeClear):
+    """식 검증·예비 시행처럼 한 종류만 휴지통으로 옮깁니다(되돌릴 수 있음)."""
+    if body.confirm.strip() != "삭제":
+        raise HTTPException(422, "확인 문구 '삭제'를 입력하세요.")
+    if auto_runner.busy:
+        raise HTTPException(409, "측정 중에는 지울 수 없습니다.")
+    ids = [r["id"] for r in store.list_runs() if ((r.get("condition") or {}).get("purpose") or "main") == body.purpose]
+    if not ids:
+        return {"moved": 0, "batch": None}
+    batch = store.move_to_trash(ids, body.purpose)
+    return {"moved": len(ids), "batch": batch}
+
+
 @router.get("/trash")
 async def trash():
     return {"batches": store.trash_batches()}
@@ -2056,25 +2092,40 @@ async def projects_edit(pid: str, body: ProjectEdit):
 
 
 @router.post("/projects/{pid}/open")
-async def projects_open(pid: str, settings_too: bool = False):
-    """보관한 프로젝트를 메인으로 복사해 다시 봅니다(프로젝트 폴더는 그대로 남음). 메인이 비어 있어야 합니다."""
+async def projects_open(pid: str, settings_too: bool = False, merge: bool = False, purposes: str = ""):
+    """보관한 프로젝트를 메인으로 복사합니다(프로젝트 폴더는 그대로 남음).
+
+    merge=false: 메인이 비어 있어야 함(섞이지 않게). merge=true: 지금 메인 기록에 더함(같은 시행은 건너뜀).
+    purposes: 'main,validation,pilot' 중 고른 종류만(빈칸 = 전부). 예: 관계식용(main)만 가져와 지금 실험에 더하기.
+    """
     d = _project_dir(pid)
     if auto_runner.busy:
         raise HTTPException(409, "측정 중에는 불러올 수 없습니다.")
-    if store.list_runs():
-        raise HTTPException(409, "메인에 시행 기록이 있습니다. 먼저 지금 기록을 프로젝트로 저장(또는 초기화)한 뒤 불러오세요.")
+    if not merge and store.list_runs():
+        raise HTTPException(409, "메인에 시행 기록이 있습니다. '지금 기록에 더하기'로 불러오거나, 먼저 지금 기록을 프로젝트로 저장하세요.")
+    want = {p for p in purposes.split(",") if p in ("main", "validation", "pilot")}
     store.runs_dir.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for path in (d / "experiments").iterdir():
-        if path.suffix in (".json", ".csv"):
-            shutil.copy2(path, store.runs_dir / path.name)
-            n += path.suffix == ".json"
+    n = skipped = 0
+    for path in sorted((d / "experiments").glob("*.json")):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if want and ((run.get("condition") or {}).get("purpose") or "main") not in want:
+            continue
+        if (store.runs_dir / path.name).exists():
+            skipped += 1
+            continue
+        shutil.copy2(path, store.runs_dir / path.name)
+        if path.with_suffix(".csv").exists():
+            shutil.copy2(path.with_suffix(".csv"), store.runs_dir / path.with_suffix(".csv").name)
+        n += 1
     if settings_too and (d / "experiment_settings.json").exists():
         try:
             store.save_settings(ExperimentSettings.model_validate_json((d / "experiment_settings.json").read_text(encoding="utf-8")))
         except ValueError:
             pass
-    return {"opened": n}
+    return {"opened": n, "skipped": skipped}
 
 
 @router.get("/projects/{pid}/download.zip")

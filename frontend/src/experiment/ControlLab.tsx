@@ -30,7 +30,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const [runS, setRunS] = usePersistentState('slow-run-s', 4);
   const [manualOut, setManualOut] = usePersistentState<number | ''>('slow-manual-out', '');
   const [manualV, setManualV] = usePersistentState<number | ''>('slow-manual-v', '');
-  const [exactDuty, setExactDuty] = usePersistentState('slow-exact-duty', true);
+  const [testName, setTestName] = usePersistentState('slow-test-name', 'B: 100→84→100');
+  const [resumeAfter, setResumeAfter] = usePersistentState('slow-resume-after', 2);
   const [startDelay, setStartDelay] = usePersistentState('slow-start-delay', 3);
   const [restS, setRestS] = usePersistentState('slow-rest-s', 3);
   const [usTest, setUsTest] = useState<UsTest | null>(null);
@@ -101,11 +102,15 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     if (powerModel && data?.chosen_models?.[bump] !== powerModel.id) await ctx.patchSettings({ model_id: powerModel.id });
     ctx.setMessage(`보고서 식(${powerModel ? powerModel.formula : '거듭제곱 식'})으로 v_max를 구하고, 그 90% 속도로 들어가도록 맞췄습니다(여유 10%).`);
   }
-  function stopReason(r: typeof slowRuns[number]): string {
-    const t = r.elapsed_s != null ? ` (${r.elapsed_s.toFixed(1)}s${r.slowdown?.drive_s ? ` / ${r.slowdown.drive_s}s` : ''})` : '';
-    if (r.aborted) return '정지 버튼' + t;
-    const why = r.end_reason ?? (r.stopped_by_wall ? 'wall' : r.bump_passed_s != null ? 'bump_passed' : 'time');
-    return ({ wall: '벽 앞 자동 정지(초음파)', bump_passed: '다 넘고 정지', time: '주행 시간 끝', line_lost: '유도선 놓침', mark: '정지선', cross: '정지선' } as Record<string, string>)[why] + t;
+  function runName(r: typeof slowRuns[number]): string {
+    return (r.condition.note ?? '').replace(/\s*·\s*감속 제어$/, '').trim() || '감속 시험';
+  }
+  function runTitle(r: typeof slowRuns[number]): string {
+    const s0 = r.slowdown!;
+    const back = s0.resume && s0.resumed_at_s != null;
+    const outs = s0.needed && s0.output != null ? `출력 ${s0.output_initial} → ${s0.output}${back ? ` → ${s0.output_initial}` : ''}` : `출력 ${s0.output_initial} 일정`;
+    const sp = s0.needed ? `(예측 속도 ${s0.v0_pred_mps.toFixed(3)} → ${s0.target_v_mps.toFixed(3)}${back ? ` → ${s0.v0_pred_mps.toFixed(3)}` : ''} m/s)` : `(예측 ${s0.v0_pred_mps.toFixed(3)} m/s)`;
+    return `${runName(r)} · ${outs} ${sp} · 실제 통과 ${fmt(s0.measured_speed_mps, 3)} m/s · 최대 ${fmt(s0.measured_peak_g, 2)} g`;
   }
 
   // 실시간 값: 측정 중 0.3초마다 서버에서 받은 '지금 낸 출력'. 끝난 뒤에도 마지막 값을 남겨 둠
@@ -123,9 +128,9 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   }
 
   async function runSlow() {
-    await ctx.startAutoRun(undefined, {
+    await ctx.startAutoRun({ note: testName.slice(0, 120) }, {
       repeats, run_seconds: runS, start_delay_s: startDelay, rest_s: Math.max(0.3, restS), ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
-      slowdown: { trigger, at_s: atS, at_cm: atCm, safety, min_output: minOut, target_g: targetG === '' ? null : targetG, margin, staged, resume, lead_cm: leadCm, output: manualOut === '' ? null : manualOut, target_speed: manualOut === '' && manualV !== '' ? manualV : null, exact_duty: exactDuty },
+      slowdown: { trigger, at_s: atS, at_cm: atCm, safety, min_output: minOut, target_g: targetG === '' ? null : targetG, margin, staged, resume, lead_cm: leadCm, output: manualOut === '' ? null : manualOut, target_speed: manualOut === '' && manualV !== '' ? manualV : null, resume_after_s: resume ? resumeAfter : 0 },
     });
     ctx.setMessage('감속 제어 측정을 시작했습니다. 진행 상황은 측정·분석 탭에서도 볼 수 있습니다.');
   }
@@ -173,11 +178,9 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="exp-inverse">
         <b>시작 출력과 관계식</b>
         <div className="experiment-fields">
+          <label>시험 이름 (그래프 제목·표에 표시)<input value={testName} maxLength={120} onChange={e => setTestName(e.target.value)} placeholder="예: B: 100→84→100" /></label>
           <label>시작 출력 ({condition.output_mode.toUpperCase()}, 방지턱 전·후 속도)<NumInput min={1} max={100} value={condition.output_value} onChange={e => ctx.setCondition({ output_value: Math.max(1, Math.min(100, Number(e.target.value) || condition.output_value)) })} /></label>
           <label>주행 시간 (s, 출발부터 멈출 때까지)<NumInput min={0.5} max={12} step={0.5} value={runS} onChange={e => setRunS(Math.max(0.5, Math.min(12, Number(e.target.value) || 4)))} /></label>
-          <label>감속 출력 직접 지정 (시험용, 빈칸 = 식으로 계산)<NumInput min={1} max={100} step={1} value={manualOut} placeholder={pRaw != null ? `계산값 ${Math.min(condition.output_value, Math.max(minOut, pRaw)).toFixed(1)}` : ''} onChange={e => setManualOut(e.target.value === '' ? '' : Math.max(1, Math.min(100, Number(e.target.value))))} /></label>
-          <label>감속 목표 속도 직접 지정 (m/s, 시험용)<NumInput min={0.02} max={2} step={0.01} value={manualV} placeholder={vtCalc != null ? `계산값 ${vtCalc.toFixed(3)}` : ''} onChange={e => setManualV(e.target.value === '' ? '' : Math.max(0.02, Math.min(2, Number(e.target.value))))} /></label>
-          <label className="exp-check"><input type="checkbox" checked={exactDuty} onChange={e => setExactDuty(e.target.checked)} /> 감속 출력을 정확한 듀티로 명령 (라이브러리 PWM은 2단위로 잘림)</label>
           <label>출발 전 대기 (s, 측정 누른 뒤)<NumInput min={0} max={60} step={1} value={startDelay} onChange={e => setStartDelay(Math.max(0, Math.min(60, Number(e.target.value) || 0)))} /></label>
           <label>회차 사이 쉬는 시간 (s)<NumInput min={0.3} max={10} step={0.5} value={restS} onChange={e => setRestS(Math.max(0.3, Math.min(10, Number(e.target.value) || 3)))} /></label>
           <label>쓸 관계식<select value={settings.model_id ?? 'auto'} onChange={e => void ctx.patchSettings({ model_id: e.target.value })}>
@@ -196,14 +199,28 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         {trigger === 'time' && <label>출발 후 (s)<NumInput min={0} max={6} step={0.1} value={atS} onChange={e => setAtS(Math.max(0, Number(e.target.value) || 0))} /></label>}
         {(trigger === 'distance' || (trigger === 'camera_distance' && autoCm == null)) && <label>벽까지 (cm) 가 되면<NumInput min={5} max={300} step={5} value={atCm} onChange={e => setAtCm(Math.max(5, Number(e.target.value) || 60))} /></label>}
         {(trigger === 'distance_auto' || trigger === 'camera_distance') && <label>방지턱보다 먼저 감속할 거리 (cm){autoCm != null ? ` → 벽까지 ${autoCm.toFixed(0)} cm에서` : ''}<NumInput min={5} max={150} step={5} value={leadCm} onChange={e => setLeadCm(Math.max(5, Math.min(150, Number(e.target.value) || 30)))} /></label>}
-        <label>목표 정하는 방식<select value={margin} onChange={e => setMargin(e.target.value as 'ratio' | 'sigma')}><option value="sigma">예측 오차만큼 기준 아래로 (추천)</option><option value="ratio">v_max에 여유율 곱하기</option></select></label>
-        {margin === 'ratio' && <label>여유율 (v_max에 곱함)<NumInput min={0.3} max={1} step={0.05} value={safety} onChange={e => setSafety(Math.max(0.3, Math.min(1, Number(e.target.value) || 0.9)))} /></label>}
         <label className="exp-check"><input type="checkbox" checked={staged} onChange={e => setStaged(e.target.checked)} /> 단계별 (앞바퀴 구간·뒷바퀴 구간을 각각의 식으로)</label>
         <label className="exp-check"><input type="checkbox" checked={resume} onChange={e => setResume(e.target.checked)} /> 다 넘으면 원래 출력으로 다시 가속</label>
-        <label>최소 출력 (멈춤 방지)<NumInput min={1} max={100} value={minOut} onChange={e => setMinOut(Math.max(1, Number(e.target.value) || 10))} /></label>
-        <label>허용 기준 (g, 빈칸 = 분석 탭 기준)<NumInput min={1.05} max={8} step={0.05} value={targetG} placeholder={data?.criteria?.[bump]?.a_limit_g?.toFixed(2) ?? ''} onChange={e => setTargetG(e.target.value === '' ? '' : Number(e.target.value))} /></label>
+        {resume && <label>다 넘음을 못 알아채면 감속 후 (s) 뒤 가속<NumInput min={0} max={10} step={0.5} value={resumeAfter} onChange={e => setResumeAfter(Math.max(0, Math.min(10, Number(e.target.value) || 0)))} /></label>}
         <label>반복<NumInput min={1} max={20} value={repeats} onChange={e => setRepeats(Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1))))} /></label>
       </div>
+      <details className="exp-tips"><summary>고급: 감속 속도 정하는 방법 바꾸기 (보통은 그대로 두세요)</summary>
+        <p className="exp-hint">평소에는 비워 두면 됩니다. 앱이 <b>관계식 → v_max(기준을 넘지 않는 최대 속도) → 여유율을 곱한 목표 속도 → 그 속도가 나오는 출력</b> 순서로 감속 출력을 계산합니다.</p>
+        <ul className="exp-hint">
+          <li><b>여유율</b>: v_max에 곱하는 값. 0.9면 v_max보다 10% 느리게 들어가 회차마다 충격이 흔들려도 기준을 덜 넘습니다. 1.0이면 평균이 딱 기준이라 절반쯤 기준을 넘습니다.</li>
+          <li><b>감속 출력 직접 지정</b>: 식을 무시하고 이 출력(예: 60)으로 줄입니다. '감속이 실제로 되나' 확인하거나, 표 A~D처럼 정한 출력으로 시험할 때 씁니다.</li>
+          <li><b>감속 목표 속도 직접 지정</b>: 출력 대신 속도(m/s)로 넣으면 속도식으로 출력을 계산합니다. 둘 다 넣으면 출력이 우선입니다.</li>
+          <li><b>허용 기준</b>: 이 화면에서만 쓰는 기준(총 g). 빈칸이면 분석 탭 기준.</li>
+        </ul>
+        <div className="experiment-fields">
+          <label>목표 정하는 방식<select value={margin} onChange={e => setMargin(e.target.value as 'ratio' | 'sigma')}><option value="sigma">예측 오차만큼 기준 아래로 (추천)</option><option value="ratio">v_max에 여유율 곱하기</option></select></label>
+          {margin === 'ratio' && <label>여유율 (v_max에 곱함)<NumInput min={0.3} max={1} step={0.05} value={safety} onChange={e => setSafety(Math.max(0.3, Math.min(1, Number(e.target.value) || 0.9)))} /></label>}
+          <label>감속 출력 직접 지정 (시험용, 빈칸 = 식으로 계산)<NumInput min={1} max={100} step={1} value={manualOut} placeholder={pRaw != null ? `계산값 ${Math.min(condition.output_value, Math.max(minOut, pRaw)).toFixed(1)}` : ''} onChange={e => setManualOut(e.target.value === '' ? '' : Math.max(1, Math.min(100, Number(e.target.value))))} /></label>
+          <label>감속 목표 속도 직접 지정 (m/s, 시험용)<NumInput min={0.02} max={2} step={0.01} value={manualV} placeholder={vtCalc != null ? `계산값 ${vtCalc.toFixed(3)}` : ''} onChange={e => setManualV(e.target.value === '' ? '' : Math.max(0.02, Math.min(2, Number(e.target.value))))} /></label>
+          <label>최소 출력 (멈춤 방지)<NumInput min={1} max={100} value={minOut} onChange={e => setMinOut(Math.max(1, Number(e.target.value) || 10))} /></label>
+          <label>허용 기준 (g, 빈칸 = 분석 탭 기준)<NumInput min={1.05} max={8} step={0.05} value={targetG} placeholder={data?.criteria?.[bump]?.a_limit_g?.toFixed(2) ?? ''} onChange={e => setTargetG(e.target.value === '' ? '' : Number(e.target.value))} /></label>
+        </div>
+      </details>
       <p className="exp-hint">{trigger === 'time' ? '출발 후 정해진 시간에 줄입니다. 방지턱까지 걸리는 시간보다 0.3~0.5초 일찍 줄여야 속도가 미리 떨어집니다(모터 속도가 바뀌는 데 0.2~0.4초 걸림).'
         : trigger === 'distance' ? '방지턱 뒤쪽에 벽(상자 등, 높이 15 cm 이상)을 두고, 초음파로 벽까지 거리가 이 값이 되면 줄입니다. 측정·분석 탭에서 한 번 달려 보면 "앞바퀴 충격 때 벽까지 거리"가 나오니, 그 값보다 20~40 cm 큰 값을 넣으세요(감속할 거리).'
         : trigger === 'distance_auto' ? '초음파를 켜고 측정한 회차들의 "앞바퀴 충격 때 벽까지 거리"(중앙값)를 방지턱 위치로 보고, 그보다 정한 거리만큼 먼저 줄입니다. 방지턱 뒤쪽에 벽(상자)이 있어야 합니다.'
@@ -231,14 +248,14 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         {showRun && (detail && detail.id === showRun.id ? <RunTraceChart key={showRun.id} series={detail.series} analysis={showRun.analysis} aLimit={aLimit}
           thresholdDelta={Number(showRun.analysis.threshold_used_g ?? showRun.analysis.params?.threshold_delta_g ?? settings.threshold_delta_g)} jumpG={Number(showRun.analysis.params?.jump_g ?? settings.jump_g)}
           zoom="all"
-          extraMarks={[...(showRun.slowdown?.slowed_at_s != null ? [{ t: showRun.slowdown.slowed_at_s, label: `감속 시작 (출력 ${showRun.slowdown.output})`, color: '#a04fa0' }] : []),
-            ...(showRun.bump_passed_s != null ? [{ t: showRun.bump_passed_s + (showRun.pre_roll_s ?? 0), label: '다 넘음(기울기)', color: '#3c9a5f' }] : [])]}
-          title={`위아래 가속도 – 감속 회차 ${new Date(showRun.created_at).toLocaleTimeString()} · 출력 ${showRun.slowdown?.output_initial} → ${showRun.slowdown?.output ?? '유지'} · 멈춘 이유: ${stopReason(showRun)}`}
+          extraMarks={[...(showRun.slowdown?.slowed_at_s != null ? [{ t: showRun.slowdown.slowed_at_s, label: `감속 (출력 ${showRun.slowdown.output})`, color: '#a04fa0' }] : []),
+            ...(showRun.slowdown?.resumed_at_s != null ? [{ t: showRun.slowdown.resumed_at_s, label: `다시 가속 (${showRun.slowdown.output_initial})`, color: '#3c9a5f' }] : [])]}
+          title={`위아래 가속도 – ${runTitle(showRun)}`}
           name={`slow_trace_${showRun.id}`} /> : <div className="empty-chart">그래프 불러오는 중…</div>)}
-        {showRun && detail && detail.id === showRun.id && (detail.drive_log?.length ?? 0) > 1 && <XYChart name={`slow_out_${showRun.id}`} title="이 회차에 실제로 낸 출력 (감속이 일어났는지 확인)" xLabel="출발 후 시간 (s)" yLabel={`출력 (${condition.output_mode.toUpperCase()})`}
+        {showRun && detail && detail.id === showRun.id && (detail.drive_log?.length ?? 0) > 1 && <XYChart name={`slow_out_${showRun.id}`} title={`출력 변화 – ${runName(showRun)}`} xLabel="출발 후 시간 (s)" yLabel={`출력 (${condition.output_mode.toUpperCase()})`}
           series={[{ name: '명령한 출력', color: '#a04fa0', line: true, dots: false, points: (detail.drive_log ?? []).map(r => ({ x: r[0], y: r[1] })) }]}
-          vLines={[...(showRun.slowdown?.slowed_at_s != null ? [{ x: showRun.slowdown.slowed_at_s - (showRun.pre_roll_s ?? 0), label: '감속 시작', color: '#a04fa0' }] : []), ...(showRun.bump_passed_s != null ? [{ x: showRun.bump_passed_s, label: '다 넘음', color: '#3c9a5f' }] : [])]}
-          caption={showRun.slowdown?.slowed_at_s == null ? '이 회차는 감속 신호가 오지 않아 출력이 그대로였습니다(카메라·초음파가 방지턱을 못 알아챘거나, 시간 방식이면 시간이 주행 시간보다 늦음).' : 'PWM은 실제 듀티 = PWM/2 + 50%라서 100 → 82는 듀티 100% → 91%(속도 약 12% 감소)입니다. 눈으로는 거의 티가 안 나는 게 정상이며, 이 선이 계단처럼 내려갔으면 감속은 된 것입니다.'} />}
+          vLines={[...(showRun.slowdown?.slowed_at_s != null ? [{ x: showRun.slowdown.slowed_at_s - (showRun.pre_roll_s ?? 0), label: '감속 시작', color: '#a04fa0' }] : []), ...(showRun.slowdown?.resumed_at_s != null ? [{ x: showRun.slowdown.resumed_at_s - (showRun.pre_roll_s ?? 0), label: `다시 가속${showRun.slowdown.resumed_by === 'timer' ? '(시간)' : ''}`, color: '#3c9a5f' }] : [])]}
+          caption={showRun.slowdown?.slowed_at_s == null ? '이 회차는 감속 신호가 오지 않아 출력이 그대로였습니다(카메라·초음파가 방지턱을 못 알아챘거나, 시간 방식이면 시간이 주행 시간보다 늦음).' : `선이 ${showRun.slowdown.output_initial} → ${showRun.slowdown.output}${showRun.slowdown.resumed_at_s != null ? ` → ${showRun.slowdown.output_initial}` : ''}로 계단처럼 바뀌었으면 감속${showRun.slowdown.resumed_at_s != null ? '·재가속' : ''}이 된 것입니다.${showRun.slowdown.resume && showRun.slowdown.resumed_at_s == null ? ' 다시 가속이 안 됐습니다: 기울기로 다 넘음을 못 알아챘고, 감속 후 대기 시간도 0이었거나 주행 시간이 먼저 끝났습니다.' : ''}`} />}
         <XYChart name={`slowdown_${bump}`} title="감속 제어 결과: 실제 통과 속도와 최대 충격" xLabel="실제 통과 속도 (m/s, 바퀴 간격)" yLabel="최대 수직 가속도 (g)"
           series={[{ name: `관계식 예측 (${massG} g)`, color: '#2f6fb0', line: true, dots: false, points: curve },
             { name: '기준 이내', color: '#3c9a5f', points: slowRuns.filter(r => r.slowdown?.pass && r.slowdown.measured_speed_mps).map(r => ({ x: r.slowdown?.measured_speed_mps as number, y: r.slowdown?.measured_peak_g as number })) },
@@ -246,10 +263,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           hLines={aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : []}
           vLines={vt != null ? [{ x: vt, label: '목표 속도', color: '#a04fa0' }] : []}
           caption="초록 점이 기준선 아래, 목표 속도 근처에 모이면 '관계식 → 속도 결정 → 감속 → 충격 감소'가 실험으로 확인된 것입니다. 점이 목표 속도보다 오른쪽이면 감속할 거리(시간)가 부족했던 것입니다." />
-        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시각</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th><th>감속 시점</th><th>멈춘 이유</th></tr></thead>
-          <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={(s.pass === false ? 'over ' : '') + (r.id === showId ? 'selected' : '')} style={{ cursor: 'pointer' }} onClick={() => setPickId(r.id)}><td>{new Date(r.created_at).toLocaleTimeString()}</td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}</td>
+        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시험</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th><th>감속 시점</th><th>다시 가속</th></tr></thead>
+          <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={(s.pass === false ? 'over ' : '') + (r.id === showId ? 'selected' : '')} style={{ cursor: 'pointer' }} onClick={() => setPickId(r.id)}><td>{runName(r)}<br /><small>{new Date(r.created_at).toLocaleTimeString()}</small></td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}{s.resumed_at_s != null ? ` → ${s.output_initial}` : ''}</td>
             <td>{s.trigger === 'time' ? `${s.at_s}s` : s.trigger === 'distance' ? `${s.at_cm}cm${s.trigger_requested === 'distance_auto' ? '(자동)' : ''}` : s.trigger === 'camera' ? '카메라' : s.trigger === 'camera_distance' ? `카메라+초음파 ${s.at_cm}cm${s.slowed_by ? ` (${s.slowed_by === 'camera' ? '카메라' : '초음파'} 먼저)` : ''}` : '테이프'}{s.slowed_at_s == null && s.needed && !r.simulated ? ' (작동 안 함)' : ''}</td>
-            <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td><td style={leadText(r).bad ? { color: '#c62828', fontWeight: 600 } : undefined}>{leadText(r).text}</td><td>{stopReason(r)}</td></tr>; })}</tbody></table></div>
+            <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td><td style={leadText(r).bad ? { color: '#c62828', fontWeight: 600 } : undefined}>{leadText(r).text}</td><td>{!s.resume || !s.needed ? '—' : s.resumed_at_s != null ? (s.resumed_by === 'timer' ? '됨(시간)' : '됨(기울기)') : '안 됨'}</td></tr>; })}</tbody></table></div>
       </>}
     </section>;
 
