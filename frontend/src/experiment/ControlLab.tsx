@@ -35,6 +35,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const [startDelay, setStartDelay] = usePersistentState('slow-start-delay', 3);
   const [restS, setRestS] = usePersistentState('slow-rest-s', 3);
   const [usTest, setUsTest] = useState<UsTest | null>(null);
+  const [driveCfg, setDriveCfg] = useState<{ mapping: string; trim_forward: number } | null>(null);
+  useEffect(() => { if (ctx.serverAvailable) ctx.request('/api/settings/drive').then(d => setDriveCfg(d)).catch(() => setDriveCfg(null)); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [ctx.serverAvailable]);
   const [testing, setTesting] = useState(false);
 
   // 서버와 똑같이 '측정·분석 탭에서 고른 식'으로 계획을 미리 계산해 보여 줍니다.
@@ -235,6 +237,9 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="button-row"><button className="secondary" onClick={() => setCamOpen(!camOpen)}><Camera size={14} /> 카메라 보정 {camOpen ? '닫기' : '열기'}</button></div>
       {(camOpen || ((trigger === 'camera' || trigger === 'camera_distance') && !visionOk)) && <VisionCal ctx={ctx} />}
       {problem && <p className="diagnostic-error">{problem}</p>}
+      {driveCfg && driveCfg.mapping === 'library' && Math.abs(driveCfg.trim_forward - 1) > 0.001 && (() => {
+        const tf = driveCfg.trim_forward; const a = Math.min(100, condition.output_value * tf); const b = pSlow != null ? Math.min(100, pSlow * tf) : null;
+        return <p className="diagnostic-error">점검·데이터 탭의 <b>전진 배율이 ×{tf}</b>입니다. 실제 출력 = 입력 × {tf}(최대 100)이라 시작 출력 {condition.output_value} → {a.toFixed(0)}{b != null ? `, 감속 출력 ${pSlow!.toFixed(1)} → ${b.toFixed(0)}` : ''}{b != null && b >= a - 0.5 ? ' — 둘 다 100으로 잘려 감속이 실제로 일어나지 않습니다.' : ''} 정확한 시험을 하려면 배율을 1.0으로 두세요(PWM {Math.ceil(100 / tf)} 이상은 전부 100과 같음).</p>; })()}
       {(() => { const outs = (data?.groups ?? []).filter(g => g.bump_id === bump && g.output_mode === condition.output_mode).map(g => g.output_value); const lo = outs.length ? Math.min(...outs) : null;
         return pSlow != null && lo != null && pSlow < lo - 0.5 ? <p className="diagnostic-error">감속 출력 {pSlow.toFixed(1)}은 측정한 범위({lo} 이상) 밖이라 속도식을 연장해 쓴 값입니다. 실제 속도가 다를 수 있으니 이 출력으로 몇 번 일반 측정해 속도식을 보강하세요.</p> : null; })()}
       <div className="button-row"><button className="primary" disabled={!!problem || !ctx.canAutoRun} onClick={() => void runSlow()}><Play size={15} /> 감속 제어 측정 ({repeats}회)</button>
