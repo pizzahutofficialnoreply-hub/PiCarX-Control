@@ -79,6 +79,10 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     : staged && !haveEvents ? '단계별 식(앞·뒤 바퀴 오름·내림)이 아직 없습니다. 기울기로 4순간이 찾아진 회차가 출력 2단계 이상 필요합니다.'
     : dTarget != null && dTarget <= 0 ? `예측 오차(±${err.toFixed(2)} g)×2가 허용 여유보다 커서 목표를 정할 수 없습니다. 반복 측정을 늘리세요.` : '';
 
+  // 출발(주행 시작) → 앞바퀴 충격까지 걸린 시간: 주행 시작 시각이 정확히 기록된 최근 회차(같은 방지턱·시작 출력)
+  const bumpTs = (data?.runs ?? []).filter(r => r.condition.bump_id === bump && r.drive_t0_s != null && r.analysis.front_t_s != null && !r.excluded
+    && Math.abs(r.condition.output_value - condition.output_value) < 0.5).slice(0, 15).map(r => (r.analysis.front_t_s as number) - (r.drive_t0_s as number)).filter(x => x > 0.1 && x < 6).sort((a, b) => a - b);
+  const bumpT = bumpTs.length ? bumpTs[Math.floor(bumpTs.length / 2)] : null;
   const slowRuns = (data?.runs ?? []).filter(r => r.slowdown && r.condition.bump_id === bump).slice(0, 40);
   const passN = slowRuns.filter(r => r.slowdown?.pass).length;
   const judged = slowRuns.filter(r => r.slowdown?.pass != null).length;
@@ -122,7 +126,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     if (!s0?.needed) return { text: '—', bad: false };
     if (s0.slowed_at_s == null) return { text: r.simulated ? '—' : '감속 안 됨', bad: !r.simulated };
     const f = r.analysis.front_t_s;
-    if (f == null) return { text: `${(s0.slowed_at_s - (r.pre_roll_s ?? 0)).toFixed(2)}s에 감속 (충격 못 찾음)`, bad: false };
+    if (f == null) return { text: `${(s0.slowed_at_s - (r.drive_t0_s ?? r.pre_roll_s ?? 0)).toFixed(2)}s에 감속 (충격 못 찾음)`, bad: false };
     const lead = f - s0.slowed_at_s;
     return lead < 0 ? { text: `충격 ${(-lead).toFixed(2)}s 뒤 (늦음)`, bad: true } : { text: `충격 ${lead.toFixed(2)}s 전${lead < 0.3 ? ' (짧음)' : ''}`, bad: lead < 0.3 };
   }
@@ -196,6 +200,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         <label>방지턱을 미리 알아채는 방법<select value={trigger} onChange={e => setTrigger(e.target.value as Trig)}>
           <option value="time">출발 후 시간</option><option value="distance_auto">거리 자동 (초음파, 지난 회차에서 방지턱 위치를 배움)</option><option value="distance">벽까지 거리 직접 입력 (초음파)</option>
           <option value="camera">카메라 (바닥과 색이 다른 물체)</option><option value="camera_distance">카메라 + 초음파 (둘 중 먼저 알아챈 쪽)</option><option value="tape">감속 표시 테이프 (바닥 센서)</option></select></label>
+        {trigger === 'time' && bumpT != null && <p className={atS > bumpT - 0.3 ? 'diagnostic-error' : 'exp-hint'} style={{ gridColumn: '1 / -1' }}>최근 회차에서 출발 후 앞바퀴가 방지턱에 닿기까지 평균 <b>{bumpT.toFixed(2)}초</b> → 감속은 <b>{Math.max(0, bumpT - 0.5).toFixed(1)}~{Math.max(0, bumpT - 0.35).toFixed(1)}초</b>에 시작하세요(모터가 줄어드는 데 0.2~0.4초).{atS > bumpT - 0.3 ? ` 지금 ${atS}초는 너무 늦어 방지턱에 닿은 뒤에 줄어듭니다.` : ''}</p>}
         {trigger === 'time' && <label>출발 후 (s)<NumInput min={0} max={6} step={0.1} value={atS} onChange={e => setAtS(Math.max(0, Number(e.target.value) || 0))} /></label>}
         {(trigger === 'distance' || (trigger === 'camera_distance' && autoCm == null)) && <label>벽까지 (cm) 가 되면<NumInput min={5} max={300} step={5} value={atCm} onChange={e => setAtCm(Math.max(5, Number(e.target.value) || 60))} /></label>}
         {(trigger === 'distance_auto' || trigger === 'camera_distance') && <label>방지턱보다 먼저 감속할 거리 (cm){autoCm != null ? ` → 벽까지 ${autoCm.toFixed(0)} cm에서` : ''}<NumInput min={5} max={150} step={5} value={leadCm} onChange={e => setLeadCm(Math.max(5, Math.min(150, Number(e.target.value) || 30)))} /></label>}
@@ -254,7 +259,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           name={`slow_trace_${showRun.id}`} /> : <div className="empty-chart">그래프 불러오는 중…</div>)}
         {showRun && detail && detail.id === showRun.id && (detail.drive_log?.length ?? 0) > 1 && <XYChart name={`slow_out_${showRun.id}`} title={`출력 변화 – ${runName(showRun)}`} xLabel="출발 후 시간 (s)" yLabel={`출력 (${condition.output_mode.toUpperCase()})`}
           series={[{ name: '명령한 출력', color: '#a04fa0', line: true, dots: false, points: (detail.drive_log ?? []).map(r => ({ x: r[0], y: r[1] })) }]}
-          vLines={[...(showRun.slowdown?.slowed_at_s != null ? [{ x: showRun.slowdown.slowed_at_s - (showRun.pre_roll_s ?? 0), label: '감속 시작', color: '#a04fa0' }] : []), ...(showRun.slowdown?.resumed_at_s != null ? [{ x: showRun.slowdown.resumed_at_s - (showRun.pre_roll_s ?? 0), label: `다시 가속${showRun.slowdown.resumed_by === 'timer' ? '(시간)' : ''}`, color: '#3c9a5f' }] : [])]}
+          vLines={[...(showRun.slowdown?.slowed_at_s != null ? [{ x: showRun.slowdown.slowed_at_s - (showRun.drive_t0_s ?? showRun.pre_roll_s ?? 0), label: '감속 시작', color: '#a04fa0' }] : []), ...(showRun.slowdown?.resumed_at_s != null ? [{ x: showRun.slowdown.resumed_at_s - (showRun.drive_t0_s ?? showRun.pre_roll_s ?? 0), label: `다시 가속${showRun.slowdown.resumed_by === 'timer' ? '(시간)' : ''}`, color: '#3c9a5f' }] : [])]}
           caption={showRun.slowdown?.slowed_at_s == null ? '이 회차는 감속 신호가 오지 않아 출력이 그대로였습니다(카메라·초음파가 방지턱을 못 알아챘거나, 시간 방식이면 시간이 주행 시간보다 늦음).' : `선이 ${showRun.slowdown.output_initial} → ${showRun.slowdown.output}${showRun.slowdown.resumed_at_s != null ? ` → ${showRun.slowdown.output_initial}` : ''}로 계단처럼 바뀌었으면 감속${showRun.slowdown.resumed_at_s != null ? '·재가속' : ''}이 된 것입니다.${showRun.slowdown.resume && showRun.slowdown.resumed_at_s == null ? ' 다시 가속이 안 됐습니다: 기울기로 다 넘음을 못 알아챘고, 감속 후 대기 시간도 0이었거나 주행 시간이 먼저 끝났습니다.' : ''}`} />}
         <XYChart name={`slowdown_${bump}`} title="감속 제어 결과: 실제 통과 속도와 최대 충격" xLabel="실제 통과 속도 (m/s, 바퀴 간격)" yLabel="최대 수직 가속도 (g)"
           series={[{ name: `관계식 예측 (${massG} g)`, color: '#2f6fb0', line: true, dots: false, points: curve },

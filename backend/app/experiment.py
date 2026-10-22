@@ -463,7 +463,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
                                     "slowdown", "distance_summary", "stopped_by_wall", "course", "guided",
-                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason")}
+                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason", "drive_t0_s")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -958,7 +958,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
             "steer_mean_late": round(sum(half) / len(half), 3) if half and controller is not None else None,
             "heading_flipped": bool(controller and controller.flipped),
             "slowed_at_s": round(slowed_at - start, 3) if slowed_at is not None else None,
-            "slowed_by": slowed_by,
+            "slowed_by": slowed_by, "start_mono": start,
             "resumed_at_s": round(resume_at - start, 3) if resume_at is not None else None, "resumed_by": resume_by,
             "stage_log": stage_log,
             "camera_seen_s": round(camera.seen_at - start, 3) if camera is not None and camera.seen_at is not None else None,
@@ -1297,15 +1297,20 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         columns = meta.pop("columns")
         if not columns["t_s"]:
             raise RuntimeError("센서 표본이 없어 저장하지 않았습니다.")
+    # 주행 시작이 기록 시작으로부터 몇 초 뒤였는지(출발 전 기록 + 조향 서보 정렬 시간 등). 예전에는 '출발 전 기록 시간'만
+    # 더해서, 서보 정렬(약 0.4초)이 들어간 뒤로 감속 표시가 실제보다 0.4초 이르게 찍혔습니다.
+    rec0 = None if simulated else getattr(mpu6050_service, "_record_started_mono", None)
+    t_off = round(drive_info["start_mono"] - rec0, 3) if rec0 is not None and drive_info.get("start_mono") else float(opts["pre_roll"])
+    run["drive_t0_s"] = t_off
     if run.get("slowdown") and drive_info.get("slowed_at_s") is not None:
-        run["slowdown"]["slowed_at_s"] = round(drive_info["slowed_at_s"] + opts["pre_roll"], 3)  # 기록 시작 기준
+        run["slowdown"]["slowed_at_s"] = round(drive_info["slowed_at_s"] + t_off, 3)  # 기록 시작 기준
         run["slowdown"]["slowed_by"] = drive_info.get("slowed_by")
     if run.get("slowdown") and drive_info.get("resumed_at_s") is not None:
-        run["slowdown"]["resumed_at_s"] = round(drive_info["resumed_at_s"] + opts["pre_roll"], 3)
+        run["slowdown"]["resumed_at_s"] = round(drive_info["resumed_at_s"] + t_off, 3)
         run["slowdown"]["resumed_by"] = drive_info.get("resumed_by")
     if run.get("slowdown") and drive_info.get("stage_log"):
-        run["slowdown"]["stage_log"] = [[round(t + opts["pre_roll"], 3), st, o] for t, st, o in drive_info["stage_log"]]
-    run.update({k: v for k, v in drive_info.items() if k not in ("slowed_at_s", "stage_log", "resumed_at_s", "resumed_by")})
+        run["slowdown"]["stage_log"] = [[round(t + t_off, 3), st, o] for t, st, o in drive_info["stage_log"]]
+    run.update({k: v for k, v in drive_info.items() if k not in ("slowed_at_s", "stage_log", "resumed_at_s", "resumed_by", "start_mono")})
     run["data_source"] = "synthetic" if simulated else "mpu6050"
     run = await asyncio.to_thread(finalize_run, run, columns, meta, settings)
     if simulated and opts.get("ultrasonic"):
