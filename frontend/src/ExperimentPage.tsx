@@ -255,7 +255,19 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   // ------------------------------------------------------------ 분석 데이터
   const runs = data?.runs ?? [];
   const [purposeFilter, setPurposeFilter] = usePersistentState<'all' | Purpose>('runs-purpose-filter', 'all');
-  const shown = purposeFilter === 'all' ? runs : runs.filter(r => (r.condition.purpose ?? 'main') === purposeFilter);
+  const [outFilter, setOutFilter] = useState<string>('all');
+  const outKey = (r: { condition: { output_mode: string; output_value: number } }) => `${r.condition.output_mode}:${r.condition.output_value}`;
+  const outChoices = Array.from(new Set(runs.map(outKey))).sort((a, b) => Number(a.split(':')[1]) - Number(b.split(':')[1]));
+  const shown = runs.filter(r => (purposeFilter === 'all' || (r.condition.purpose ?? 'main') === purposeFilter) && (outFilter === 'all' || outKey(r) === outFilter));
+  async function setPurposeChecked(p: Purpose) {
+    const ids = Array.from(checked);
+    if (!ids.length) return;
+    try {
+      for (const id of ids) await request(`/api/experiment/runs/${id}`, { method: 'PATCH', body: JSON.stringify({ purpose: p }), timeoutMs: 15000 });
+      setMessage(`선택한 ${ids.length}개 시행을 '${PURPOSE_LABEL[p]}'(으)로 바꿨습니다.${p !== 'main' ? ' 관계식 계산에서 빠집니다.' : ''}`);
+      setChecked(new Set()); await loadRuns(null);
+    } catch (e) { fail(e); }
+  }
   async function clearPurpose(p: Purpose) {
     const n = runs.filter(r => (r.condition.purpose ?? 'main') === p).length;
     if (window.prompt(`${PURPOSE_LABEL[p]} 시행 ${n}개를 휴지통으로 옮깁니다(점검·데이터 탭 휴지통에서 되돌릴 수 있음). 계속하려면 '삭제'를 입력하세요.`)?.trim() !== '삭제') return;
@@ -434,6 +446,8 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
       <RunViewer runs={shown} selectedId={selectedId} setSelectedId={setSelectedId} detail={detail} settings={settings ?? DEFAULT_SETTINGS} data={data} request={request} download={download} patchRun={patchRun} toggleExcluded={toggleExcluded} deleteRun={deleteRun} />
 
       <article className="card experiment-card"><div className="card-head"><div><h2>시행 목록 ({shown.length}{purposeFilter !== 'all' ? ` / 전체 ${runs.length}` : ''})</h2><p>최신 순. 회색 줄은 계산에서 뺀 회차, 빨간 줄은 허용 기준을 넘은 회차입니다. '방지턱 못 찾음'은 평지처럼 뚜렷한 충격이 없어 자동으로 계산에서 빠진 회차입니다.</p></div><div className="button-row"><label className="exp-inline">보기<select value={purposeFilter} onChange={e => { setPurposeFilter(e.target.value as 'all' | Purpose); setChecked(new Set()); }}><option value="all">전체</option><option value="main">본 실험만</option><option value="validation">식 검증만</option><option value="pilot">예비만</option></select></label>
+          <label className="exp-inline">출력<select value={outFilter} onChange={e => { setOutFilter(e.target.value); setChecked(new Set()); }}><option value="all">전체</option>{outChoices.map(k => <option key={k} value={k}>{k.split(':')[0].toUpperCase()} {Number(k.split(':')[1])}</option>)}</select></label>
+          {checked.size > 0 && <label className="exp-inline">선택 {checked.size}개 목적<select value="" onChange={e => { if (e.target.value) void setPurposeChecked(e.target.value as Purpose); }}><option value="">바꾸기…</option><option value="main">본 실험</option><option value="validation">식 검증</option><option value="pilot">예비</option></select></label>}
           {purposeFilter !== 'all' && <button className="secondary" disabled={!shown.length || busy} onClick={() => void clearPurpose(purposeFilter)}><Trash2 size={14} /> {PURPOSE_LABEL[purposeFilter]} 전부 휴지통으로</button>}
           <button className="secondary" disabled={!checked.size || busy} onClick={() => void deleteChecked()}><Trash2 size={14} /> 선택 삭제 ({checked.size})</button><button className="primary" disabled={!shown.length} onClick={() => download('/api/experiment/export/summary.csv', 'picarx_summary.csv')} title="방지턱·질량·출력(PWM) 순으로 정리한 회차 표와 조건별 평균, 자동 해석"><Download size={14} /> 핵심 요약 CSV</button><button className="secondary" disabled={!shown.length} onClick={() => download(`/api/experiment/export/raw.zip${checked.size ? `?ids=${Array.from(checked).join(',')}` : ''}`, 'picarx_raw_runs.zip')}><Download size={14} /> 원자료 ZIP ({checked.size ? `선택 ${checked.size}개` : '전체'})</button><button className="secondary" disabled={!shown.length} title="앞바퀴 −0.15 ~ +0.45초(방지턱 부분)의 가속도만 잘라 회차별로 모음: 긴 표(long), 1 ms 간격 넓은 표(wide, 엑셀 겹친 그래프용), 회차별 핵심값" onClick={() => download(`/api/experiment/export/bump_windows.zip${checked.size ? `?ids=${Array.from(checked).join(',')}` : ''}`, 'picarx_bump_windows.zip')}><Download size={14} /> 방지턱 구간만 ZIP ({checked.size ? `선택 ${checked.size}개` : '전체'})</button><button className="secondary" disabled={!shown.length} onClick={() => download('/api/experiment/export/shown.csv', 'picarx_runs.csv')}><Download size={14} /> 시행 CSV(전체 항목)</button></div></div>
         {shown.length === 0 ? <div className="empty-chart">기록 없음</div> : <div className="experiment-table-wrap"><table className="experiment-table exp-clickable"><thead><tr><th><input type="checkbox" aria-label="모두 선택" checked={checked.size > 0 && checked.size === shown.length} onChange={e => setChecked(e.target.checked ? new Set(shown.map(r => r.id)) : new Set())} /></th><th>회차</th><th>목적</th><th>방지턱</th><th>총질량</th><th>출력</th><th>통과 속도 (m/s)</th><th>가장 큰 충격 (g)</th><th>평소보다 더 (g)</th><th>Π</th><th>바퀴 뜸</th><th>상태</th></tr></thead>
