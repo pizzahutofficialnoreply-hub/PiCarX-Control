@@ -843,7 +843,13 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                   break
           # 감속 회차는 감속을 시작하고 0.3초 뒤부터 '다 넘음'을 봅니다. 출발할 때 차가 뒤로 젖혔다 돌아오는 기울기
           # (+ → − → 수평)를 방지턱으로 착각해 출발 직후 멈추던 문제를 막기 위해서입니다.
-          watch_armed = slowdown is None or (slowed_at is not None and now - slowed_at >= 0.3)
+          # 감속 회차: 출발 직후 0.35초(차가 뒤로 젖혔다 돌아오는 출발 흔들림)가 지나면 그 순간 기울기를 0으로 잡고
+          # 방지턱 통과(앞바퀴 오름 + → 뒷바퀴 오름 − → 수평)를 자이로로 봅니다. 예전에는 감속 0.3초 뒤부터 봐서,
+          # 감속이 늦으면 앞바퀴 오름을 놓쳐 '다 넘음'을 못 알아채고 시간으로만 다시 가속했습니다.
+          watch_armed = slowdown is None or now - start >= 0.35
+          if slowdown is not None and slowed_at is not None and now - slowed_at < 0.3 and bump_watch is not None and bump_watch.axis is None:
+              # 방지턱 전 감속 순간에 차 앞이 살짝 숙여지는 흔들림은 무시하고, 가라앉은 뒤 기울기를 다시 0으로
+              watch_armed, tilt_base = False, None
           tl_now = mpu6050_service.tilt_deg() if bump_watch is not None else None
           if slowdown is not None and watch_armed and tl_now is not None and tilt_base is None:
               tilt_base = tl_now   # 지켜보기 시작한 순간의 기울기를 0으로(자이로 적분이 조금 흘러도 오판 안 하게)
