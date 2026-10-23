@@ -13,6 +13,7 @@ import ModelExplain from './experiment/ModelExplain';
 import ValidationTab from './experiment/ValidationTab';
 import LineTab from './experiment/LineTab';
 import ToolsTab from './experiment/ToolsTab';
+import AppliedPanel from './experiment/AppliedPanel';
 import GuideTab from './experiment/GuideTab';
 import TheoryTab from './experiment/TheoryTab';
 import HelpBox from './components/HelpBox';
@@ -314,6 +315,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     {outdated && <div className="error-banner exp-outdated"><AlertTriangle size={17} /><span><b>라즈베리파이의 백엔드가 이전 버전이라 실험 기능(/api/experiment)이 없습니다.</b> 화면은 기본값으로 표시합니다. Pi 터미널에서 <code>cd ~/PiCarX-Control && git fetch && git checkout feature/mpu6050-impact-analysis && git pull</code> 후 서버를 재시작하세요(systemd를 쓰면 <code>sudo systemctl restart picarx-control</code>).</span></div>}
     {error && <div className="error-banner"><AlertTriangle size={17} /><span>{error}</span><button aria-label="닫기" onClick={() => setError('')}>×</button></div>}
     {message && <p className="data-tag exp-message">{message}</p>}
+    {serverAvailable && <AppliedPanel ctx={ctx} />}
     <nav className="exp-subtabs" aria-label="실험 관리 하위 탭">{SUB_TABS.map(t => <button key={t.id} type="button" className={tab === t.id ? 'selected' : ''} onClick={() => setTab(t.id)}><t.icon size={15} />{t.label}</button>)}</nav>
     {tab === 'theory' && <TheoryTab ctx={ctx} />}
     {tab === 'validate' && <ValidationTab ctx={ctx} />}

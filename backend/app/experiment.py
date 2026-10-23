@@ -459,13 +459,63 @@ def finalize_run(run: dict[str, Any], columns: dict[str, list[float]], meta: dic
     return run
 
 
+SERVER_STARTED = datetime.now(timezone.utc).isoformat()
+
+
+def _code_version() -> str | None:
+    """지금 서버가 돌리는 코드의 git 커밋(앞 7자리). 업데이트 후 재시작했는지 확인용."""
+    try:
+        root = Path(__file__).resolve().parents[2] / ".git"
+        head = (root / "HEAD").read_text().strip()
+        if head.startswith("ref: "):
+            ref = head[5:]
+            p = root / ref
+            if p.exists():
+                return p.read_text().strip()[:7]
+            for line in (root / "packed-refs").read_text().splitlines():
+                if line.endswith(ref):
+                    return line[:7]
+        return head[:7]
+    except Exception:
+        return None
+
+
+def applied_snapshot(opts: dict[str, Any] | None = None) -> dict[str, Any]:
+    """실제로 적용되는 주행·조향·학습 설정을 한곳에 모읍니다(화면 표시, 회차마다 기록)."""
+    st = store.load_settings()
+    snap: dict[str, Any] = {
+        "server_started": SERVER_STARTED, "code_version": _code_version(),
+        "heading_learn": st.heading_learn, "heading_ff_forward": st.heading_ff_forward, "heading_ff_backward": st.heading_ff_backward,
+        "heading_sign": st.heading_sign, "heading_gain": st.heading_gain, "heading_ki": st.heading_ki,
+        "line_steer_ff_deg": st.line.steer_ff_deg, "line_learn_steer": st.line.learn_steer,
+        "steering_source_default": st.steering_source, "kick_ms_default": st.kick_ms,
+    }
+    try:
+        ctl = control()
+        snap.update(drive=dict(ctl.drive_settings), steering_center=ctl.steering_center, adapter_mode=ctl.adapter.mode,
+                    wheel_trim=list(getattr(ctl.adapter, "wheel_trim", (1.0, 1.0)) or (1.0, 1.0)),
+                    last_command=(ctl.adapter.last_command or None))
+    except Exception:
+        pass
+    try:
+        if snap.get("adapter_mode") == "hardware":
+            snap["mpu"] = {"read_mode": "fifo" if mpu6050_service._fifo else "direct", "bad_reads": mpu6050_service.bad_reads,
+                           "io_errors": mpu6050_service.io_errors, "heading_active": mpu6050_service.heading_deg() is not None}
+    except Exception:
+        pass
+    if opts:
+        snap["run"] = {k: opts.get(k) for k in ("steering_source", "heading_hold", "kick_ms", "accel_mode", "accel_s", "run_seconds",
+                                                "pre_roll", "end_mode", "return_mode", "wall_stop_cm", "ultrasonic")}
+    return snap
+
+
 def run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return {k: run.get(k) for k in ("id", "created_at", "simulated", "source", "aborted", "excluded", "condition", "bump", "analysis", "recording",
                                     "heading_hold", "heading_max_deg", "heading_end_deg", "battery_v", "steering_source",
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
                                     "slowdown", "distance_summary", "stopped_by_wall", "course", "guided",
-                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason", "drive_t0_s")}
+                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason", "drive_t0_s", "applied")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -1133,6 +1183,10 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     run["battery_v"] = await asyncio.to_thread(ctl.adapter.read_battery) if ctl.adapter.connected else None
     run["steering_source"] = opts["steering_source"]
     run["kick_ms"] = opts["kick_ms"]
+    try:
+        run["applied"] = applied_snapshot(opts)   # 이 회차에 실제로 적용된 설정(서버 재시작·학습으로 바뀌었는지 추적)
+    except Exception:
+        pass
     if opts.get("slowdown_plan"):
         run["slowdown"] = dict(opts["slowdown_plan"])
     logger: DistanceLogger | None = None
@@ -2178,6 +2232,12 @@ async def backup_zip():
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return Response(content=data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="picarx_experiment_backup_{stamp}.zip"'})
+
+
+@router.get("/applied")
+async def applied():
+    """지금 적용되는 주행·조향·학습 설정."""
+    return applied_snapshot()
 
 
 @router.get("/data-check")
