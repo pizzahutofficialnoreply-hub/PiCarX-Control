@@ -1149,11 +1149,6 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
     aborted = False
     drive_info: dict[str, Any] = {}
     try:
-        if not simulated and opts.get("steering_source") == "none" and callable(getattr(ctl.adapter, "settle_steering", None)):
-            try:
-                await asyncio.to_thread(ctl.adapter.settle_steering)   # 조향 없음: 서보 유격 때문에 회마다 틀어지는 것을 줄임
-            except Exception:
-                pass
         auto_runner._phase("pre_roll", opts["pre_roll"], f"{auto_runner.cycle}/{auto_runner.cycles}회 · 정지 상태 기록 중 (차량을 움직이지 마세요)")
         await _wait(ctl, opts["pre_roll"], gen)
         # 방향은 항상 측정해 직진도를 기록하고, 보정은 설정이 켜져 있을 때만 적용합니다.

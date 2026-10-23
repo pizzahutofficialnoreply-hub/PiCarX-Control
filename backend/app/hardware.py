@@ -239,18 +239,6 @@ class PiCarXAdapter:
     def _clamp_f(value: float, low: float, high: float) -> float:
         return max(low, min(high, float(value)))
 
-    def settle_steering(self) -> None:
-        """조향 서보를 한쪽(+6°)으로 갔다가 가운데로 돌아오게 해, 매번 같은 방향에서 중심에 서게 합니다.
-
-        서보 기어에는 유격(백래시)이 있어 어느 쪽에서 왔는지에 따라 '0°'가 0.5~1°씩 다르게 섭니다. 서버를 다시 켜면
-        서보가 초기화 동작 뒤 다른 쪽에서 중심으로 오기 때문에, 출력 보정이 같아도 차가 다른 쪽으로 틀어질 수 있습니다.
-        """
-        self._set_steering(6.0)
-        time.sleep(0.2)
-        self._set_steering(0.0)
-        time.sleep(0.2)
-        self._last_angle = 0.0
-
     def _set_steering(self, angle: float) -> None:
         car = self._require_car()
         # 0.1° 단위까지 보냅니다(서보 라이브러리는 실수 각도를 펄스 폭으로 바꿈). 보정 중심값도 소수 가능.
