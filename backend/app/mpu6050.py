@@ -273,9 +273,10 @@ class MPU6050Service:
         with self._lock:
             if self._running and self._bus is not None:
                 return True
-            if self._attempted and self._error:
-                return False
+            if self._attempted and self._error and time.monotonic() - getattr(self, "_last_attempt", 0.0) < 10.0:
+                return False   # 방금 실패했으면 10초 동안은 다시 시도하지 않음(그 뒤에는 재시작 없이 다시 연결 시도)
             self._attempted = True
+            self._last_attempt = time.monotonic()
             try:
                 bus = self._open_bus()
                 bus.write_byte_data(self.ADDRESS, 0x6B, 0x00)  # wake

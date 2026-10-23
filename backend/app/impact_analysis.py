@@ -146,6 +146,7 @@ def pitch_series(columns: dict[str, Sequence[float]], still_s: float = 0.5) -> l
     still = [i for i, x in enumerate(t) if x - t[0] <= still_s]
     if len(still) < 10:
         return None
+    still = _quiet_window(columns, t, still, still_s)
     acc = [abs(sum(columns[k][i] for i in still) / len(still)) for k in ("ax_g", "ay_g", "az_g")]
     vert = max(range(3), key=lambda i: acc[i])
     def bias(k: str) -> float:
@@ -162,6 +163,43 @@ def pitch_series(columns: dict[str, Sequence[float]], still_s: float = 0.5) -> l
         p += (g[i] - b) * (t[i] - t[i - 1])
         out.append(p)
     return out
+
+
+def _quiet_window(columns: dict[str, Sequence[float]], t: Sequence[float], still: list[int], still_s: float) -> list[int]:
+    """자이로 영점 구간: 기본은 처음 still_s초. 그 구간이 흔들렸으면(측정 전 조향 서보 정렬 등, 자이로 표준편차 0.5 °/s 초과)
+    처음 2초 안에서 가장 조용한 still_s초 구간으로 바꿉니다. 처음 구간이 조용하면(10/18 기록 등) 예전과 똑같습니다."""
+    axes = ("gx_dps", "gy_dps", "gz_dps")
+
+    def noise(ids: list[int]) -> float:
+        out = 0.0
+        for k in axes:
+            vals = [columns[k][i] for i in ids]
+            m = sum(vals) / len(vals)
+            out = max(out, (sum((x - m) ** 2 for x in vals) / len(vals)) ** 0.5)
+        return out
+    if noise(still) <= 0.5:
+        return still
+    best, best_n = still, noise(still)
+    start = t[0]
+    while start + still_s <= t[0] + 2.0:
+        ids = [i for i, x in enumerate(t) if start <= x < start + still_s]
+        if len(ids) >= 10:
+            nz = noise(ids)
+            if nz < best_n:
+                best, best_n = ids, nz
+        start += 0.1
+    return best
+
+
+def corrupt_bursts(v: Sequence[float], swing_g: float = 3.0) -> int:
+    """센서 버퍼 칸 밀림 등으로 값이 위아래로 크게 번갈아 튀는 횟수(연속 두 표본이 반대 방향으로 각각 swing_g 넘게 변함).
+    실제 충격은 몇 ms에 걸쳐 오르내려 이런 모양이 거의 없습니다(10/18 기록: 깨진 표본을 고친 뒤 0~2회)."""
+    n = 0
+    for i in range(1, len(v) - 1):
+        a, b = v[i] - v[i - 1], v[i + 1] - v[i]
+        if a * b < 0 and abs(a) > swing_g and abs(b) > swing_g:
+            n += 1
+    return n
 
 
 def _mean_between(t: Sequence[float], y: Sequence[float], lo: float, hi: float) -> float | None:
@@ -313,7 +351,7 @@ def pitch_events(t: Sequence[float], pitch: Sequence[float] | None, wheelbase_mm
     return ev
 
 
-ANALYSIS_VERSION = 5  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
+ANALYSIS_VERSION = 6  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
 
 EVENT_LABEL = {"FU": "앞바퀴 오름", "FD": "앞바퀴 내림", "RU": "뒷바퀴 오름", "RD": "뒷바퀴 내림"}
 
@@ -692,6 +730,13 @@ def analyze_run(
         return result
     if glitches:
         flags.append(f"센서 통신 오류로 깨진 표본 {glitches}개(한 점만 튀는 0·2·4·8 g 값)를 앞뒤 값으로 바꿨습니다.")
+    bursts = corrupt_bursts(v_raw_all)
+    result["corrupt_swings"] = bursts
+    if bursts >= 5:
+        # 값이 −7 g ↔ +8 g처럼 계속 번갈아 튀는 구간은 실제 충격이 아니라 센서 기록 오류입니다. 최댓값이 이 구간에서 나오면
+        # Δa가 6~7 g로 잘못 잡히므로 이 시행은 집계에서 뺍니다.
+        flags.append(f"센서 값이 위아래로 크게 번갈아 튀는 구간이 있습니다({bursts}번, 센서 버퍼 칸 밀림 등 기록 오류). "
+                     "최대 충격 값을 믿을 수 없어 이 시행은 집계에서 빠집니다. 다시 측정하세요.")
     gaps = [(t[i + 1] - t[i]) for i in range(len(t) - 1)]
     if gaps:
         mg = max(gaps)
@@ -859,6 +904,9 @@ def analyze_run(
         hi, lo = max(pair[0].value_g, pair[1].value_g) - 1.0 if pair else 0, weakest
         if pair and lo > 0 and hi / lo > 4:
             flags.append("앞·뒤 바퀴 피크 크기가 4배 넘게 다릅니다. 짝이 맞는지 그래프로 확인하세요.")
+    if bursts >= 5:
+        pair = None
+        result["bump_detected"] = False
     if pair is None:
         if result["bump_detected"] is None:
             result["bump_detected"] = False

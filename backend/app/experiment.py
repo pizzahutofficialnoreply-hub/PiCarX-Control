@@ -394,9 +394,11 @@ def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings:
     if run.get("slowdown"):
         sd = run["slowdown"]
         sd["measured_speed_mps"] = a.get("speed_mps")
-        if a.get("peak_g") is not None and sd.get("a_limit_g"):
+        if a.get("peak_g") is not None and sd.get("a_limit_g") and a.get("bump_detected"):
             sd["measured_peak_g"] = a["peak_g"]
             sd["pass"] = bool(a["peak_g"] <= sd["a_limit_g"])
+        else:
+            sd["measured_peak_g"] = sd["pass"] = None   # 방지턱을 못 찾았거나 센서 기록이 깨진 회차는 판정하지 않음
     return a
 
 
@@ -2202,6 +2204,20 @@ async def data_check():
         checks.append({"ok": bool(sensor and sensor.get("calibrated")), "text": "정지 상태 보정" + (" 완료" if sensor and sensor.get("calibrated") else " 필요")})
         rate = sensor.get("actual_sample_rate_hz") if sensor else None
         checks.append({"ok": bool(rate and rate >= 500), "text": f"실시간 표본 속도 {rate or '—'} Hz (500 Hz 이상 권장)"})
+        if sensor:
+            tgt = sensor.get("sample_rate_target_hz")
+            mode = "센서 버퍼(FIFO)" if sensor.get("read_mode") == "fifo" else "한 표본씩 직접 읽기"
+            checks.append({"ok": bool(tgt and tgt >= 1000), "text": f"읽기 방식 {mode} · 목표 {tgt or '—'} Hz"
+                           + (f" · {sensor.get('fifo_note')}" if sensor.get("fifo_note") else "")})
+            ov, ra = sensor.get("fifo_overflows") or 0, sensor.get("fifo_realigns") or 0
+            checks.append({"ok": ov == 0 and ra <= 2, "text": f"센서 버퍼 넘침 {ov}번 · 칸 다시 맞춤 {ra}번 · 깨진 표본 {mpu6050_service.bad_reads}개 · 통신 오류 {mpu6050_service.io_errors}번 (서버 켠 뒤 누적). "
+                           "넘침·칸 맞춤이 늘면 측정 중 카메라 화면·초음파를 끄고, I²C를 400 kHz로 올리세요."})
+    recent = [r for r in real[:10] if (r.get("analysis") or {}).get("max_gap_ms") is not None]
+    if recent:
+        gaps = [r["analysis"]["max_gap_ms"] for r in recent]
+        bad = sum(1 for r in recent if (r.get("analysis") or {}).get("corrupt_swings", 0) >= 5)
+        checks.append({"ok": max(gaps) <= 50 and bad == 0, "text": f"최근 실제 시행 {len(recent)}회: 가장 긴 기록 공백 {max(gaps):.0f} ms"
+                       + (f", 값이 번갈아 튀어 빠진 회차 {bad}회" if bad else "") + " (공백 50 ms 이하 권장)"})
     if last:
         rec = last.get("recording") or {}
         checks.append({"ok": (rec.get("count") or 0) > 100, "text": f"마지막 실제 시행 표본 {rec.get('count') or 0}개, {rec.get('sample_rate_hz') or '—'} Hz, 수직축 {rec.get('vertical_axis') or '—'}"})

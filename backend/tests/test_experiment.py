@@ -670,3 +670,31 @@ class LibraryPwmOnlyTests(unittest.TestCase):
         self.assertEqual(experiment.effective_duty("pwm", 83), 91)
         self.assertEqual(experiment.effective_duty("pwm", 100), 100)
         self.assertEqual(experiment.effective_duty("duty", 35), 35)
+
+
+class SensorCleanupTests(unittest.TestCase):
+    def test_corrupt_burst_run_is_excluded(self):
+        cols = synth(80)
+        n = len(cols["t_s"])
+        mid = n // 2
+        v = list(cols["vertical_g"])
+        for j, x in enumerate([-4.3, 7.8, -5.1, 6.5, -6.2, 7.1, -4.0, 6.9]):   # 칸 밀림처럼 번갈아 튀는 값
+            v[mid + j] = x
+        cols = {**cols, "vertical_g": v}
+        a = ia.analyze_run(cols, wheelbase_mm=95, mass_g=1000, bump_radius=50, wheel_radius_mm=33)
+        self.assertGreaterEqual(a["corrupt_swings"], 5)
+        self.assertFalse(a["bump_detected"])
+        self.assertIsNone(a["speed_mps"])
+
+    def test_normal_run_has_no_bursts(self):
+        a = ia.analyze_run(synth(80), wheelbase_mm=95, mass_g=1000, bump_radius=50, wheel_radius_mm=33)
+        self.assertLess(a["corrupt_swings"], 5)
+        self.assertTrue(a["bump_detected"])
+
+    def test_gyro_zero_window_skips_servo_wiggle(self):
+        t = [i * 0.002 for i in range(1000)]
+        g = [(15.0 if (i // 10) % 2 else -15.0) if x < 0.4 else 0.7 for i, x in enumerate(t)]   # 처음 0.4초 서보 흔들림, 이후 영점 0.7 °/s
+        cols = {"t_s": t, "ax_g": [0.0] * 1000, "ay_g": [0.0] * 1000, "az_g": [1.0] * 1000,
+                "gx_dps": g, "gy_dps": [0.0] * 1000, "gz_dps": [0.0] * 1000}
+        p = ia.pitch_series(cols)
+        self.assertLess(abs(p[-1] - p[500]), 0.05)   # 정지 구간 영점을 제대로 잡으면 기울기가 흐르지 않음
