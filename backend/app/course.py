@@ -96,10 +96,10 @@ def course_err() -> float | None:
 
 
 def effective_duty(mode: str, value: float) -> float:
-    """실제 모터 듀티(%): 라이브러리 PWM은 PWM/2 + 50, 직접 듀티는 그대로."""
+    """실제 모터 듀티(%): 라이브러리 PWM은 int(PWM/2) + 50, 직접 듀티는 그대로."""
     if value <= 0:
         return 0.0
-    return min(100.0, value / 2 + 50) if mode == "pwm" else min(100.0, value)
+    return float(min(100, int(min(100.0, value) / 2) + 50)) if mode == "pwm" else min(100.0, value)
 
 
 def is_cross(raw: Any, line: LineSettings, thr: float) -> bool:
@@ -198,7 +198,6 @@ async def _drive_until_cross(ctl, gen: int, req: CourseRequest, line: LineSettin
                              polarity: int = 1, skip: int = 0) -> dict[str, Any]:
     """출력(순차 가속)으로 달리다 가로 테이프를 보면 그 순간부터 decel_s 동안 0까지 줄이고 멈춥니다."""
     mode = req.condition.output_mode
-    eff = effective_duty(mode, output)
     tracker = LineTracker(line) if steering == "line" and direction == "forward" else None
     hold = ex.HeadingController(1.2, 0.8, 0.0, polarity=polarity) if (steering in ("gyro", "line") and tracker is None) else None
     have_heading = mpu6050_service.heading_deg() is not None
@@ -218,8 +217,6 @@ async def _drive_until_cross(ctl, gen: int, req: CourseRequest, line: LineSettin
             el = now - t0
             if detected_at is None and watch.seen.is_set():
                 detected_at = now
-            # 가속·감속 구간은 '실제 듀티'로 비례해서 바꿉니다. 라이브러리 PWM은 듀티 = PWM/2 + 50(%)이라
-            # PWM 숫자를 줄여도 듀티가 50% 아래로 안 내려가 감속이 거의 안 되기 때문입니다.
             if detected_at is not None:
                 k = 1.0 - (now - detected_at) / max(0.01, decel_s)
                 if k <= 0:
@@ -238,10 +235,8 @@ async def _drive_until_cross(ctl, gen: int, req: CourseRequest, line: LineSettin
                 if h is not None:
                     steer = hold.update(h, now - prev, sign)
             prev = now
-            if k >= 0.999:
-                cmd_mode, cmd_out = mode, output
-            else:
-                cmd_mode, cmd_out = "duty", max(0.0, eff * k)
+            # 라이브러리 PWM이면 PWM 값에 비율을 곱해 라이브러리로(직접 듀티로 바꾸지 않음)
+            cmd_mode, cmd_out = mode, (output if k >= 0.999 else max(0.0, output * k))
             if not await ctl.experiment_drive(cmd_mode, cmd_out, runner.gen, direction, steer):
                 raise Stopped()
             await asyncio.sleep(0.02)

@@ -310,17 +310,10 @@ class PiCarXAdapter:
                     l_out *= scale
                 else:
                     r_out *= scale
-            pins = getattr(car, "motor_speed_pins", None)
-            if (tl != 1.0 or tr != 1.0) and pins and len(pins) >= 2 and all(callable(getattr(p, "pulse_width_percent", None)) for p in pins):
-                # 좌우 배율을 쓰면 라이브러리처럼 듀티 = 출력/2 + 50(%)로 계산하되 정수로 자르지 않고 핀에 직접 씁니다
-                # (정수화하면 출력 2 단위마다 1%씩만 바뀌어 1~3% 미세 조정이 사라짐). 방향 핀은 라이브러리 호출로 정합니다.
-                set_speed(1, sign * max(1.0, l_out))
-                set_speed(2, -sign * max(1.0, r_out))
-                pins[0].pulse_width_percent(round(l_out / 2 + 50, 2) if l_out > 0 else 0)
-                pins[1].pulse_width_percent(round(r_out / 2 + 50, 2) if r_out > 0 else 0)
-            else:
-                set_speed(1, sign * l_out)
-                set_speed(2, -sign * r_out)
+            # 라이브러리 PWM 모드는 항상 라이브러리 set_motor_speed만 부릅니다(듀티 = int(PWM/2) + 50 − cali_speed_value는
+            # 라이브러리가 계산). 핀에 듀티를 직접 쓰지 않습니다. 좌우 배율은 '라이브러리에 넘기는 PWM 값'에만 곱합니다.
+            set_speed(1, sign * l_out)
+            set_speed(2, -sign * r_out)
         elif mapping == "library":
             move(output)
         else:

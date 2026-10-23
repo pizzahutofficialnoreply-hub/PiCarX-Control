@@ -911,8 +911,6 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               stage_log.append([round(now - start, 3), stage_now, round(cur, 1)])
               stage_prev = stage_now
           out = 100.0 if kick_ms and not ramp_s and (now - start) * 1000 < kick_ms else cur
-          # 순차 가속·감속은 '실제 듀티'에 비율을 곱합니다(라이브러리 PWM은 듀티 = PWM/2 + 50이라
-          # PWM 숫자만 줄이면 50% 아래로 안 내려가 감속이 거의 안 되기 때문).
           k = 1.0
           if decel_at is not None:
               k = 1.0 - (now - decel_at) / max(0.01, decel_s)
@@ -924,7 +922,9 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
               k = min(k, 0.75)   # 테이프를 찾는 동안은 조금 천천히(방지턱을 이미 지난 뒤라 측정에는 영향 없음)
           cmd_mode, cmd_out = mode, out
           if k < 0.999:
-              cmd_mode, cmd_out = "duty", max(0.0, effective_duty(mode, out) * k)
+              # 순차 가속·감속: 라이브러리 PWM이면 PWM 값에 비율을 곱해 그대로 라이브러리로(직접 듀티로 바꾸지 않음).
+              # 직접 듀티 모드면 듀티에 비율을 곱합니다.
+              cmd_out = max(0.0, out * k)
           if not await ctl.experiment_drive(cmd_mode, cmd_out, generation, direction, steer):
               raise Aborted()
           row = [round(now - start, 3), out, round(steer, 2), None if heading is None else round(heading, 2)]
@@ -935,7 +935,7 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
                       None if tl is None else round(max(abs(tl[0]), abs(tl[1])), 1)]
           log.append(row)
           cs = camera.scores[-1] if camera is not None and camera.scores else None
-          auto_runner.live = {"t": round(now - start, 2), "output": round(out, 1), "mode": mode, "duty": round(effective_duty(mode, out) * k, 1),
+          auto_runner.live = {"t": round(now - start, 2), "output": round(out, 1), "mode": mode, "duty": round(effective_duty(mode, out * k), 1),
                               "base_output": value, "slowed": slowed_at is not None, "slowed_by": slowed_by,
                               "slowed_at": round(slowed_at - start, 2) if slowed_at is not None else None, "stage": stage_now,
                               "passed": passed_at is not None, "camera": [cs[1], cs[2]] if cs else None,
@@ -979,10 +979,10 @@ async def _drive_for(ctl, mode: str, value: float, seconds: float, direction: st
 
 
 def effective_duty(mode: str, value: float) -> float:
-    """실제 모터 듀티(%): 라이브러리 PWM은 PWM/2 + 50, 직접 듀티는 그대로."""
+    """실제 모터 듀티(%): 라이브러리 PWM은 라이브러리 계산 그대로 int(PWM/2) + 50, 직접 듀티는 그대로."""
     if value <= 0:
         return 0.0
-    return min(100.0, value / 2 + 50) if mode == "pwm" else min(100.0, value)
+    return float(min(100, int(min(100.0, value) / 2) + 50)) if mode == "pwm" else min(100.0, value)
 
 
 def _tape_detector(settings: "ExperimentSettings") -> Callable[[Any], bool] | None:

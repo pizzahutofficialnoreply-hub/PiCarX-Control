@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Camera, Gauge, Play, Radar, Square } from 'lucide-react';
 import VisionCal from './VisionCal';
-import { EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type RunDetail } from '../services/experiment';
+import { effectiveDuty, EVENT_INFO, eventPredict, eventSolve, fmt, outputFromSpeed, outputLabel, speedFromOutput, type EventKind, type RunDetail } from '../services/experiment';
 import HelpBox from '../components/HelpBox';
 import { RunTraceChart, XYChart } from '../components/ExperimentCharts';
 import NumInput from '../components/NumInput';
@@ -159,7 +159,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
       <div className="exp-formula-box">
         <div><small>원리</small><b>v* = v_max(m) × 여유율, 출력* = 속도식⁻¹(v*, m)</b><span>{chosen?.kind === 'power' ? `지금 식(거듭제곱)이면 v*/v₀ = (Δa_기준 / Δa(v₀))^(1/n), n = ${chosen.coef.n.toFixed(2)}: 충격을 절반으로 하려면 속도는 ${(0.5 ** (1 / chosen.coef.n) * 100).toFixed(0)}%로` : '관계식 Δa(v, m) = a_기준 − 1 을 v에 대해 풂'}</span></div>
         <div><small>이번 조건 ({condition.bump_id} · {massG} g · {outputLabel(condition.output_mode, condition.output_value)})</small><b>v₀ ≈ {fmt(v0, 3, 'm/s')} → 예측 {d0 == null ? '—' : (1 + d0).toFixed(2) + ' g'}</b><span>허용 기준 {aLimit?.toFixed(2) ?? '—'} g · v_max {fmt(vmax, 3, 'm/s')} · 목표 {fmt(vt, 3, 'm/s')}</span></div>
-        <div className={need ? 'warn' : ''}><small>계획</small><b>{problem ? '—' : need ? `출력 ${condition.output_value} → ${pSlow?.toFixed(1)} 로 감속` : '감속 불필요 (이미 기준 이내)'}</b><span>{need && pSlow != null && condition.output_mode === 'pwm' ? `실제 모터 듀티 ${(condition.output_value / 2 + 50).toFixed(0)}% → ${(pSlow / 2 + 50).toFixed(0)}% (속도 ${fmt(v0, 3)} → ${fmt(vt, 3)} m/s, ${v0 && vt ? ((1 - vt / v0) * 100).toFixed(0) : '—'}% 느리게) · ` : ''}{need && dT != null ? `감속 후 예측 ${(1 + dT).toFixed(2)} g${pRaw != null && pRaw < minOut ? ` · 계산값 ${pRaw.toFixed(1)}이 최소 출력보다 낮아 ${minOut}로 제한(멈춤 방지) → 기준을 넘을 수 있음` : ''}` : ''}</span></div>
+        <div className={need ? 'warn' : ''}><small>계획</small><b>{problem ? '—' : need ? `출력 ${condition.output_value} → ${pSlow?.toFixed(1)} 로 감속` : '감속 불필요 (이미 기준 이내)'}</b><span>{need && pSlow != null && condition.output_mode === 'pwm' ? `실제 모터 듀티 ${effectiveDuty('pwm', condition.output_value).toFixed(0)}% → ${effectiveDuty('pwm', pSlow).toFixed(0)}% (속도 ${fmt(v0, 3)} → ${fmt(vt, 3)} m/s, ${v0 && vt ? ((1 - vt / v0) * 100).toFixed(0) : '—'}% 느리게) · ` : ''}{need && dT != null ? `감속 후 예측 ${(1 + dT).toFixed(2)} g${pRaw != null && pRaw < minOut ? ` · 계산값 ${pRaw.toFixed(1)}이 최소 출력보다 낮아 ${minOut}로 제한(멈춤 방지) → 기준을 넘을 수 있음` : ''}` : ''}</span></div>
       </div>
       {(dTarget != null || staged) && <div className="exp-formula-box">
         <div><small>목표 충격 Δa*</small><b>{dTarget == null ? '—' : `${dTarget.toFixed(3)} g`}{aLimit ? ` (기준 +${(aLimit - 1).toFixed(2)} g${margin === 'sigma' ? ` − 2×${err.toFixed(3)}` : ''})` : ''}</b><span>{margin === 'sigma' ? `관계식의 예측 오차(교차검증 RMSE ±${err.toFixed(3)} g)의 2배만큼 기준 아래를 목표로 → 측정이 흔들려도 약 95% 확률로 기준 이내` : `v_max × ${safety} : 속도를 ${((1 - safety) * 100).toFixed(0)}% 낮춰 여유를 둠`}</span></div>
@@ -167,12 +167,12 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           <span>앞바퀴 구간 v = {fmt(vFront, 3, 'm/s')}(출력 {pSlow?.toFixed(1) ?? '—'}) → 앞바퀴가 다 내려오면 뒷바퀴 구간 v = {fmt(vRear, 3, 'm/s')}(출력 {pRear == null ? '—' : Math.min(condition.output_value, Math.max(minOut, pRear)).toFixed(1)}){vFront != null && haveEvents ? ` · 예측: ${kinds.map(k => `${EVENT_INFO[k].short} +${eventPredict(em[k]!, k === 'FU' || k === 'FD' ? vFront : (vRear ?? vFront), mKg).toFixed(2)}g`).join(', ')}` : ''}</span></div>}
       </div>}
       {pred && v0 != null && <details className="exp-tips" open={false}><summary>기준을 바꾸면 감속이 얼마나 되나 (눈에 보이는 감속을 원할 때)</summary>
-        <p className="exp-hint">PWM은 실제 듀티 = PWM/2 + 50% 라서 PWM 100 → 84 는 듀티 100% → 92%, 속도로 약 10%만 줄어 눈으로는 거의 같습니다. 눈에 띄려면 속도가 25~30% 이상(PWM 50~60) 줄어야 하고, 그러려면 기준이 더 엄격해야 합니다. 아래는 지금 식으로 계산한 값입니다(여유율 {margin === 'ratio' ? safety : 1} 적용). 누르면 이 화면의 시험 기준만 바뀝니다(분석 탭 기준은 그대로).</p>
+        <p className="exp-hint">PWM은 실제 듀티 = int(PWM/2) + 50% (라이브러리 계산)라서 PWM 100 → 84 는 듀티 100% → 92%, 속도로 약 10%만 줄어 눈으로는 거의 같습니다. 눈에 띄려면 속도가 25~30% 이상(PWM 50~60) 줄어야 하고, 그러려면 기준이 더 엄격해야 합니다. 아래는 지금 식으로 계산한 값입니다(여유율 {margin === 'ratio' ? safety : 1} 적용). 누르면 이 화면의 시험 기준만 바뀝니다(분석 탭 기준은 그대로).</p>
         <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>기준 (총 / Δa)</th><th>v_max</th><th>목표 속도</th><th>감속 출력</th><th>실제 듀티</th><th>시작 대비 속도</th><th></th></tr></thead>
           <tbody>{[1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3].map(da => { const vm = solveFor(v => pred.delta(v, mKg) ?? NaN, da); const vv = vm != null ? vm * (margin === 'ratio' ? safety : 1) : null; const o = vv != null ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, vv, massG) : null;
             const cur = aLimit != null && Math.abs(aLimit - 1 - da) < 0.005;
             return <tr key={da} className={cur ? 'selected' : ''}><td>{(1 + da).toFixed(1)} g / {da.toFixed(1)} g</td><td>{fmt(vm, 3)}</td><td>{fmt(vv, 3)}</td><td>{o == null ? '—' : o > condition.output_value ? '감속 불필요' : o.toFixed(1)}</td>
-              <td>{o == null || o > condition.output_value ? '—' : condition.output_mode === 'pwm' ? `${(o / 2 + 50).toFixed(0)}%` : `${o.toFixed(0)}%`}</td><td>{vv != null && v0 ? `${((vv / v0) * 100).toFixed(0)}%` : '—'}</td>
+              <td>{o == null || o > condition.output_value ? '—' : condition.output_mode === 'pwm' ? `${effectiveDuty('pwm', o).toFixed(0)}%` : `${o.toFixed(0)}%`}</td><td>{vv != null && v0 ? `${((vv / v0) * 100).toFixed(0)}%` : '—'}</td>
               <td><button className="secondary" onClick={() => { setTargetG(Number((1 + da).toFixed(2))); setManualOut(''); setManualV(''); }}>이 기준으로</button></td></tr>; })}</tbody></table></div>
       </details>}
       <HelpBox id="slow-margin" title="'기준 바로 밑(0.9999…)'으로 맞추면 안 되는 이유" defaultOpen={false}>

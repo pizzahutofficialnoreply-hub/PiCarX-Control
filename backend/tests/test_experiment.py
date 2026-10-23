@@ -621,3 +621,52 @@ class LineFollowSimTests(unittest.TestCase):
         self.assertTrue(tr.flipped)
         self.assertIsNotNone(worst)
         self.assertLess(worst, 0.011)
+
+
+class LibraryPwmOnlyTests(unittest.TestCase):
+    """라이브러리 PWM을 고르면 직접 듀티로 바꾸지 않고 라이브러리 set_motor_speed만 쓰는지."""
+
+    def _adapter(self, trims=(1.0, 1.0)):
+        adapter = PiCarXAdapter.__new__(PiCarXAdapter)
+        adapter.connected, adapter.connection_error, adapter.steering_center = True, None, 0
+        car = MagicMock()
+        car.motor_speed_pins = [MagicMock(), MagicMock()]
+        adapter._car = car
+        adapter.wheel_trim = trims
+        return adapter, car
+
+    def test_wheel_trims_still_go_through_library(self):
+        adapter, car = self._adapter((0.89, 1.0))
+        adapter.drive_experiment("pwm", 100)
+        car.set_motor_speed.assert_any_call(1, 89.0)
+        car.set_motor_speed.assert_any_call(2, -100.0)
+        for pin in car.motor_speed_pins:
+            pin.pulse_width_percent.assert_not_called()
+        adapter.drive("forward", 60, 0)   # 수동 주행도 같음
+        for pin in car.motor_speed_pins:
+            pin.pulse_width_percent.assert_not_called()
+
+    def test_ramp_and_decel_stay_in_library_pwm(self):
+        import asyncio as _a
+        sent = []
+
+        class Ctl:
+            stop_generation = 0
+            adapter = MagicMock()
+
+            async def experiment_drive(self, mode, value, gen, direction, steer):
+                sent.append((mode, value))
+                return True
+        with patch.object(experiment.mpu6050_service, "heading_deg", return_value=None), \
+                patch.object(experiment.mpu6050_service, "tilt_deg", return_value=None):
+            _a.run(experiment._drive_for(Ctl(), "pwm", 80, 0.3, "forward", 0, False, 1.0, track=False, ramp_s=0.2))
+        self.assertTrue(sent)
+        self.assertTrue(all(m == "pwm" for m, _ in sent), sent)
+        self.assertLess(sent[0][1], 80)          # 출발 때는 PWM 값 자체를 비율만큼 낮춤
+        self.assertEqual(sent[-1][1], 80)
+
+    def test_effective_duty_matches_library_rounding(self):
+        self.assertEqual(experiment.effective_duty("pwm", 84), 92)
+        self.assertEqual(experiment.effective_duty("pwm", 83), 91)
+        self.assertEqual(experiment.effective_duty("pwm", 100), 100)
+        self.assertEqual(experiment.effective_duty("duty", 35), 35)

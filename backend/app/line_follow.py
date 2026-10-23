@@ -455,9 +455,8 @@ class LineRunner:
                     return
                 cmd_mode, cmd_out = output_mode, output
                 if self.guided is not None and self.guided.mode == "lost":
-                    # 테이프를 찾는 동안은 실제 듀티 75%로 조금 천천히
-                    duty = min(100.0, output / 2 + 50) if output_mode == "pwm" else output
-                    cmd_mode, cmd_out = "duty", duty * 0.75
+                    # 테이프를 찾는 동안은 조금 천천히(라이브러리 PWM이면 PWM 값 × 0.75를 라이브러리로)
+                    cmd_mode, cmd_out = output_mode, output * 0.75
                 if not await ctl.experiment_drive(cmd_mode, cmd_out, gen, "forward", steer):
                     self.state, self.message = "stopped", "정지 명령으로 멈췄습니다."
                     return
