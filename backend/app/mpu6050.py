@@ -61,7 +61,9 @@ class MPU6050Service:
         self.fifo_realigns = 0
         self._odd_hist: deque = deque()
         import os
-        self.use_fifo = os.getenv("PICARX_MPU_FIFO", "1") != "0"   # 센서 내장 버퍼로 읽기(실패하면 한 표본씩 직접 읽기로 돌아감)
+        # 기본은 한 표본씩 직접 읽기(I²C 400 kHz에서 약 1 kHz). 센서 버퍼(FIFO)는 칸이 밀리면 −7 g ↔ +8 g 같은 깨진 값이
+        # 섞여 들어와(10/22~23 확인) 기본으로 쓰지 않습니다. PICARX_MPU_FIFO=1 이면 버퍼 읽기를 시도합니다.
+        self.use_fifo = os.getenv("PICARX_MPU_FIFO", "0") == "1"
         self._fifo = False
         self._fifo_dt = 0.001
         self._fifo_k = 0
