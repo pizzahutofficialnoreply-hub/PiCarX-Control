@@ -195,7 +195,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
             {(cmp?.models ?? []).map(m => <option key={m.id} value={m.id}>{m.name}: {m.formula}</option>)}</select></label>
         </div>
         <div className="button-row"><button className="secondary" disabled={!ctx.serverAvailable} onClick={() => void reportPreset()}>보고서 식 + 여유 10%로 맞추기</button>
-          <span className="exp-hint">지금 식: <b>{chosen ? chosen.formula : '—'}</b>{manualOut !== '' ? ` · 감속 출력 직접 ${manualOut} (식 무시)` : margin === 'sigma' ? ' · 목표를 기준보다 2×오차만큼 낮게 잡는 중' : ` · 여유율 ${safety}`}</span></div>
+          <span className="exp-hint">관계식: <b>{chosen ? (chosen.kind === 'power' ? `Δa = ${chosen.coef.k0.toPrecision(4)} · v^${chosen.coef.n.toFixed(3)}${chosen.coef.p ? ` · m^${chosen.coef.p.toFixed(3)}` : ''}` : chosen.formula) : '—'}</b>{manualOut !== '' ? ` · 감속 출력 직접 ${manualOut} (식 무시)` : margin === 'sigma' ? ' · 목표 충격 = 기준 − 2×예측 오차' : ` · 목표 속도 v* = ${safety} × v_max (여유율은 속도에 곱함)`}</span></div>
         {manualOut === '' && margin === 'ratio' && safety >= 0.999 && <p className="diagnostic-error">여유율 1.0은 '평균 충격 = 기준'인 속도라서 회차의 절반쯤은 기준을 넘습니다. 실제 제어는 0.9 정도(또는 '예측 오차만큼 기준 아래로')를 쓰세요.</p>}
         <p className="exp-hint">출력을 정한 값으로만 달리고 싶으면(감속 없음) 측정·분석 탭에서 출력만 바꿔 측정하세요. 이 버튼은 '시작 출력으로 달리다가 방지턱 앞에서 계산된 출력으로 줄이는' 시험입니다. 방지턱 앞에서는 출력만 줄이고 멈추지 않습니다. '다 넘으면 다시 가속'을 켜 두면 방지턱을 넘은 뒤 시작 출력으로 돌아가고, 위에 정한 주행 시간이 끝나야 멈춥니다. 방지턱을 넘고도 충분히 갈 만큼 시간을 넉넉히 주세요(측정 탭의 주행 시간과 따로).</p>
       </div>
