@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, AlertTriangle, BookOpen, CheckCircle2, CircleStop, ClipboardCopy, Download, FlaskConical, Play, RefreshCw, Repeat, Route, Save, ScanLine, Sigma, Trash2, Wrench } from 'lucide-react';
 import { apiDownload } from './services/api';
 import {
-  bumpRadiusMm, DEFAULT_SETTINGS, effectiveDuty, fmt, G, modelPredict, modelSolveSpeed, OUTLIER_LABEL, outputLabel, paramText, PURPOSE_LABEL, readCondition, writeCondition, type OutlierMethod, type Purpose,
+  bumpRadiusMm, DEFAULT_SETTINGS, effectiveDuty, nextCondition, fmt, G, modelPredict, modelSolveSpeed, OUTLIER_LABEL, outputLabel, paramText, PURPOSE_LABEL, readCondition, writeCondition, type OutlierMethod, type Purpose,
   type AutoRunState, type BumpProfile, type ExperimentCondition, type ExperimentSettings, type RunDetail, type RunsResponse,
 } from './services/experiment';
 import { PiChart, SpeedImpactChart, XYChart } from './components/ExperimentCharts';
@@ -73,7 +73,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
   const serverAvailable = controlMode === 'hardware' && connected;
   const simulated = serverMode === 'mock';
   const busy = !!auto && BUSY.includes(auto.state);
-  const setCondition = (update: Partial<ExperimentCondition>) => setConditionState(prev => { const next = { ...prev, ...update }; writeCondition(next); return next; });
+  const setCondition = (update: Partial<ExperimentCondition>) => setConditionState(prev => { const next = nextCondition(prev, update); writeCondition(next); return next; });
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
 
   const loadRuns = useCallback(async (select?: string | null) => {
@@ -146,7 +146,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
           if (state.state === 'done' || state.state === 'aborted') {
             // 다음 측정 회차를 먼저 올린 뒤 목록을 새로 고칩니다.
             const count = done.length || (state.result ? 1 : 0);
-            if (count) setConditionState(prev => { const next = { ...prev, trial: prev.trial + count }; writeCondition(next); return next; });
+            if (count) setConditionState(prev => { const next = nextCondition(prev, { trial: prev.trial + count }); writeCondition(next); return next; });
             await loadRuns(state.result?.id ?? null);
           }
         }
@@ -339,7 +339,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
     <section className="experiment-layout">
       <article className="card experiment-card"><div className="card-head"><div><h2>실험 조건</h2><p>조작 변인(방지턱·질량·출력)을 정하고 자동 측정 주행을 누르세요. 차는 정지 기록 → 직진 → 정지 순으로 움직입니다.</p></div></div>
         <div className="experiment-fields">
-          <label>반복 회차<NumInput min={1} value={condition.trial} onChange={e => setCondition({ trial: Math.max(1, Math.round(Number(e.target.value) || 1)) })} /></label>
+          <label>{PURPOSE_LABEL[(condition.purpose ?? 'main') as Purpose]} 회차 (목적마다 따로 셈)<div className="exp-inline"><NumInput min={1} value={condition.trial} onChange={e => setCondition({ trial: Math.max(1, Math.round(Number(e.target.value) || 1)) })} /><button type="button" className="secondary" title="이 목적의 회차 번호를 1부터 다시 셉니다" onClick={() => setCondition({ trial: 1 })}>1부터</button></div></label>
           <label>방지턱<select value={condition.bump_id} onChange={e => setCondition({ bump_id: e.target.value })}>{(settings?.bumps ?? []).map(b => <option key={b.id} value={b.id}>{b.name || b.id} · h {b.height_mm} / w {b.width_mm} mm · R {fmt(b.radius_mm, 1)} mm</option>)}</select></label>
           <label>차체 기본 질량 (g)<NumInput min={1} value={condition.base_mass_g || ''} placeholder="저울 측정값 (차체+센서)" onChange={e => setCondition({ base_mass_g: Math.max(0, Number(e.target.value) || 0) })} /></label>
           <label>추가 질량 (g)<div className="exp-inline"><NumInput min={0} value={condition.added_mass_g} onChange={e => setCondition({ added_mass_g: Math.max(0, Number(e.target.value) || 0) })} />{[0, 150, 300].map(v => <button key={v} type="button" className={condition.added_mass_g === v ? 'secondary selected' : 'secondary'} onClick={() => setCondition({ added_mass_g: v })}>+{v}</button>)}</div></label>

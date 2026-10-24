@@ -212,6 +212,9 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         <label className="exp-check"><input type="checkbox" checked={staged} onChange={e => setStaged(e.target.checked)} /> 단계별 (앞바퀴 구간·뒷바퀴 구간을 각각의 식으로)</label>
         <label className="exp-check"><input type="checkbox" checked={resume} onChange={e => setResume(e.target.checked)} /> 다 넘으면 원래 출력으로 다시 가속</label>
         {resume && <label>다 넘음을 못 알아채면 감속 후 (s) 뒤 가속<NumInput min={0} max={10} step={0.5} value={resumeAfter} onChange={e => setResumeAfter(Math.max(0, Math.min(10, Number(e.target.value) || 0)))} /></label>}
+        <label>측정 목적<select value={condition.purpose ?? 'main'} onChange={e => ctx.setCondition({ purpose: e.target.value as 'main' | 'validation' | 'pilot' })}><option value="validation">식 검증 (관계식에서 제외)</option><option value="pilot">예비 (집계 제외)</option><option value="main">본 실험 (주의: 관계식에 섞임)</option></select></label>
+        <label>{(condition.purpose ?? 'main') === 'validation' ? '식 검증' : (condition.purpose ?? 'main') === 'pilot' ? '예비' : '본 실험'} 회차 (목적마다 따로 셈)<div className="exp-inline"><NumInput min={1} value={condition.trial} onChange={e => ctx.setCondition({ trial: Math.max(1, Math.round(Number(e.target.value) || 1)) })} /><button type="button" className="secondary" title="이 목적의 회차 번호를 1부터 다시 셉니다" onClick={() => ctx.setCondition({ trial: 1 })}>1부터</button></div></label>
+        {(condition.purpose ?? 'main') === 'main' && <p className="diagnostic-error">측정 목적이 '본 실험'이면 감속 회차가 같은 출력의 평균과 관계식에 섞입니다. '식 검증'으로 바꾸세요.</p>}
         <label>반복<NumInput min={1} max={20} value={repeats} onChange={e => setRepeats(Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1))))} /></label>
         <label title="본 실험과 같게(150 ms). 출발 순간 PWM 100으로 밀어 줍니다">출발 밀어주기 (ms)<NumInput min={0} max={400} step={10} value={kickMs} onChange={e => setKickMs(Math.max(0, Math.min(400, Math.round(Number(e.target.value) || 0))))} /></label>
       </div>

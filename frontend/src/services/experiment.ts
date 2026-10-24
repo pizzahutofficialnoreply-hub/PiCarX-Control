@@ -273,6 +273,26 @@ export function readCondition(): ExperimentCondition {
   }
 }
 
+/** 측정 목적(본 실험·식 검증·예비)마다 따로 매기는 회차 번호. 목적을 바꾸면 그 목적의 다음 번호로 바뀝니다. */
+const TRIAL_BY_PURPOSE_KEY = 'picarx-trial-by-purpose';
+export function readTrialByPurpose(): Record<string, number> {
+  try { const m = JSON.parse(localStorage.getItem(TRIAL_BY_PURPOSE_KEY) || '{}'); return m && typeof m === 'object' ? m : {}; } catch { return {}; }
+}
+export function saveTrialForPurpose(purpose: string, trial: number): void {
+  try { const m = readTrialByPurpose(); m[purpose] = trial; localStorage.setItem(TRIAL_BY_PURPOSE_KEY, JSON.stringify(m)); } catch { /* 무시 */ }
+}
+/** 조건을 바꿀 때 목적별 회차 번호를 함께 관리합니다. */
+export function nextCondition(prev: ExperimentCondition, update: Partial<ExperimentCondition>): ExperimentCondition {
+  let next = { ...prev, ...update };
+  const pPrev = prev.purpose ?? 'main', pNext = next.purpose ?? 'main';
+  if (pNext !== pPrev && update.trial === undefined) {
+    saveTrialForPurpose(pPrev, prev.trial);
+    next = { ...next, trial: readTrialByPurpose()[pNext] ?? 1 };
+  }
+  saveTrialForPurpose(pNext, next.trial);
+  return next;
+}
+
 export function writeCondition(condition: ExperimentCondition): void {
   try { localStorage.setItem(EXPERIMENT_CONDITION_KEY, JSON.stringify(condition)); } catch { /* 저장 실패는 무시 */ }
 }
