@@ -22,7 +22,7 @@ export type ExperimentSettings = {
   jump_g: number;
   filter_hz?: number;
   detect_level?: 'strict' | 'normal' | 'sensitive';
-  a_limit_mode: 'manual' | 'first_jump';
+  a_limit_mode: 'manual' | 'first_jump' | 'jump_majority';
   a_limit_g: number | null;
   a_limit_preset?: string;
   a_limit_effective_g?: number | null;
@@ -139,7 +139,7 @@ export type SlowdownInfo = {
   output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null; drive_s?: number | null; resumed_at_s?: number | null; resumed_by?: string | null;
   staged?: { v_by_event: Record<EventKind, number>; v_front_mps: number; v_rear_mps: number; output_front: number | null; output_rear: number | null; clipped: boolean; pred_by_event_g: Record<EventKind, number> } | null;
   resume?: boolean; stage_log?: [number, string, number][];
-  measured_speed_mps?: number | null; measured_peak_g?: number | null; pass?: boolean;
+  measured_speed_mps?: number | null; measured_peak_g?: number | null; measured_max_g?: number | null; measured_delta_g?: number | null; pred_error_pct?: number | null; metric?: ImpactMetric; metric_label?: string; pass?: boolean;
 };
 export type EventModel = { k: number; n: number; p: number; uses_mass: boolean; points: number; r2: number; rmse: number };
 export const eventPredict = (em: EventModel, v: number, mKg: number) => em.k * v ** em.n * (em.uses_mass ? mKg ** em.p : 1);
@@ -188,14 +188,35 @@ export type ConditionGroup = {
   metric?: ImpactMetric; mean_max_delta_g?: number | null; mean_up_impulse_ns?: number | null; event_impulse_ns?: Partial<Record<EventKind, number>>;
   n_skipped?: number; skipped_heading_ids?: string[]; skipped_no_metric_ids?: string[];
 };
-export type SpeedModel = { bump_id: string; output_mode: OutputMode; a: number | null; b: number | null; c: number; r2: number | null; uses_mass: boolean; n: number; output_range: [number, number]; mass_range_g: [number, number] };
+export type SpeedModel = { bump_id: string; output_mode: OutputMode; a: number | null; b: number | null; c: number; r2: number | null; uses_mass: boolean; n: number; output_range: [number, number]; mass_range_g: [number, number];
+  table?: { output: number; mass_g: number; speed_mps: number }[] };
+/** 그 질량을 실제로 측정한 출력별 평균 속도(출력 순, 속도가 늘어나는 점만). 백엔드 model_fit._table과 같음 */
+const speedTable = (m: SpeedModel, massG: number): [number, number][] | null => {
+  const pts = (m.table ?? []).filter(p => Math.abs(p.mass_g - massG) <= 2.5).map(p => [p.output, p.speed_mps] as [number, number]).sort((x, y) => x[0] - y[0]);
+  if (pts.length < 2) return null;
+  const mono: [number, number][] = [pts[0]];
+  for (const p of pts.slice(1)) if (p[1] > mono[mono.length - 1][1]) mono.push(p);
+  return mono.length >= 2 ? mono : null;
+};
+/** 출력 → 속도: 측정한 출력 범위 안이면 이웃 두 출력의 평균 속도를 직선으로 이어 읽고, 밖이면 직선식 */
 export const speedFromOutput = (models: SpeedModel[] | undefined, bump: string, mode: OutputMode, output: number, massG: number): number | null => {
   const m = models?.find(x => x.bump_id === bump && x.output_mode === mode && x.b);
-  return m && m.a != null && m.b != null ? m.a + m.b * output + m.c * massG / 1000 : null;
+  if (!m || m.a == null || m.b == null) return null;
+  const t = speedTable(m, massG);
+  if (t && t[0][0] <= output && output <= t[t.length - 1][0]) {
+    for (let i = 0; i + 1 < t.length; i++) { const [o1, v1] = t[i], [o2, v2] = t[i + 1]; if (o1 <= output && output <= o2) return v1 + (v2 - v1) * (output - o1) / (o2 - o1); }
+  }
+  return m.a + m.b * output + m.c * massG / 1000;
 };
+/** 속도 → 출력 (speedFromOutput을 거꾸로) */
 export const outputFromSpeed = (models: SpeedModel[] | undefined, bump: string, mode: OutputMode, v: number, massG: number): number | null => {
   const m = models?.find(x => x.bump_id === bump && x.output_mode === mode && x.b);
-  return m && m.a != null && m.b != null && m.b > 0 ? (v - m.a - m.c * massG / 1000) / m.b : null;
+  if (!m || m.a == null || m.b == null || m.b <= 0) return null;
+  const t = speedTable(m, massG);
+  if (t && t[0][1] <= v && v <= t[t.length - 1][1]) {
+    for (let i = 0; i + 1 < t.length; i++) { const [o1, v1] = t[i], [o2, v2] = t[i + 1]; if (v1 <= v && v <= v2) return o1 + (o2 - o1) * (v - v1) / (v2 - v1); }
+  }
+  return (v - m.a - m.c * massG / 1000) / m.b;
 };
 
 export type PowerFit = {
@@ -206,7 +227,7 @@ export type PowerFit = {
 };
 
 export type Criterion = {
-  mode: 'manual' | 'first_jump'; a_limit_g: number | null; source: string; preset?: string;
+  mode: 'manual' | 'first_jump' | 'jump_majority'; a_limit_g: number | null; source: string; preset?: string;
   vmax_by_mass: { mass_g: number; vmax_mps: number | null }[]; critical_speed_mps: number | null;
 };
 

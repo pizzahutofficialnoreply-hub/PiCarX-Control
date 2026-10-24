@@ -9,14 +9,8 @@ import { fitFormula, KNOWN_VARS, type Env, type FitResult, type Point } from './
 import { storeFormulas, t95, targetOfGroup, targetOfRun, TARGETS, type SavedFormula, type Target } from './theory';
 
 const PRESETS: { expr: string; target: Target; name: string; why: string }[] = [
-  { expr: 'k*v^n*m^p', target: 'delta', name: '거듭제곱 (속도·질량)', why: '가장 흔한 실험식. n은 속도 영향, p는 질량 영향의 세기' },
-  { expr: 'k*v', target: 'delta', name: '충돌(충격량) 꼴', why: '이론 ②: 위쪽 속도 v·sin α가 일정한 시간에 생기면 Δa ∝ v' },
-  { expr: 'c*v^2/(g*R)', target: 'delta', name: '원운동 꼴', why: '이론 ③: 구심가속도 v²/R. c는 차체에 전달되는 비율' },
-  { expr: 'a*v + b*v^2', target: 'delta', name: '충돌 + 원운동', why: '두 효과를 더한 꼴(원점을 지남)' },
-  { expr: 'k*(v^2/(g*R))^n', target: 'delta', name: '무차원 Π 꼴', why: '단위가 없는 Π로 쓰면 다른 방지턱과 비교하기 좋음' },
-  { expr: 'm*g*(1 + k*v^n*m^p)', target: 'force', name: 'F = m·a 꼴 (N)', why: '계획서 ①을 그대로: 힘을 바로 예측' },
-  { expr: 'k*m*v*s', target: 'impulse', name: '충격량 = 보정계수 × m·v·sin α', why: '이론 ②의 I = m·v·sin α 에 보정계수 k(이론이면 1)' },
-  { expr: 'k*v^n/(1 + c*m)', target: 'delta', name: '질량이 클수록 완화', why: '무거우면 같은 충격을 나눠 받는다는 가정' },
+  { expr: 'k*v^n', target: 'delta', name: '보고서 식 (속도만)', why: 'Δa = k₀·vⁿ. 질량이 한 단계일 때 보고서에 쓰는 식' },
+  { expr: 'k*v^n*m^p', target: 'delta', name: '보고서 식 (속도·질량)', why: 'Δa = k₀·vⁿ·mᵖ. 질량을 여러 단계로 측정한 뒤 쓰는 식(n: 속도 영향, p: 질량 영향)' },
 ];
 
 const TIPS: [string, string][] = [

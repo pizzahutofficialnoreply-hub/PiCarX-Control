@@ -30,11 +30,21 @@ class ModelFitTests(unittest.TestCase):
         self.assertIsNotNone(power["loocv_rmse"])
         self.assertIn(cmp["best"], [m["id"] for m in cmp["models"]])
 
-    def test_fixed_n2_wins_on_pure_quadratic_data(self):
+    def test_only_report_formulas_and_mass_formula_chosen(self):
         cmp = mf.compare_models(self.pts(n=2.0, p=0.0, noise=0.0))
-        by = {m["id"]: m for m in cmp["models"]}
-        self.assertLess(by["n2"]["loocv_rmse"], by["n1"]["loocv_rmse"])
-        self.assertLess(by["n2"]["loocv_rmse"], by["linear"]["loocv_rmse"])
+        self.assertEqual({m["id"] for m in cmp["models"]}, {"power_vm", "power_v"})
+        self.assertEqual(mf.choose(cmp, "auto")["id"], "power_vm")
+        one = mf.compare_models([(v, 0.6, 3 * v ** 2) for v in (0.2, 0.25, 0.3, 0.35)])
+        self.assertEqual([m["id"] for m in one["models"]], ["power_v"])
+        self.assertAlmostEqual(mf.choose(one, "auto")["coef"]["n"], 2.0, places=6)
+
+    def test_output_speed_uses_measured_table(self):
+        groups = [{"bump_id": "b", "output_mode": "pwm", "output_value": o, "total_mass_g": 600, "mean_speed_mps": v}
+                  for o, v in ((40, 0.24), (60, 0.31), (80, 0.355), (100, 0.377))]
+        models = mf.speed_models(groups)
+        self.assertAlmostEqual(mf.speed_from_output(models, "b", "pwm", 90, 600), 0.366, places=3)
+        self.assertAlmostEqual(mf.output_from_speed(models, "b", "pwm", 0.366, 600), 90, places=3)
+        self.assertAlmostEqual(mf.output_from_speed(models, "b", "pwm", 0.275, 600), 50, places=3)
 
     def test_solve_speed_inverts_prediction(self):
         model = {"id": "power_vm", "kind": "power", "coef": {"k0": 2.0, "n": 1.5, "p": -0.2}}

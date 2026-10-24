@@ -52,12 +52,13 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const dTarget = aLimit && aLimit > 1 ? (aLimit - 1) - (margin === 'sigma' ? 2 * err : 0) : null;
   const vmaxAll = pred && dTarget && dTarget > 0 ? solveFor(v => pred.delta(v, mKg) ?? NaN, dTarget) : null;
   const em = data?.event_models?.[bump] ?? {};
-  const kinds: EventKind[] = ['FU', 'FD', 'RU', 'RD'];
+  // 내려올 때 충격은 속도와 관계가 약해 감속으로 줄일 수 없으므로 앞·뒤 바퀴 '오름' 식만 씁니다.
+  const kinds: EventKind[] = ['FU', 'RU'];
   const haveEvents = kinds.every(k => em[k]);
   const vEv = haveEvents && dTarget && dTarget > 0 ? Object.fromEntries(kinds.map(k => [k, eventSolve(em[k]!, dTarget, mKg)])) as Record<EventKind, number | null> : null;
   const fac = margin === 'ratio' ? safety : 1;
-  const vFront = vEv && vEv.FU != null && vEv.FD != null ? Math.min(vEv.FU, vEv.FD) * fac : null;
-  const vRear = vEv && vEv.RU != null && vEv.RD != null ? Math.min(vEv.RU, vEv.RD) * fac : null;
+  const vFront = vEv && vEv.FU != null ? vEv.FU * fac : null;
+  const vRear = vEv && vEv.RU != null ? vEv.RU * fac : null;
   const vmax = vmaxAll;
   const vtCalc = staged ? vFront : vmax != null ? vmax * fac : null;
   const manualFromV = manualOut === '' && manualV !== '' ? outputFromSpeed(data?.speed_models, bump, condition.output_mode, manualV, massG) : null;
@@ -78,7 +79,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     : trigger === 'tape' && !tapeOk ? '감속 테이프를 쓰려면 라인 추종 탭에서 바닥·테이프 보정을 먼저 하세요.'
     : trigger === 'distance_auto' && autoCm == null ? "'거리 자동'은 초음파를 켜고 측정한 회차가 있어야 합니다(앞바퀴 충격 때 벽까지 거리를 배움)."
     : (trigger === 'camera' || trigger === 'camera_distance') && !visionOk ? '카메라 감지는 아래에서 바닥 보정을 먼저 하세요.'
-    : staged && !haveEvents ? '단계별 식(앞·뒤 바퀴 오름·내림)이 아직 없습니다. 기울기로 4순간이 찾아진 회차가 출력 2단계 이상 필요합니다.'
+    : staged && !haveEvents ? '단계별 식(앞·뒤 바퀴 오름)이 아직 없습니다. 기울기로 4순간이 찾아진 회차가 출력 2단계 이상 필요합니다.'
     : dTarget != null && dTarget <= 0 ? `예측 오차(±${err.toFixed(2)} g)×2가 허용 여유보다 커서 목표를 정할 수 없습니다. 반복 측정을 늘리세요.` : '';
 
   // 출발(주행 시작) → 앞바퀴 충격까지 걸린 시간: 주행 시작 시각이 정확히 기록된 최근 회차(같은 방지턱·시작 출력)
@@ -116,7 +117,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
     const back = s0.resume && s0.resumed_at_s != null;
     const outs = s0.needed && s0.output != null ? `출력 ${s0.output_initial} → ${s0.output}${back ? ` → ${s0.output_initial}` : ''}` : `출력 ${s0.output_initial} 일정`;
     const sp = s0.needed ? `(예측 속도 ${s0.v0_pred_mps.toFixed(3)} → ${s0.target_v_mps.toFixed(3)}${back ? ` → ${s0.v0_pred_mps.toFixed(3)}` : ''} m/s)` : `(예측 ${s0.v0_pred_mps.toFixed(3)} m/s)`;
-    return `${runName(r)} · ${outs} ${sp} · 실제 통과 ${fmt(s0.measured_speed_mps, 3)} m/s · 최대 ${fmt(s0.measured_peak_g, 2)} g`;
+    return `${runName(r)} · ${outs} ${sp} · 실제 통과 ${fmt(s0.measured_speed_mps, 3)} m/s · 지표 ${fmt(s0.measured_peak_g, 2)} g (가장 큰 충격 ${fmt(s0.measured_max_g, 2)} g)`;
   }
 
   // 실시간 값: 측정 중 0.3초마다 서버에서 받은 '지금 낸 출력'. 끝난 뒤에도 마지막 값을 남겨 둠
@@ -266,14 +267,14 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
           series={[{ name: '명령한 출력', color: '#a04fa0', line: true, dots: false, points: (detail.drive_log ?? []).map(r => ({ x: r[0], y: r[1] })) }]}
           vLines={[...(showRun.slowdown?.slowed_at_s != null ? [{ x: showRun.slowdown.slowed_at_s - (showRun.drive_t0_s ?? showRun.pre_roll_s ?? 0), label: '감속 시작', color: '#a04fa0' }] : []), ...(showRun.slowdown?.resumed_at_s != null ? [{ x: showRun.slowdown.resumed_at_s - (showRun.drive_t0_s ?? showRun.pre_roll_s ?? 0), label: `다시 가속${showRun.slowdown.resumed_by === 'timer' ? '(시간)' : ''}`, color: '#3c9a5f' }] : [])]}
           caption={showRun.slowdown?.slowed_at_s == null ? '이 회차는 감속 신호가 오지 않아 출력이 그대로였습니다(카메라·초음파가 방지턱을 못 알아챘거나, 시간 방식이면 시간이 주행 시간보다 늦음).' : `선이 ${showRun.slowdown.output_initial} → ${showRun.slowdown.output}${showRun.slowdown.resumed_at_s != null ? ` → ${showRun.slowdown.output_initial}` : ''}로 계단처럼 바뀌었으면 감속${showRun.slowdown.resumed_at_s != null ? '·재가속' : ''}이 된 것입니다.${showRun.slowdown.resume && showRun.slowdown.resumed_at_s == null ? ' 다시 가속이 안 됐습니다: 기울기로 다 넘음을 못 알아챘고, 감속 후 대기 시간도 0이었거나 주행 시간이 먼저 끝났습니다.' : ''}`} />}
-        <XYChart name={`slowdown_${bump}`} title="감속 제어 결과: 실제 통과 속도와 최대 충격" xLabel="실제 통과 속도 (m/s, 바퀴 간격)" yLabel="최대 수직 가속도 (g)"
+        <XYChart name={`slowdown_${bump}`} title="감속 제어 결과: 실제 통과 속도와 올라갈 때 충격" xLabel="실제 통과 속도 (m/s, 바퀴 간격)" yLabel="지표 충격 + 1 g (허용 기준과 같은 단위)"
           series={[{ name: `관계식 예측 (${massG} g)`, color: '#2f6fb0', line: true, dots: false, points: curve },
             { name: '기준 이내', color: '#3c9a5f', points: slowRuns.filter(r => r.slowdown?.pass && r.slowdown.measured_speed_mps).map(r => ({ x: r.slowdown?.measured_speed_mps as number, y: r.slowdown?.measured_peak_g as number })) },
             { name: '기준 초과', color: '#c62828', points: slowRuns.filter(r => r.slowdown?.pass === false && r.slowdown.measured_speed_mps).map(r => ({ x: r.slowdown?.measured_speed_mps as number, y: r.slowdown?.measured_peak_g as number })) }]}
           hLines={aLimit ? [{ y: aLimit, label: `허용 기준 ${aLimit.toFixed(2)} g`, color: '#c33' }] : []}
           vLines={vt != null ? [{ x: vt, label: '목표 속도', color: '#a04fa0' }] : []}
           caption="초록 점이 기준선 아래, 목표 속도 근처에 모이면 '관계식 → 속도 결정 → 감속 → 충격 감소'가 실험으로 확인된 것입니다. 점이 목표 속도보다 오른쪽이면 감속할 거리(시간)가 부족했던 것입니다." />
-        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시험</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th>최대 충격</th><th>판정</th><th>감속 시점</th><th>다시 가속</th></tr></thead>
+        <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>시험</th><th>질량</th><th>출력</th><th>시작 조건</th><th>예측 v₀ → 목표</th><th>실제 속도</th><th title="보고서 지표(올라갈 때 충격) + 1 g, 허용 기준과 같은 단위">지표 충격 / 기준</th><th>판정</th><th>감속 시점</th><th>다시 가속</th></tr></thead>
           <tbody>{slowRuns.map(r => { const s = r.slowdown!; return <tr key={r.id} className={(s.pass === false ? 'over ' : '') + (r.id === showId ? 'selected' : '')} style={{ cursor: 'pointer' }} onClick={() => setPickId(r.id)}><td>{runName(r)}<br /><small>{new Date(r.created_at).toLocaleTimeString()}</small></td><td>{r.condition.total_mass_g} g</td><td>{s.output_initial} → {s.staged ? `${s.staged.output_front} / ${s.staged.output_rear}` : s.needed ? s.output : '유지'}{s.resumed_at_s != null ? ` → ${s.output_initial}` : ''}</td>
             <td>{s.trigger === 'time' ? `${s.at_s}s` : s.trigger === 'distance' ? `${s.at_cm}cm${s.trigger_requested === 'distance_auto' ? '(자동)' : ''}` : s.trigger === 'camera' ? '카메라' : s.trigger === 'camera_distance' ? `카메라+초음파 ${s.at_cm}cm${s.slowed_by ? ` (${s.slowed_by === 'camera' ? '카메라' : '초음파'} 먼저)` : ''}` : '테이프'}{s.slowed_at_s == null && s.needed && !r.simulated ? ' (작동 안 함)' : ''}</td>
             <td>{s.v0_pred_mps.toFixed(3)} → {s.target_v_mps.toFixed(3)}</td><td>{fmt(s.measured_speed_mps, 3)}</td><td>{fmt(s.measured_peak_g, 2)} / {s.a_limit_g.toFixed(2)} g</td><td>{s.pass == null ? '—' : s.pass ? '이내' : '초과'}</td><td style={leadText(r).bad ? { color: '#c62828', fontWeight: 600 } : undefined}>{leadText(r).text}</td><td>{!s.resume || !s.needed ? '—' : s.resumed_at_s != null ? (s.resumed_by === 'timer' ? '됨(시간)' : '됨(기울기)') : '안 됨'}</td></tr>; })}</tbody></table></div>

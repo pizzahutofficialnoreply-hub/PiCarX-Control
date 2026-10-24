@@ -79,31 +79,7 @@ SPECS: list[Spec] = [
          lambda p: _ln(p[2]),
          lambda b, mass: {"k0": math.exp(b[0]), "n": b[1], "p": 0.0},
          lambda mass: ["ln k₀", "n"],
-         "질량 효과를 무시합니다. 질량이 한 단계뿐일 때 씁니다."),
-    Spec("n1", "속도에 비례 (충돌 모델)", "Δa = k₀ · v · mᵖ", "power",
-         lambda p, mass: [1.0] + ([math.log(p[1])] if mass else []),
-         lambda p: _ln(p[2] / p[0]) if p[0] > 0 else None,
-         lambda b, mass: {"k0": math.exp(b[0]), "n": 1.0, "p": b[1] if mass else 0.0},
-         lambda mass: ["ln k₀"] + (["p"] if mass else []),
-         "n을 1로 고정한 이론식(진입 충돌 지배)."),
-    Spec("n2", "속도 제곱에 비례 (원운동 모델)", "Δa = k₀ · v² · mᵖ", "power",
-         lambda p, mass: [1.0] + ([math.log(p[1])] if mass else []),
-         lambda p: _ln(p[2] / (p[0] ** 2)) if p[0] > 0 else None,
-         lambda b, mass: {"k0": math.exp(b[0]), "n": 2.0, "p": b[1] if mass else 0.0},
-         lambda mass: ["ln k₀"] + (["p"] if mass else []),
-         "n을 2로 고정한 이론식(곡률·원운동 지배)."),
-    Spec("linear", "일차식", "Δa = a + b·v (+ c·m)", "linear",
-         lambda p, mass: [1.0, p[0]] + ([p[1]] if mass else []),
-         lambda p: p[2],
-         lambda b, mass: {"a": b[0], "b": b[1], "c": b[2] if mass else 0.0},
-         lambda mass: ["a", "b"] + (["c"] if mass else []),
-         "가장 단순한 직선 근사. 절편 a가 0이 아니면 저속 외삽이 부정확합니다."),
-    Spec("quadratic", "이차식", "Δa = a + b·v² (+ c·m)", "quadratic",
-         lambda p, mass: [1.0, p[0] ** 2] + ([p[1]] if mass else []),
-         lambda p: p[2],
-         lambda b, mass: {"a": b[0], "b": b[1], "c": b[2] if mass else 0.0},
-         lambda mass: ["a", "b"] + (["c"] if mass else []),
-         "v²에 비례하는 항 + 상수. 원운동 모델에 오프셋을 더한 형태."),
+         "보고서 식. 질량이 한 단계뿐일 때 씁니다(질량을 늘려 측정하면 위의 속도·질량 식으로 넘어감)."),
 ]
 
 
@@ -219,10 +195,15 @@ def compare_models(pts: list[Point]) -> dict[str, Any]:
 
 
 def choose(comparison: dict[str, Any], model_id: str) -> dict[str, Any] | None:
+    """보고서 식: 질량이 2단계 이상이면 Δa = k₀·vⁿ·mᵖ, 한 단계면 Δa = k₀·vⁿ."""
     models = comparison.get("models") or []
     if model_id and model_id != "auto":
         for m in models:
             if m["id"] == model_id:
+                return m
+    for want in ("power_vm", "power_v"):
+        for m in models:
+            if m["id"] == want:
                 return m
     for m in models:
         if m["id"] == comparison.get("best"):
@@ -328,6 +309,7 @@ def speed_models(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         masses = {m for _, m, _ in pts}
         entry: dict[str, Any] = {"bump_id": bump, "output_mode": mode, "a": None, "b": None, "c": 0.0, "r2": None,
                                  "uses_mass": False, "n": len(pts),
+                                 "table": [{"output": o, "mass_g": round(m * 1000, 1), "speed_mps": v} for o, m, v in sorted(pts)],
                                  "output_range": [min(outs), max(outs)], "mass_range_g": [min(masses) * 1000, max(masses) * 1000]}
         if len(outs) >= 2:
             use_mass = len(masses) >= 2 and len(pts) >= 4
@@ -344,17 +326,42 @@ def speed_models(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _table(m: dict[str, Any], mass_g: float) -> list[tuple[float, float]] | None:
+    """측정한 출력별 평균 속도 표(그 질량을 실제로 측정했을 때만). 출력 순, 속도가 늘어나는 점만."""
+    pts = sorted((p["output"], p["speed_mps"]) for p in (m.get("table") or []) if abs(p["mass_g"] - mass_g) <= 2.5)
+    if len(pts) < 2:
+        return None
+    mono = [pts[0]]
+    for o, v in pts[1:]:
+        if v > mono[-1][1]:
+            mono.append((o, v))
+    return mono if len(mono) >= 2 else None
+
+
 def speed_from_output(models: list[dict[str, Any]], bump_id: str, mode: str, output: float, mass_g: float) -> float | None:
+    """출력 → 속도. 측정한 출력 범위 안이면 이웃한 두 출력의 평균 속도를 직선으로 이어 읽고(측정값 그대로),
+    범위 밖이거나 그 질량을 측정하지 않았으면 직선식 v = a + b·출력 (+ c·m)을 씁니다."""
     m = next((x for x in models if x["bump_id"] == bump_id and x["output_mode"] == mode and x["b"]), None)
     if not m:
         return None
+    tab = _table(m, mass_g)
+    if tab and tab[0][0] <= output <= tab[-1][0]:
+        for (o1, v1), (o2, v2) in zip(tab, tab[1:]):
+            if o1 <= output <= o2:
+                return v1 + (v2 - v1) * (output - o1) / (o2 - o1)
     return m["a"] + m["b"] * output + m["c"] * mass_g / 1000.0
 
 
 def output_from_speed(models: list[dict[str, Any]], bump_id: str, mode: str, speed: float, mass_g: float) -> float | None:
+    """속도 → 출력(speed_from_output을 거꾸로)."""
     m = next((x for x in models if x["bump_id"] == bump_id and x["output_mode"] == mode and x["b"]), None)
     if not m or m["b"] <= 0:
         return None
+    tab = _table(m, mass_g)
+    if tab and tab[0][1] <= speed <= tab[-1][1]:
+        for (o1, v1), (o2, v2) in zip(tab, tab[1:]):
+            if v1 <= speed <= v2:
+                return o1 + (o2 - o1) * (speed - v1) / (v2 - v1)
     return (speed - m["a"] - m["c"] * mass_g / 1000.0) / m["b"]
 
 
@@ -399,7 +406,7 @@ def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, 
                              "방지턱 높이만큼 떨어지는 낙하 충격이라 앞으로 가는 속도보다 높이에 따라 정해지기 때문이다.")
     if chosen:
         r2 = chosen["r2"]
-        lines.append(f"여러 후보식 중 교차검증 오차가 가장 작은(또는 선택한) 식은 '{chosen['name']}' {formula_text(chosen)}이며, "
+        lines.append(f"보고서 관계식 '{chosen['name']}' {chosen['formula']}을 조건 평균에 맞춘 결과 {formula_text(chosen)}이며, "
                      f"결정계수 R² = {r2:.3f}{'(점 수와 매개변수 수가 같아 R²=1은 의미가 약함)' if chosen.get('exact_fit') else ''}이다.")
         if r2 < 0.3 and not chosen.get("exact_fit"):
             lines.append(f"주의: R²가 {r2:.2f}로 낮아(0이하는 평균값보다도 못 맞춤) 아직 속도와 충격 사이에 뚜렷한 관계가 보이지 않는다. "

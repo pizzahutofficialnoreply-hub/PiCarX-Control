@@ -693,9 +693,11 @@ def _pulse_area(t: Sequence[float], v: Sequence[float], tc: float, lo: float, hi
     b = i
     while b < n - 1 and v[b + 1] - 1.0 > lim and t[b + 1] <= hi:
         b += 1
+    # 양 끝은 기준 아래로 떨어진 바로 옆 표본까지 넣습니다(표본 하나짜리 짧은 충격도 넓이가 0이 되지 않게). 음수는 0으로.
+    a, b = max(0, a - 1), min(n - 1, b + 1)
     area = 0.0
     for k in range(a, b):
-        area += ((v[k] - 1.0) + (v[k + 1] - 1.0)) / 2 * (t[k + 1] - t[k])
+        area += (max(0.0, v[k] - 1.0) + max(0.0, v[k + 1] - 1.0)) / 2 * (t[k + 1] - t[k])
     return area, t[b] - t[a], top
 
 

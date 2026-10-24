@@ -83,7 +83,8 @@ class ExperimentSettings(BaseModel):
         default="up", description="보고서 지표: up = 올라갈 때 충격(앞·뒤 바퀴 평균), front_up = 앞바퀴 올라갈 때, peak = 가장 큰 충격")
     heading_limit_deg: float = Field(default=10.0, ge=0, le=90,
                                      description="방지턱 도착 때 방향·주행 중 최대 방향이 이 각도를 넘으면 계산에서 뺌(0 = 끔)")
-    a_limit_mode: Literal["manual", "first_jump"] = Field(default="manual", description="manual: 직접 입력, first_jump: 점프가 처음 나타난 조건의 평균 최대 가속도")
+    a_limit_mode: Literal["manual", "first_jump", "jump_majority"] = Field(
+        default="manual", description="manual: 직접 입력, first_jump: 점프가 처음 나타난 조건의 평균 지표, jump_majority: 절반 넘는 회차가 뜬 첫 조건의 평균 지표")
     a_limit_preset: Literal["trl614", "watts1973", "kjemtrup04", "kjemtrup02", "custom"] = Field(
         default="trl614", description="허용 기준 출처(선행 연구). custom이면 a_limit_g를 직접 씀")
     a_limit_g: float | None = Field(default=1.7, gt=1, le=8, description="허용 최대 수직 가속도(정지 1 g 포함)")
@@ -436,14 +437,30 @@ def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings:
     if run.get("distance"):
         run["distance_summary"] = _distance_summary(run, a)
     if run.get("slowdown"):
-        sd = run["slowdown"]
-        sd["measured_speed_mps"] = a.get("speed_mps")
-        if a.get("peak_g") is not None and sd.get("a_limit_g") and a.get("bump_detected"):
-            sd["measured_peak_g"] = a["peak_g"]
-            sd["pass"] = bool(a["peak_g"] <= sd["a_limit_g"])
-        else:
-            sd["measured_peak_g"] = sd["pass"] = None   # 방지턱을 못 찾았거나 센서 기록이 깨진 회차는 판정하지 않음
+        judge_slowdown(run, settings.impact_metric, a)
     return a
+
+
+def judge_slowdown(run: dict[str, Any], metric: str | None = None, analysis: dict[str, Any] | None = None) -> None:
+    """감속 회차 판정: 계획을 세울 때 쓴 지표(없으면 현재 설정)로 잰 충격이 허용 기준 이내인가.
+
+    measured_peak_g = 지표 Δa + 1 (기준 a_limit_g와 같은 단위), measured_max_g = 가장 큰 충격(참고).
+    """
+    sd = run["slowdown"]
+    a = analysis if analysis is not None else (run.get("analysis") or {})
+    metric = sd.get("metric") or metric or store.load_settings().impact_metric
+    sd["metric"] = metric
+    sd["measured_speed_mps"] = a.get("speed_mps")
+    sd["measured_max_g"] = a.get("peak_g")
+    d = ia.run_metric({**run, "analysis": a}, metric)
+    if d is not None and sd.get("a_limit_g") and a.get("bump_detected"):
+        sd["measured_delta_g"] = d
+        sd["measured_peak_g"] = round(d + 1.0, 4)
+        sd["pass"] = bool(d + 1.0 <= sd["a_limit_g"])
+        pred = sd.get("pred_delta_target_g")
+        sd["pred_error_pct"] = round((d - pred) / pred * 100, 1) if pred else None
+    else:
+        sd["measured_delta_g"] = sd["measured_peak_g"] = sd["pass"] = None   # 방지턱을 못 찾았거나 센서 기록이 깨진 회차는 판정하지 않음
 
 
 def _distance_summary(run: dict[str, Any], a: dict[str, Any]) -> dict[str, Any]:
@@ -580,23 +597,31 @@ def criterion_for(bump_id: str, groups: list[dict[str, Any]], model: dict[str, A
         out["source"] = preset["source"] if preset else "직접 입력한 허용 기준"
         out["preset"] = settings.a_limit_preset
     else:
-        jumped = [g for g in mine if g["jump_count"] > 0 and g.get("mean_speed_mps") and g.get("mean_peak_g")]
+        majority = settings.a_limit_mode == "jump_majority"
+        jumped = [g for g in mine if g["jump_count"] > 0 and g.get("mean_speed_mps") and g.get("mean_peak_g")
+                  and (not majority or g["jump_count"] > 0.5 * g.get("n_runs", 1))]
         if jumped:
             first = min(jumped, key=lambda g: g["mean_speed_mps"])
             out["a_limit_g"] = first["mean_peak_g"]
-            out["source"] = (f"점프가 처음 나타난 조건({first['total_mass_g']} g, {first['output_mode'].upper()} "
-                             f"{first['output_value']}, v ≈ {first['mean_speed_mps']:.3f} m/s)의 평균 최대 가속도")
+            what = "절반 넘는 회차에서 바퀴가 뜬 첫 조건" if majority else "점프가 처음 나타난 조건"
+            out["source"] = (f"{what}({first['total_mass_g']} g, {first['output_mode'].upper()} "
+                             f"{first['output_value']}, v ≈ {first['mean_speed_mps']:.3f} m/s, 뜬 회차 {first['jump_count']}/{first.get('n_runs', '?')})의 "
+                             f"평균 {ia.IMPACT_METRICS.get(settings.impact_metric, '')}")
         else:
             out["source"] = "아직 점프한 조건이 없어 기준을 정할 수 없습니다(직접 입력으로 바꾸거나 더 빠른 조건을 측정)."
     if out["a_limit_g"]:
         speeds = [g["mean_speed_mps"] for g in mine if g.get("mean_speed_mps")]
         lo = min(speeds) if speeds else None
+        top = max(speeds) if speeds else None
         for mass in sorted({g["total_mass_g"] for g in mine}):
             v = mf.solve_speed(model, out["a_limit_g"] - 1.0, mass / 1000.0)
             # 측정한 가장 느린 속도의 절반보다 낮게 나오면 식을 측정 범위 밖으로 늘려 쓴 값이라 의미가 없습니다.
             below = v is not None and lo is not None and v < 0.5 * lo
-            out["vmax_by_mass"].append({"mass_g": mass, "vmax_mps": None if below else v,
-                                        "note": f"측정한 가장 느린 속도({lo:.2f} m/s)에서도 이미 기준을 넘음" if below else None})
+            above = v is not None and top is not None and v > top * 1.02
+            out["vmax_by_mass"].append({"mass_g": mass, "vmax_mps": None if below else v, "extrapolated": above,
+                                        "note": f"측정한 가장 느린 속도({lo:.2f} m/s)에서도 이미 기준을 넘음" if below else
+                                        (f"{v:.3f} m/s (측정한 가장 빠른 속도 {top:.3f} m/s보다 빨라 식을 범위 밖으로 늘린 값, 이 실험에서는 기준을 넘지 않음)"
+                                         if above else None)})
     return out
 
 
@@ -1169,14 +1194,15 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
 
     stages: dict[str, Any] | None = None
     if req.staged:
+        # 내려올 때 충격은 속도와 관계가 약해(낙하) 감속으로 줄일 수 없으므로, 앞·뒤 바퀴 '오름' 식으로만 속도를 정합니다.
         em = (bundle.get("event_models") or {}).get(bump) or {}
-        if not all(k in em for k in ("FU", "FD", "RU", "RD")):
-            raise RuntimeError("단계별 식(앞·뒤 바퀴 오름·내림)이 아직 없습니다. 기울기로 네 순간이 찾아진 회차(분석 방식 '기울기 4단계')가 출력 2단계 이상 필요합니다.")
-        vs = {k: mf.event_solve(em[k], d_target, mk) for k in ("FU", "FD", "RU", "RD")}
+        if not all(k in em for k in ("FU", "RU")):
+            raise RuntimeError("단계별 식(앞·뒤 바퀴 오름)이 아직 없습니다. 기울기로 네 순간이 찾아진 회차가 출력 2단계 이상 필요합니다.")
+        vs = {k: mf.event_solve(em[k], d_target, mk) for k in ("FU", "RU")}
         if any(v is None for v in vs.values()):
             raise RuntimeError("단계별 식으로 속도를 풀지 못했습니다.")
-        v_front = min(vs["FU"], vs["FD"]) * factor
-        v_rear = min(vs["RU"], vs["RD"]) * factor
+        v_front = vs["FU"] * factor
+        v_rear = vs["RU"] * factor
         of, cf = out_for(v_front)
         orr, cr = out_for(v_rear)
         stages = {"v_by_event": {k: round(v, 4) for k, v in vs.items()}, "v_front_mps": round(v_front, 4), "v_rear_mps": round(v_rear, 4),
@@ -1211,7 +1237,8 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
             trigger = "distance"
     return {"trigger": trigger, "trigger_requested": req.trigger, "at_s": req.at_s, "at_cm": at_cm, "safety": req.safety,
             "margin": req.margin, "model_error_g": round(err, 4), "target_delta_g": round(d_target, 4),
-            "a_limit_g": round(a_lim, 4), "model_id": model["id"], "model_formula": model.get("formula"),
+            "a_limit_g": round(a_lim, 4), "model_id": model["id"], "model_formula": mf.formula_text(model),
+            "metric": settings.impact_metric, "metric_label": ia.IMPACT_METRICS.get(settings.impact_metric),
             "v0_pred_mps": round(v0, 4), "pred_delta_v0_g": round(mf.predict(model, v0, mk), 4),
             "vmax_mps": round(vmax, 4), "target_v_mps": round(target_v, 4),
             "pred_delta_target_g": round(mf.predict(model, target_v, mk), 4),
@@ -1428,12 +1455,7 @@ async def _measure_once(ctl, cond: ExperimentCondition, settings: ExperimentSett
         run["distance_summary"] = _distance_summary(run, a)
         store.put(run)
     if run.get("slowdown"):
-        a = run.get("analysis") or {}
-        sd = run["slowdown"]
-        if a.get("peak_g") is not None:
-            sd["measured_peak_g"] = a["peak_g"]
-            sd["pass"] = bool(a["peak_g"] <= sd["a_limit_g"])
-        sd["measured_speed_mps"] = a.get("speed_mps")
+        judge_slowdown(run, settings.impact_metric)
         store.put(run)
     if drive_info.get("line_lost"):
         run["analysis"].setdefault("flags", []).append("측정 중 테이프를 놓쳐 일찍 멈췄습니다.")
