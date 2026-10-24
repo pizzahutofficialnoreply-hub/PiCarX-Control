@@ -351,7 +351,7 @@ def pitch_events(t: Sequence[float], pitch: Sequence[float] | None, wheelbase_mm
     return ev
 
 
-ANALYSIS_VERSION = 8  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
+ANALYSIS_VERSION = 9  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
 
 EVENT_LABEL = {"FU": "앞바퀴 오름", "FD": "앞바퀴 내림", "RU": "뒷바퀴 오름", "RD": "뒷바퀴 내림"}
 
