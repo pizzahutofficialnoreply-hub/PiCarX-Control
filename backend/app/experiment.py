@@ -382,8 +382,48 @@ def condition_dict(condition: ExperimentCondition) -> dict[str, Any]:
     return data
 
 
+def motor_summary(run: dict[str, Any], a: dict[str, Any]) -> dict[str, Any] | None:
+    """좌우 모터 차이 기록(엔코더가 없어 간접 측정):
+    - 좌우 바퀴에 실제로 보낸 PWM·듀티(출력 × 전·후진 배율 × 좌우 배율, 라이브러리 계산 int(PWM/2)+50)
+    - 출발 0.3초 뒤 ~ 앞바퀴가 방지턱에 닿기 0.1초 전까지 자이로 방향의 기울기 = 차가 도는 속도(°/s, + 왼쪽, − 오른쪽).
+      조향이 없거나 고정이면 이 값이 곧 좌우 모터 힘 차이(와 바퀴·바닥 차이)의 크기입니다.
+    - 방지턱에 닿을 때 출발 방향에서 틀어진 각도(°)"""
+    out: dict[str, Any] = {}
+    c = run.get("condition") or {}
+    drv = ((run.get("applied") or {}).get("drive")) or None
+    if drv and (c.get("output_mode") or "pwm") == "pwm":
+        trim = float(drv.get("trim_backward" if c.get("direction") == "backward" else "trim_forward") or 1.0)
+        base = max(0, min(100, round(float(c.get("output_value") or 0) * trim)))
+        lp, rp = min(100.0, base * float(drv.get("trim_left") or 1.0)), min(100.0, base * float(drv.get("trim_right") or 1.0))
+        duty = lambda x: (int(x / 2) + 50) if x > 0 else 0  # noqa: E731
+        out.update(left_pwm=round(lp, 1), right_pwm=round(rp, 1), left_duty=duty(lp), right_duty=duty(rp),
+                   trim_left=drv.get("trim_left"), trim_right=drv.get("trim_right"), trim_forward=drv.get("trim_forward"))
+    log = run.get("drive_log") or []
+    t0 = run.get("drive_t0_s") if run.get("drive_t0_s") is not None else (run.get("pre_roll_s") or 0.0)
+    tb = (a.get("front_t_s") - t0) if a.get("front_t_s") is not None else None
+    pts = [(row[0], row[3]) for row in log if len(row) > 3 and row[3] is not None and row[0] >= 0.3 and (tb is None or row[0] <= tb - 0.1)]
+    if tb is None:
+        pts = [p for p in pts if p[0] <= 2.0]
+    if len(pts) >= 4:
+        n = len(pts)
+        mt, mh = sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n
+        den = sum((p[0] - mt) ** 2 for p in pts)
+        if den > 0:
+            out["yaw_rate_dps"] = round(sum((p[0] - mt) * (p[1] - mh) for p in pts) / den, 2)
+    if tb is not None and log:
+        near = min((row for row in log if len(row) > 3 and row[3] is not None), key=lambda row: abs(row[0] - tb), default=None)
+        if near is not None:
+            out["heading_at_bump_deg"] = near[3]
+    out["steering"] = run.get("steering_source")
+    return out or None
+
+
 def run_analysis(run: dict[str, Any], columns: dict[str, list[float]], settings: ExperimentSettings) -> dict[str, Any]:
     a = _analyze_columns(run, columns, settings)
+    try:
+        run["motor"] = motor_summary(run, a)
+    except Exception:
+        run["motor"] = None
     yaw = run.get("heading_max_deg")
     if yaw is not None and abs(yaw) >= 8 and a.get("flags") is not None:
         a["flags"].append(f"주행 중 차 방향이 최대 {abs(yaw):.0f}° 틀어졌습니다. 좌우 방지턱에 왼쪽·오른쪽 바퀴가 다른 시각에 닿아 "
@@ -515,7 +555,7 @@ def run_summary(run: dict[str, Any]) -> dict[str, Any]:
                                     "peak_override", "data_source", "line_lost", "kick_ms", "steer_mean_late",
                                     "heading_ff_learned", "heading_flipped", "steer_saturated", "bump_passed_s", "elapsed_s",
                                     "slowdown", "distance_summary", "stopped_by_wall", "course", "guided",
-                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason", "drive_t0_s", "applied")}
+                                    "camera_line", "steer_ff_learned", "pre_roll_s", "end_reason", "drive_t0_s", "applied", "motor", "heading_end_deg")}
 
 
 def runs_for_mode(simulated: bool) -> list[dict[str, Any]]:
@@ -2397,7 +2437,8 @@ async def export_summary():
     bundle = analysis_bundle(runs, settings)
     crit = bundle.get("criteria") or {}
     head = ["방지턱", "총질량(g)", "출력", "방향", "회차", "계산에 포함", "통과 속도(m/s)", "앞·뒤 바퀴 간격(ms)", "가장 큰 충격(g)",
-            "평소보다 더(Δa, g)", "허용 기준 초과", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)", "확인할 점"]
+            "평소보다 더(Δa, g)", "허용 기준 초과", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)",
+            "왼쪽 PWM(듀티%)", "오른쪽 PWM(듀티%)", "도는 속도(°/s, +왼쪽)", "방지턱 도착 때 방향(°)", "조향", "배터리(V)", "확인할 점"]
     rows: list[list[Any]] = [head]
     key = lambda r: (r["condition"].get("bump_id") or "", r["condition"].get("total_mass_g") or 0,
                      r["condition"].get("output_value") or 0, r["condition"].get("trial") or 0)
@@ -2412,7 +2453,12 @@ async def export_summary():
                      "" if lim is None or a.get("peak_g") is None else ("초과" if a["peak_g"] > lim else "이내"),
                      "" if a.get("jump") is None else ("예" if a["jump"] else "아니오"),
                      "방지턱 못 찾음" if a.get("bump_detected") is False else PAIR_LABEL.get(a.get("pair_source") or "", ""),
-                     a.get("sample_rate_hz"), " / ".join(a.get("flags") or [])])
+                     a.get("sample_rate_hz"),
+                     *(lambda m: [f"{m['left_pwm']} ({m['left_duty']})" if m.get("left_pwm") is not None else "",
+                                  f"{m['right_pwm']} ({m['right_duty']})" if m.get("right_pwm") is not None else "",
+                                  m.get("yaw_rate_dps"), m.get("heading_at_bump_deg"),
+                                  {"none": "없음", "gyro": "자이로", "line": "유도선"}.get(m.get("steering") or "", m.get("steering") or "")])(r.get("motor") or {}),
+                     r.get("battery_v"), " / ".join(a.get("flags") or [])])
     rows.append([])
     method_label = {"trim": "가장 큰 값·작은 값 1개씩 뺀 평균", "sigma2": "평균 ± 2×표준편차 밖의 값을 뺀 평균",
                     "iqr": "사분위 범위(IQR) 밖의 값을 뺀 평균", "none": "모든 회차 평균"}.get(settings.outlier_method, settings.outlier_method)
