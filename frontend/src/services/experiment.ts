@@ -139,7 +139,7 @@ export type SlowdownInfo = {
   output: number | null; output_initial: number; output_clipped: boolean; ratio: number | null; slowed_at_s?: number | null; drive_s?: number | null; resumed_at_s?: number | null; resumed_by?: string | null;
   staged?: { v_by_event: Record<EventKind, number>; v_front_mps: number; v_rear_mps: number; output_front: number | null; output_rear: number | null; clipped: boolean; pred_by_event_g: Record<EventKind, number> } | null;
   resume?: boolean; stage_log?: [number, string, number][];
-  measured_speed_mps?: number | null; measured_peak_g?: number | null; measured_max_g?: number | null; measured_delta_g?: number | null; pred_error_pct?: number | null; metric?: ImpactMetric; metric_label?: string; pass?: boolean;
+  measured_speed_mps?: number | null; measured_peak_g?: number | null; measured_max_g?: number | null; measured_delta_g?: number | null; pred_error_pct?: number | null; pred_at_measured_g?: number | null; formula_error_pct?: number | null; speed_error_pct?: number | null; metric?: ImpactMetric; metric_label?: string; pass?: boolean;
 };
 export type EventModel = { k: number; n: number; p: number; uses_mass: boolean; points: number; r2: number; rmse: number };
 export const eventPredict = (em: EventModel, v: number, mKg: number) => em.k * v ** em.n * (em.uses_mass ? mKg ** em.p : 1);
@@ -165,7 +165,7 @@ export type RunSummary = {
   peak_override?: { front_t_s: number; rear_t_s: number } | null;
   steer_mean_late?: number | null; heading_ff_learned?: number | null;
   slowdown?: SlowdownInfo | null; distance_summary?: DistanceSummary | null; stopped_by_wall?: boolean | null; bump_passed_s?: number | null; elapsed_s?: number | null; pre_roll_s?: number | null; drive_t0_s?: number | null;
-  motor?: { left_pwm?: number; right_pwm?: number; left_duty?: number; right_duty?: number; trim_left?: number; trim_right?: number; trim_forward?: number; yaw_rate_dps?: number; heading_at_bump_deg?: number; steering?: string } | null; end_reason?: string | null;
+  motor?: { left_pwm?: number; right_pwm?: number; left_duty?: number; right_duty?: number; trim_left?: number; trim_right?: number; trim_forward?: number; yaw_rate_dps?: number; heading_at_bump_deg?: number; heading_bump_max_deg?: number; heading_bump_change_deg?: number; steering?: string } | null; end_reason?: string | null;
   /** 정지선 코스로 잰 회차: 구간(A→B/B→A), 정지선 인식 시각 */
   course?: { leg?: string | null; end_mode?: string | null; accel?: string | null; detected?: boolean | null; detect_s?: number | null } | null;
   /** 유도선+자이로 조향 요약: 방지턱 위 방향 유지 시간, 유도선 복귀 시간, 최대 방향 차이 */
@@ -379,6 +379,6 @@ export function runMetric(r: RunSummary, metric: ImpactMetric = 'up'): number | 
 /** 방지턱에 비스듬히 들어간 회차(도착 때 방향·주행 중 최대 방향이 기준 각도 초과) */
 export function headingOut(r: RunSummary, limitDeg: number | null | undefined): boolean {
   if (!limitDeg) return false;
-  const hb = r.motor?.heading_at_bump_deg, hm = r.heading_max_deg;
+  const hb = r.motor?.heading_at_bump_deg, hm = r.motor?.heading_bump_max_deg ?? r.heading_max_deg;
   return (hb != null && Math.abs(hb) > limitDeg) || (hm != null && Math.abs(hm) > limitDeg);
 }

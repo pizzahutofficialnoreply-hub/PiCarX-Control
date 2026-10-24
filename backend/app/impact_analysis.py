@@ -351,7 +351,7 @@ def pitch_events(t: Sequence[float], pitch: Sequence[float] | None, wheelbase_mm
     return ev
 
 
-ANALYSIS_VERSION = 9  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
+ANALYSIS_VERSION = 10  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
 
 EVENT_LABEL = {"FU": "앞바퀴 오름", "FD": "앞바퀴 내림", "RU": "뒷바퀴 오름", "RD": "뒷바퀴 내림"}
 
@@ -767,11 +767,15 @@ def run_metric(run: dict[str, Any], metric: str = "peak") -> float | None:
 
 
 def heading_out(run: dict[str, Any], limit_deg: float | None) -> bool:
-    """차가 비스듬히 지나간 회차: 방지턱 도착 때 방향이나 주행 중 최대 방향이 허용 각도를 넘음."""
+    """차가 비스듬히 지나간 회차: 방지턱 도착 때 방향이나 방지턱을 지나는 동안의 최대 방향이 허용 각도를 넘음."""
     if not limit_deg:
         return False
-    hb = (run.get("motor") or {}).get("heading_at_bump_deg")
-    hm = run.get("heading_max_deg")
+    m = run.get("motor") or {}
+    hb = m.get("heading_at_bump_deg")
+    # 방지턱을 지나는 동안의 최대 방향이 있으면 그것을, 없으면(옛 회차) 주행 중 최대 방향을 봅니다.
+    hm = m.get("heading_bump_max_deg")
+    if hm is None:
+        hm = run.get("heading_max_deg")
     return (hb is not None and abs(hb) > limit_deg) or (hm is not None and abs(hm) > limit_deg)
 
 

@@ -419,6 +419,15 @@ def motor_summary(run: dict[str, Any], a: dict[str, Any]) -> dict[str, Any] | No
         near = min((row for row in log if len(row) > 3 and row[3] is not None), key=lambda row: abs(row[0] - tb), default=None)
         if near is not None:
             out["heading_at_bump_deg"] = near[3]
+        # 방지턱을 지나는 동안(앞바퀴 오름 0.1초 전 ~ 뒷바퀴 내림 0.1초 뒤) 가장 크게 틀어진 방향.
+        # 감속 뒤 다시 가속해 멀리 달린 구간은 넣지 않습니다(방지턱 충격과 상관없음).
+        ev = {e.get("kind"): e.get("t_s") for e in (a.get("events") or [])}
+        end_abs = ev.get("RD") or ((a.get("rear_t_s") or a.get("front_t_s")) + 0.3)
+        lo, hi = tb - 0.1, end_abs - t0 + 0.1
+        hs = [row[3] for row in log if len(row) > 3 and row[3] is not None and lo <= row[0] <= hi]
+        if hs:
+            out["heading_bump_max_deg"] = round(max(abs(h) for h in hs), 2)
+            out["heading_bump_change_deg"] = round(hs[-1] - hs[0], 2)
     out["steering"] = run.get("steering_source")
     return out or None
 
@@ -458,7 +467,15 @@ def judge_slowdown(run: dict[str, Any], metric: str | None = None, analysis: dic
         sd["measured_peak_g"] = round(d + 1.0, 4)
         sd["pass"] = bool(d + 1.0 <= sd["a_limit_g"])
         pred = sd.get("pred_delta_target_g")
-        sd["pred_error_pct"] = round((d - pred) / pred * 100, 1) if pred else None
+        sd["pred_error_pct"] = round((d - pred) / pred * 100, 1) if pred else None   # 목표 속도로 예측한 충격 대비
+        coef, v = sd.get("model_coef"), a.get("speed_mps")
+        if coef and v:
+            # 식 자체의 검증: 실제로 지난 속도를 식에 넣은 예측과 비교(속도 제어 오차를 빼고 식만 봄)
+            pm = coef["k0"] * v ** coef["n"] * ((run.get("condition") or {}).get("total_mass_g", 1000) / 1000.0) ** coef.get("p", 0.0)
+            sd["pred_at_measured_g"] = round(pm, 4)
+            sd["formula_error_pct"] = round((d - pm) / pm * 100, 1) if pm else None
+        tv = sd.get("target_v_mps")
+        sd["speed_error_pct"] = round((v - tv) / tv * 100, 1) if v and tv else None
     else:
         sd["measured_delta_g"] = sd["measured_peak_g"] = sd["pass"] = None   # 방지턱을 못 찾았거나 센서 기록이 깨진 회차는 판정하지 않음
 
@@ -1238,6 +1255,7 @@ def slowdown_plan(cond: ExperimentCondition, settings: ExperimentSettings, req: 
     return {"trigger": trigger, "trigger_requested": req.trigger, "at_s": req.at_s, "at_cm": at_cm, "safety": req.safety,
             "margin": req.margin, "model_error_g": round(err, 4), "target_delta_g": round(d_target, 4),
             "a_limit_g": round(a_lim, 4), "model_id": model["id"], "model_formula": mf.formula_text(model),
+            "model_coef": dict(model["coef"]) if model.get("kind") == "power" else None,
             "metric": settings.impact_metric, "metric_label": ia.IMPACT_METRICS.get(settings.impact_metric),
             "v0_pred_mps": round(v0, 4), "pred_delta_v0_g": round(mf.predict(model, v0, mk), 4),
             "vmax_mps": round(vmax, 4), "target_v_mps": round(target_v, 4),
@@ -2481,7 +2499,7 @@ async def export_summary():
             f"지표: {mlabel} Δa(g)", "허용 기준 초과", "앞바퀴 오름 Δa(g)", "앞바퀴 내림 Δa(g)", "뒷바퀴 오름 Δa(g)", "뒷바퀴 내림 Δa(g)",
             "가장 큰 충격 Δa(g)", "앞바퀴 오름 충격량(N·s)", "뒷바퀴 오름 충격량(N·s)", "올라갈 때 충격량 합(N·s)",
             "앞바퀴 내림 충격량(N·s)", "뒷바퀴 내림 충격량(N·s)", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)",
-            "왼쪽 PWM(듀티%)", "오른쪽 PWM(듀티%)", "도는 속도(°/s, +왼쪽)", "방지턱 도착 때 방향(°)", "주행 중 최대 방향(°)", "조향",
+            "왼쪽 PWM(듀티%)", "오른쪽 PWM(듀티%)", "도는 속도(°/s, +왼쪽)", "방지턱 도착 때 방향(°)", "방지턱 지나는 동안 최대 방향(°)", "주행 중 최대 방향(°)", "조향",
             "배터리(V)", "확인할 점"]
     rows: list[list[Any]] = [head]
     key = lambda r: (r["condition"].get("bump_id") or "", r["condition"].get("total_mass_g") or 0,
@@ -2511,7 +2529,7 @@ async def export_summary():
                      a.get("sample_rate_hz"),
                      f"{m['left_pwm']} ({m['left_duty']})" if m.get("left_pwm") is not None else "",
                      f"{m['right_pwm']} ({m['right_duty']})" if m.get("right_pwm") is not None else "",
-                     m.get("yaw_rate_dps"), m.get("heading_at_bump_deg"), r.get("heading_max_deg"),
+                     m.get("yaw_rate_dps"), m.get("heading_at_bump_deg"), m.get("heading_bump_max_deg"), r.get("heading_max_deg"),
                      {"none": "없음", "gyro": "자이로", "line": "유도선"}.get(m.get("steering") or "", m.get("steering") or ""),
                      r.get("battery_v"), " / ".join(a.get("flags") or [])])
     rows.append([])
