@@ -2127,6 +2127,46 @@ class PurposeClear(BaseModel):
     confirm: str
 
 
+class TrialRenumber(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=5000)
+    scope: Literal["purpose", "condition"] = Field(
+        default="purpose", description="purpose: 측정 목적마다 1부터, condition: 목적·조건(방지턱·질량·출력·방향)마다 1부터")
+    restore: bool = Field(default=False, description="처음 번호(바꾸기 전)로 되돌리기")
+
+
+@router.post("/runs/renumber")
+async def runs_renumber(body: TrialRenumber):
+    """고른 회차들의 번호를 측정한 순서대로 1부터 다시 매깁니다(처음 번호는 orig_trial에 남겨 되돌릴 수 있음)."""
+    if auto_runner.busy:
+        raise HTTPException(409, "측정 중에는 번호를 바꿀 수 없습니다.")
+    want = set(body.ids)
+    runs = [r for r in store.list_runs() if r["id"] in want]
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for r in runs:
+        c = r.get("condition") or {}
+        key: tuple = (c.get("purpose") or "main",)
+        if body.scope == "condition":
+            key += ia.group_key(r)
+        groups.setdefault(key, []).append(r)
+    changed = 0
+    for members in groups.values():
+        members.sort(key=lambda r: r.get("created_at") or "")
+        for i, r in enumerate(members, 1):
+            c = r["condition"]
+            if body.restore:
+                if c.get("orig_trial") is None:
+                    continue
+                new = int(c["orig_trial"])
+            else:
+                c.setdefault("orig_trial", c.get("trial"))
+                new = i
+            if c.get("trial") != new:
+                c["trial"] = new
+                store.put(r)
+                changed += 1
+    return {"changed": changed, "groups": len(groups)}
+
+
 @router.post("/runs/clear-purpose")
 async def runs_clear_purpose(body: PurposeClear):
     """식 검증·예비 시행처럼 한 종류만 휴지통으로 옮깁니다(되돌릴 수 있음)."""

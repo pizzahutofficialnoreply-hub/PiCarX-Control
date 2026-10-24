@@ -222,3 +222,30 @@ class DataManagementApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenumberTests(unittest.TestCase):
+    def test_renumber_by_purpose_and_restore(self):
+        import tempfile
+        from pathlib import Path
+        from fastapi.testclient import TestClient
+        from app import experiment as ex
+        from app.main import app
+        with tempfile.TemporaryDirectory() as tmp:
+            from unittest.mock import patch
+            pt = patch.object(ex, "store", ex.ExperimentStore(Path(tmp)))
+            pt.start()
+            try:
+                for i, (p, t) in enumerate([("validation", 240), ("validation", 241), ("main", 50), ("validation", 274)]):
+                    ex.store.put({"id": f"20261024-05000{i}-abcde{i}", "created_at": f"2026-10-24T05:0{i}:00", "condition": {
+                        "purpose": p, "trial": t, "bump_id": "b", "total_mass_g": 600, "output_mode": "pwm", "output_value": 100}})
+                c = TestClient(app)
+                res = c.post("/api/experiment/runs/renumber", json={"ids": ["20261024-050000-abcde0", "20261024-050001-abcde1", "20261024-050002-abcde2", "20261024-050003-abcde3"]}).json()
+                self.assertEqual(res["groups"], 2)
+                got = {r["id"]: r["condition"]["trial"] for r in ex.store.list_runs()}
+                self.assertEqual(got, {"20261024-050000-abcde0": 1, "20261024-050001-abcde1": 2, "20261024-050002-abcde2": 1, "20261024-050003-abcde3": 3})
+                c.post("/api/experiment/runs/renumber", json={"ids": ["20261024-050000-abcde0", "20261024-050001-abcde1", "20261024-050002-abcde2", "20261024-050003-abcde3"], "restore": True})
+                got = {r["id"]: r["condition"]["trial"] for r in ex.store.list_runs()}
+                self.assertEqual(got, {"20261024-050000-abcde0": 240, "20261024-050001-abcde1": 241, "20261024-050002-abcde2": 50, "20261024-050003-abcde3": 274})
+            finally:
+                pt.stop()

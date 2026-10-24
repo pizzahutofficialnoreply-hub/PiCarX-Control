@@ -101,6 +101,8 @@ export type ExperimentCondition = {
   direction?: 'forward' | 'backward';
   video_speed_mps: number | null;
   purpose?: Purpose;
+  /** 회차를 다시 매기기 전 처음 번호 */
+  orig_trial?: number | null;
   note: string;
   total_mass_g?: number;
 };
