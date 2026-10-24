@@ -4,3 +4,7 @@ dist/
 __pycache__/
 *.py[cod]
 /backend/data/
+
+# 빌드된 화면(frontend/dist)은 Pi에서 바로 쓰도록 저장소에 포함
+!frontend/dist/
+!frontend/dist/**
