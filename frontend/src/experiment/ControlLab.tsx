@@ -27,6 +27,8 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
   const [minOut, setMinOut] = usePersistentState('slow-min-out', 10);
   const [targetG, setTargetG] = usePersistentState<number | ''>('slow-target-g', '');
   const [repeats, setRepeats] = usePersistentState('slow-repeats', 3);
+  // 본 실험과 같은 출발 조건(밀어주기)으로 맞춤. 측정 탭 설정과 따로 저장되므로 여기서 확인
+  const [kickMs, setKickMs] = usePersistentState('slow-kick-ms', 150);
   const [runS, setRunS] = usePersistentState('slow-run-s', 4);
   const [manualOut, setManualOut] = usePersistentState<number | ''>('slow-manual-out', '');
   const [manualV, setManualV] = usePersistentState<number | ''>('slow-manual-v', '');
@@ -136,7 +138,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
 
   async function runSlow() {
     await ctx.startAutoRun({ note: testName.slice(0, 120) }, {
-      repeats, run_seconds: runS, start_delay_s: startDelay, rest_s: Math.max(0.3, restS), ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
+      repeats, run_seconds: runS, start_delay_s: startDelay, kick_ms: kickMs, rest_s: Math.max(0.3, restS), ultrasonic: trigger === 'distance' || trigger === 'distance_auto' ? true : undefined,
       slowdown: { trigger, at_s: atS, at_cm: atCm, safety, min_output: minOut, target_g: targetG === '' ? null : targetG, margin, staged, resume, lead_cm: leadCm, output: manualOut === '' ? null : manualOut, target_speed: manualOut === '' && manualV !== '' ? manualV : null, resume_after_s: resume ? resumeAfter : 0 },
     });
     ctx.setMessage('감속 제어 측정을 시작했습니다. 진행 상황은 측정·분석 탭에서도 볼 수 있습니다.');
@@ -211,6 +213,7 @@ export default function ControlLab({ ctx, bump, part }: { ctx: ExperimentContext
         <label className="exp-check"><input type="checkbox" checked={resume} onChange={e => setResume(e.target.checked)} /> 다 넘으면 원래 출력으로 다시 가속</label>
         {resume && <label>다 넘음을 못 알아채면 감속 후 (s) 뒤 가속<NumInput min={0} max={10} step={0.5} value={resumeAfter} onChange={e => setResumeAfter(Math.max(0, Math.min(10, Number(e.target.value) || 0)))} /></label>}
         <label>반복<NumInput min={1} max={20} value={repeats} onChange={e => setRepeats(Math.max(1, Math.min(20, Math.round(Number(e.target.value) || 1))))} /></label>
+        <label title="본 실험과 같게(150 ms). 출발 순간 PWM 100으로 밀어 줍니다">출발 밀어주기 (ms)<NumInput min={0} max={400} step={10} value={kickMs} onChange={e => setKickMs(Math.max(0, Math.min(400, Math.round(Number(e.target.value) || 0))))} /></label>
       </div>
       <details className="exp-tips"><summary>고급: 감속 속도 정하는 방법 바꾸기 (보통은 그대로 두세요)</summary>
         <p className="exp-hint">평소에는 비워 두면 됩니다. 앱이 <b>관계식 → v_max(기준을 넘지 않는 최대 속도) → 여유율을 곱한 목표 속도 → 그 속도가 나오는 출력</b> 순서로 감속 출력을 계산합니다.</p>
