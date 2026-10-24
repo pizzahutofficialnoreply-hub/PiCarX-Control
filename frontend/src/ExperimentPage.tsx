@@ -131,9 +131,11 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
 
   function startPolling() {
     if (pollRef.current) window.clearInterval(pollRef.current);
-    pollRef.current = window.setInterval(async () => {
+    const id = window.setInterval(async () => {
       try {
         const state = await request('/api/experiment/auto-run') as AutoRunState;
+        // 응답을 기다리는 사이 이미 끝 처리를 한 경우(겹친 요청)는 무시: 회차 번호가 여러 번 올라가던 문제
+        if (pollRef.current !== id) return;
         setAuto(state);
         const done = state.completed_run_ids ?? [];
         if (done.length > seenRuns.current) {
@@ -152,6 +154,7 @@ export default function ExperimentPage({ request: requestProp, controlMode, conn
         }
       } catch (e) { fail(e); }
     }, 300);
+    pollRef.current = id;
   }
 
   const totalMass = condition.base_mass_g + condition.added_mass_g;
