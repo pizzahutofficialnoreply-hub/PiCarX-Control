@@ -79,6 +79,10 @@ class ExperimentSettings(BaseModel):
     filter_hz: float = Field(default=0, ge=0, le=100, description="진동 거르기(저역 통과) 기준 주파수 Hz, 0이면 끔")
     detect_level: Literal["strict", "normal", "sensitive"] = Field(default="normal", description="방지턱 감지 민감도")
     outlier_method: Literal["trim", "sigma2", "iqr", "none"] = Field(default="trim", description="조건별 평균의 이상치 제거 방식")
+    impact_metric: Literal["up", "front_up", "peak"] = Field(
+        default="up", description="보고서 지표: up = 올라갈 때 충격(앞·뒤 바퀴 평균), front_up = 앞바퀴 올라갈 때, peak = 가장 큰 충격")
+    heading_limit_deg: float = Field(default=10.0, ge=0, le=90,
+                                     description="방지턱 도착 때 방향·주행 중 최대 방향이 이 각도를 넘으면 계산에서 뺌(0 = 끔)")
     a_limit_mode: Literal["manual", "first_jump"] = Field(default="manual", description="manual: 직접 입력, first_jump: 점프가 처음 나타난 조건의 평균 최대 가속도")
     a_limit_preset: Literal["trl614", "watts1973", "kjemtrup04", "kjemtrup02", "custom"] = Field(
         default="trl614", description="허용 기준 출처(선행 연구). custom이면 a_limit_g를 직접 씀")
@@ -605,15 +609,16 @@ def purpose_of(run: dict[str, Any]) -> str:
     return (run.get("condition") or {}).get("purpose") or "main"
 
 
-def validation_rows(runs: list[dict[str, Any]], models: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
-    """검증용 시행: 회귀에 쓰지 않은 데이터로 식의 예측과 실측을 비교합니다."""
+def validation_rows(runs: list[dict[str, Any]], models: dict[str, dict[str, Any] | None], metric: str = "peak",
+                    heading_limit_deg: float | None = None) -> dict[str, Any]:
+    """검증용 시행: 회귀에 쓰지 않은 데이터로 식의 예측과 실측을 비교합니다(실측은 보고서 지표)."""
     rows = []
     for r in runs:
-        if purpose_of(r) != "validation" or r.get("excluded"):
+        if purpose_of(r) != "validation" or r.get("excluded") or ia.heading_out(r, heading_limit_deg):
             continue
         a, c = r.get("analysis") or {}, r["condition"]
         model = models.get(c.get("bump_id"))
-        v, d = a.get("speed_mps"), a.get("peak_delta_g")
+        v, d = a.get("speed_mps"), ia.run_metric(r, metric)
         pred = mf.predict(model, v, c["total_mass_g"] / 1000.0) if model and v and d is not None else None
         err = (d - pred) / pred * 100 if pred and d is not None else None
         rows.append({"run_id": r["id"], "created_at": r["created_at"], "bump_id": c.get("bump_id"), "total_mass_g": c["total_mass_g"],
@@ -655,17 +660,20 @@ def analysis_bundle(runs: list[dict[str, Any]], settings: ExperimentSettings) ->
     want = settings.analysis_direction
     runs = [r for r in runs if (r.get("condition", {}).get("direction") or "forward") == want]
     main_runs = [r for r in runs if purpose_of(r) == "main"]
-    groups = ia.aggregate(main_runs, settings.outlier_method)
+    groups = ia.aggregate(main_runs, settings.outlier_method, settings.impact_metric, settings.heading_limit_deg)
     bump_ids = sorted({g["bump_id"] for g in groups})
     fits = {bump_id: ia.fit_power_law(groups, bump_id) for bump_id in bump_ids}
     comparisons = {bump_id: mf.compare_models(_points(groups, bump_id)) for bump_id in bump_ids}
     chosen = {bump_id: mf.choose(comparisons[bump_id], settings.model_id) for bump_id in bump_ids}
     criteria = {bump_id: criterion_for(bump_id, groups, chosen[bump_id], settings) for bump_id in bump_ids}
-    interpretation = {bump_id: mf.interpret(bump_id, groups, comparisons[bump_id], chosen[bump_id], criteria[bump_id]) for bump_id in bump_ids}
+    label = ia.IMPACT_METRICS.get(settings.impact_metric, settings.impact_metric)
+    interpretation = {bump_id: mf.interpret(bump_id, groups, comparisons[bump_id], chosen[bump_id], criteria[bump_id], label)
+                      for bump_id in bump_ids}
     return {"groups": groups, "fits": fits, "models": comparisons,
+            "metric": {"id": settings.impact_metric, "label": label, "heading_limit_deg": settings.heading_limit_deg},
             "chosen_models": {k: (v["id"] if v else None) for k, v in chosen.items()},
             "criteria": criteria, "interpretation": interpretation,
-            "speed_maps": mf.speed_maps(groups), "speed_models": mf.speed_models(groups), "event_models": mf.event_models(groups), "validation": validation_rows(runs, chosen),
+            "speed_maps": mf.speed_maps(groups), "speed_models": mf.speed_models(groups), "event_models": mf.event_models(groups), "validation": validation_rows(runs, chosen, settings.impact_metric, settings.heading_limit_deg),
             "progress": plan_progress(runs, settings)}
 
 
@@ -1924,7 +1932,9 @@ async def export_bump_windows(ids: str = "", before: float = 0.15, after: float 
     grid = [round(-before + i * 0.001, 3) for i in range(int(round((before + after) / 0.001)) + 1)]
     wide_cols: list[tuple[str, list[Any]]] = []
     summary: list[list[Any]] = [head + ["통과속도_mps", "최대충격_g", "평소보다더_g", "앞바퀴_g", "뒷바퀴_g", "앞뒤간격_s",
-                                        "충격량_Ns", "펄스길이_s", "위쪽속도변화_mps", "이론_위쪽속도변화_mps", "꼭대기최솟값_g", "이론_꼭대기_g", "Π"]]
+                                        "충격량_Ns", "펄스길이_s", "위쪽속도변화_mps", "이론_위쪽속도변화_mps", "꼭대기최솟값_g", "이론_꼭대기_g", "Π",
+                                        "앞오름_g", "앞내림_g", "뒤오름_g", "뒤내림_g", "올라갈때평균_g",
+                                        "앞오름_충격량_Ns", "앞내림_충격량_Ns", "뒤오름_충격량_Ns", "뒤내림_충격량_Ns", "올라갈때_충격량합_Ns"]]
     for r in runs:
         try:
             cols = await asyncio.to_thread(store.read_columns, r["id"])
@@ -1966,7 +1976,9 @@ async def export_bump_windows(ids: str = "", before: float = 0.15, after: float 
             label, k2 = f"{base}_{k2}", k2 + 1
         wide_cols.append((label, col))
         summary.append(info + [a.get("speed_mps"), a.get("peak_g"), a.get("peak_delta_g"), a.get("front_g"), a.get("rear_g"), a.get("axle_dt_s"),
-                               a.get("impulse_ns"), a.get("pulse_s"), a.get("dvz_mps"), a.get("dvz_theory_mps"), a.get("crest_min_g"), a.get("crest_theory_g"), a.get("pi")])
+                               a.get("impulse_ns"), a.get("pulse_s"), a.get("dvz_mps"), a.get("dvz_theory_mps"), a.get("crest_min_g"), a.get("crest_theory_g"), a.get("pi"),
+                               *[(a.get("event_delta_g") or {}).get(k) for k in ("FU", "FD", "RU", "RD")], a.get("up_delta_g"),
+                               *[(a.get("event_impulse_ns") or {}).get(k) for k in ("FU", "FD", "RU", "RD")], a.get("up_impulse_ns")])
     wide = [["t_rel_s"] + [n for n, _ in wide_cols]]
     for i, x in enumerate(grid):
         wide.append([x] + [col[i] for _, col in wide_cols])
@@ -2408,7 +2420,10 @@ async def export_runs():
             "bump_R_mm", "base_mass_g", "added_mass_g", "total_mass_g", "output_mode", "output_value",
             "sample_rate_hz", "peak_g", "peak_delta_g", "front_t_s", "rear_t_s", "axle_dt_s", "speed_mps",
             "video_speed_mps", "min_g", "jump", "airborne_s", "landing_g", "peak_force_n", "dynamic_force_n", "pi", "critical_speed_mps",
-            "purpose", "pair_source", "battery_v", "steering_source", "heading_max_deg", "data_source", "flags", "note"]
+            "purpose", "pair_source", "battery_v", "steering_source", "heading_max_deg", "data_source",
+            "front_up_delta_g", "front_down_delta_g", "rear_up_delta_g", "rear_down_delta_g", "up_delta_g",
+            "front_up_impulse_ns", "front_down_impulse_ns", "rear_up_impulse_ns", "rear_down_impulse_ns", "up_impulse_ns",
+            "heading_at_bump_deg", "flags", "note"]
     rows: list[list[Any]] = [head]
     for r in sorted(runs, key=lambda r: r.get("created_at", "")):
         c, a, b = r["condition"], r.get("analysis") or {}, r.get("bump") or {}
@@ -2420,7 +2435,9 @@ async def export_runs():
                      a.get("airborne_s"), a.get("landing_g"), a.get("peak_force_n"), a.get("dynamic_force_n"), a.get("pi"),
                      a.get("critical_speed_mps"), c.get("purpose") or "main", a.get("pair_source"), r.get("battery_v"),
                      r.get("steering_source"), r.get("heading_max_deg"), r.get("data_source") or ("synthetic" if r.get("simulated") else "mpu6050"),
-                     " / ".join(a.get("flags") or []), c.get("note")])
+                     *[(a.get("event_delta_g") or {}).get(k) for k in ("FU", "FD", "RU", "RD")], a.get("up_delta_g"),
+                     *[(a.get("event_impulse_ns") or {}).get(k) for k in ("FU", "FD", "RU", "RD")], a.get("up_impulse_ns"),
+                     (r.get("motor") or {}).get("heading_at_bump_deg"), " / ".join(a.get("flags") or []), c.get("note")])
     return _csv_response(rows, "picarx_runs.csv")
 
 
@@ -2436,40 +2453,70 @@ async def export_summary():
     runs = ia.harmonize_pairs(runs_for_mode(ctl.adapter.mode != "hardware"))
     bundle = analysis_bundle(runs, settings)
     crit = bundle.get("criteria") or {}
-    head = ["방지턱", "총질량(g)", "출력", "방향", "회차", "계산에 포함", "통과 속도(m/s)", "앞·뒤 바퀴 간격(ms)", "가장 큰 충격(g)",
-            "평소보다 더(Δa, g)", "허용 기준 초과", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)",
-            "왼쪽 PWM(듀티%)", "오른쪽 PWM(듀티%)", "도는 속도(°/s, +왼쪽)", "방지턱 도착 때 방향(°)", "조향", "배터리(V)", "확인할 점"]
+    metric = settings.impact_metric
+    mlabel = ia.IMPACT_METRICS.get(metric, metric)
+    head = ["방지턱", "총질량(g)", "출력", "방향", "회차", "계산에 포함", "빠진 이유", "통과 속도(m/s)", "앞·뒤 바퀴 간격(ms)",
+            f"지표: {mlabel} Δa(g)", "허용 기준 초과", "앞바퀴 오름 Δa(g)", "앞바퀴 내림 Δa(g)", "뒷바퀴 오름 Δa(g)", "뒷바퀴 내림 Δa(g)",
+            "가장 큰 충격 Δa(g)", "앞바퀴 오름 충격량(N·s)", "뒷바퀴 오름 충격량(N·s)", "올라갈 때 충격량 합(N·s)",
+            "앞바퀴 내림 충격량(N·s)", "뒷바퀴 내림 충격량(N·s)", "바퀴 뜸", "바퀴 찾은 방법", "표본(Hz)",
+            "왼쪽 PWM(듀티%)", "오른쪽 PWM(듀티%)", "도는 속도(°/s, +왼쪽)", "방지턱 도착 때 방향(°)", "주행 중 최대 방향(°)", "조향",
+            "배터리(V)", "확인할 점"]
     rows: list[list[Any]] = [head]
     key = lambda r: (r["condition"].get("bump_id") or "", r["condition"].get("total_mass_g") or 0,
                      r["condition"].get("output_value") or 0, r["condition"].get("trial") or 0)
+    dropped_ids = {i for g in bundle["groups"] for i in (g.get("dropped_run_ids") or [])}
     for r in sorted(runs, key=key):
         c, a = r["condition"], r.get("analysis") or {}
         lim = (crit.get(c.get("bump_id")) or {}).get("a_limit_g")
-        used = not r.get("excluded") and not r.get("aborted") and a.get("bump_detected") is not False and (c.get("purpose") or "main") == "main"
+        d = ia.run_metric(r, metric)
+        why = ("중단" if r.get("aborted") else "직접 제외" if r.get("excluded") else
+               "방지턱 못 찾음" if a.get("bump_detected") is False else
+               ("검증용" if (c.get("purpose") or "main") == "validation" else "본 실험 아님") if (c.get("purpose") or "main") != "main" else
+               f"방향 {settings.heading_limit_deg:g}° 초과" if ia.heading_out(r, settings.heading_limit_deg) else
+               "지표 값 없음(단계를 못 찾음)" if d is None else
+               "이상치" if r["id"] in dropped_ids else "")
+        ev, imp = a.get("event_delta_g") or {}, a.get("event_impulse_ns") or {}
+        m = r.get("motor") or {}
         rows.append([c.get("bump_id"), c.get("total_mass_g"), f"{(c.get('output_mode') or 'pwm').upper()} {c.get('output_value')}",
                      "후진" if c.get("direction") == "backward" else "전진", c.get("trial"),
-                     "예" if used else "아니오", a.get("speed_mps"), None if a.get("axle_dt_s") is None else round(a["axle_dt_s"] * 1000),
-                     a.get("peak_g"), a.get("peak_delta_g"),
-                     "" if lim is None or a.get("peak_g") is None else ("초과" if a["peak_g"] > lim else "이내"),
+                     "아니오" if why else "예", why, a.get("speed_mps"), None if a.get("axle_dt_s") is None else round(a["axle_dt_s"] * 1000),
+                     d, "" if lim is None or d is None else ("초과" if d + 1.0 > lim else "이내"),
+                     ev.get("FU", a.get("front_up_delta_g")), ev.get("FD"), ev.get("RU", a.get("rear_up_delta_g")), ev.get("RD"),
+                     a.get("peak_delta_g"), a.get("front_up_impulse_ns"), a.get("rear_up_impulse_ns"), a.get("up_impulse_ns"),
+                     imp.get("FD"), imp.get("RD"),
                      "" if a.get("jump") is None else ("예" if a["jump"] else "아니오"),
                      "방지턱 못 찾음" if a.get("bump_detected") is False else PAIR_LABEL.get(a.get("pair_source") or "", ""),
                      a.get("sample_rate_hz"),
-                     *(lambda m: [f"{m['left_pwm']} ({m['left_duty']})" if m.get("left_pwm") is not None else "",
-                                  f"{m['right_pwm']} ({m['right_duty']})" if m.get("right_pwm") is not None else "",
-                                  m.get("yaw_rate_dps"), m.get("heading_at_bump_deg"),
-                                  {"none": "없음", "gyro": "자이로", "line": "유도선"}.get(m.get("steering") or "", m.get("steering") or "")])(r.get("motor") or {}),
+                     f"{m['left_pwm']} ({m['left_duty']})" if m.get("left_pwm") is not None else "",
+                     f"{m['right_pwm']} ({m['right_duty']})" if m.get("right_pwm") is not None else "",
+                     m.get("yaw_rate_dps"), m.get("heading_at_bump_deg"), r.get("heading_max_deg"),
+                     {"none": "없음", "gyro": "자이로", "line": "유도선"}.get(m.get("steering") or "", m.get("steering") or ""),
                      r.get("battery_v"), " / ".join(a.get("flags") or [])])
     rows.append([])
     method_label = {"trim": "가장 큰 값·작은 값 1개씩 뺀 평균", "sigma2": "평균 ± 2×표준편차 밖의 값을 뺀 평균",
                     "iqr": "사분위 범위(IQR) 밖의 값을 뺀 평균", "none": "모든 회차 평균"}.get(settings.outlier_method, settings.outlier_method)
-    rows.append([f"# 조건별 평균 ({method_label})"])
-    rows.append(["방지턱", "총질량(g)", "출력", "방향", "회차 수(계산에 쓴 수)", "평균 속도(m/s)", "속도 범위(m/s)", "평균 최대 충격(g)",
-                 "평균 Δa(g)", "Δa 범위(g)", "바퀴 뜬 회차"])
+    hl = f", 방향 {settings.heading_limit_deg:g}° 넘은 회차 제외" if settings.heading_limit_deg else ""
+    rows.append([f"# 조건별 평균 (지표: {mlabel}, {method_label}{hl})"])
+    rows.append(["방지턱", "총질량(g)", "출력", "방향", "회차 수(계산에 쓴 수)", "평균 속도(m/s)", "속도 범위(m/s)",
+                 f"평균 지표 Δa(g)", "표준편차(g)", "지표 Δa 범위(g)", "앞바퀴 오름 Δa(g)", "앞바퀴 내림 Δa(g)", "뒷바퀴 오름 Δa(g)",
+                 "뒷바퀴 내림 Δa(g)", "평균 가장 큰 충격 Δa(g)", "올라갈 때 충격량 합(N·s)", "바퀴 뜬 회차"])
     for g in bundle["groups"]:
+        e = g.get("event_delta_g") or {}
         rows.append([g["bump_id"], g["total_mass_g"], f"{g['output_mode'].upper()} {g['output_value']}",
-                     "후진" if g.get("direction") == "backward" else "전진", f"{g['n_runs']} ({g['n_used']})",
-                     g.get("mean_speed_mps"), f"{g.get('speed_min_mps')}–{g.get('speed_max_mps')}", g.get("mean_peak_g"),
-                     g.get("mean_peak_delta_g"), f"{g.get('kept_min_delta_g')}–{g.get('kept_max_delta_g')}", f"{g['jump_count']}/{g['n_runs']}"])
+                     "후진" if g.get("direction") == "backward" else "전진", f"{g['n_runs'] + g.get('n_skipped', 0)} ({g['n_used']})",
+                     g.get("mean_speed_mps"), f"{g.get('speed_min_mps')}–{g.get('speed_max_mps')}",
+                     g.get("mean_peak_delta_g"), g.get("sd_peak_delta_g"), f"{g.get('kept_min_delta_g')}–{g.get('kept_max_delta_g')}",
+                     e.get("FU"), e.get("FD"), e.get("RU"), e.get("RD"), g.get("mean_max_delta_g"), g.get("mean_up_impulse_ns"),
+                     f"{g['jump_count']}/{g['n_runs']}"])
+    for bump_id, cmp in (bundle.get("models") or {}).items():
+        mid = bundle["chosen_models"].get(bump_id)
+        mm = next((x for x in cmp.get("models", []) if x["id"] == mid), None)
+        if mm:
+            rows.append([])
+            rows.append([f"# 관계식 (방지턱 {bump_id}, 지표: {mlabel})"])
+            rows.append(["식", "값", "R²", "교차검증 오차(g)"])
+            rows.append([mm["name"], mf.formula_text(mm), round(mm["r2"], 4),
+                         None if mm.get("loocv_rmse") is None else round(mm["loocv_rmse"], 4)])
     for bump_id, lines in (bundle.get("interpretation") or {}).items():
         rows.append([])
         rows.append([f"# 자동 해석 (방지턱 {bump_id})"])
@@ -2510,8 +2557,10 @@ async def export_conditions():
     head = ["bump_id", "total_mass_g", "output_mode", "output_value", "n_runs", "n_used", "mean_speed_mps",
             "speed_min_mps", "speed_max_mps", "mean_peak_g", "mean_peak_delta_g", "kept_min_delta_g", "kept_max_delta_g",
             "dropped_delta_g", "sd_peak_delta_g", "mean_force_n", "mean_impulse_ns", "mean_pulse_s", "mean_dvz_mps",
-            "mean_crest_min_g", "mean_avg_force_n", "mean_pi", "jump_count"]
-    rows: list[list[Any]] = [[f"# 이상치 제거 방식: {settings.outlier_method}"], head]
+            "mean_crest_min_g", "mean_avg_force_n", "mean_pi", "jump_count", "metric", "mean_max_delta_g", "mean_up_impulse_ns", "n_skipped"]
+    rows: list[list[Any]] = [[f"# 이상치 제거 방식: {settings.outlier_method}, 지표: {settings.impact_metric} "
+                              f"({ia.IMPACT_METRICS.get(settings.impact_metric)}), mean_peak_delta_g = 지표 Δa 평균, "
+                              f"방향 제외 기준 {settings.heading_limit_deg:g}°"], head]
     for g in bundle["groups"]:
         rows.append([g.get(k) if k != "dropped_delta_g" else " / ".join(str(x) for x in g[k]) for k in head])
     rows.append([])

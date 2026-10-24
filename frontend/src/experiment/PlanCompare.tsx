@@ -1,7 +1,7 @@
 // 진행표에서 고른 조건(복수 선택)의 충격 파형과 평균값을 한 그래프에 겹쳐 비교합니다.
 import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
-import { fmt, type ExperimentSettings, type RunSummary } from '../services/experiment';
+import { fmt, headingOut, IMPACT_METRIC_LABEL, runMetric, type ExperimentSettings, type RunSummary } from '../services/experiment';
 import { MASS_COLORS, XYChart, type XYSeries } from '../components/ExperimentCharts';
 
 export type CellKey = { bump_id: string; added_mass_g: number; output_value: number };
@@ -73,6 +73,8 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
   const [loading, setLoading] = useState(false);
   useEffect(() => { try { localStorage.setItem('picarx-compare-show', show); localStorage.setItem('picarx-compare-by', by); localStorage.setItem('picarx-compare-align', align); } catch { /* 무시 */ } }, [show, by, align]);
   const method = settings.outlier_method ?? 'trim';
+  const metric = settings.impact_metric ?? 'up';
+  const hLim = settings.heading_limit_deg ?? 10;
 
   const dir = settings.analysis_direction ?? 'forward';
   const runsOf = useMemo(() => {
@@ -144,11 +146,11 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
 
   // 조건별 요약값(평균 ± 표준편차)
   const rows = sorted.map(c => {
-    const det = (runsOf.get(cellId(c)) ?? []).filter(r => r.analysis.bump_detected !== false && r.analysis.peak_delta_g != null);
-    const fl = outlierFlags(det.map(r => r.analysis.peak_delta_g as number), method);
+    const det = (runsOf.get(cellId(c)) ?? []).filter(r => r.analysis.bump_detected !== false && runMetric(r, metric) != null && !headingOut(r, hLim));
+    const fl = outlierFlags(det.map(r => runMetric(r, metric) as number), method);
     const rs = det.filter((_, i) => !fl[i]);
     const v = rs.map(r => r.analysis.speed_mps).filter((x): x is number => x != null);
-    const d = rs.map(r => r.analysis.peak_delta_g).filter((x): x is number => x != null);
+    const d = rs.map(r => runMetric(r, metric)).filter((x): x is number => x != null);
     const mass = rs[0]?.condition.total_mass_g ?? null;
     return { c, n: (runsOf.get(cellId(c)) ?? []).length, used: rs.length, v, d, mass, mv: mean(v), sv: sd(v), md: mean(d), sdd: sd(d) };
   });
@@ -160,8 +162,8 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
     const color = COLORS[gi % COLORS.length];
     const name = by === 'speed' ? `+${gk} g` : `출력 ${gk}`;
     const points = show === 'all'
-      ? mine.flatMap(r => (runsOf.get(cellId(r.c)) ?? []).filter(x => x.analysis.bump_detected !== false && x.analysis.peak_delta_g != null && (by === 'mass' || x.analysis.speed_mps != null))
-          .map(x => ({ x: by === 'speed' ? x.analysis.speed_mps as number : x.condition.total_mass_g, y: x.analysis.peak_delta_g as number, label: undefined })))
+      ? mine.flatMap(r => (runsOf.get(cellId(r.c)) ?? []).filter(x => x.analysis.bump_detected !== false && runMetric(x, metric) != null && !headingOut(x, hLim) && (by === 'mass' || x.analysis.speed_mps != null))
+          .map(x => ({ x: by === 'speed' ? x.analysis.speed_mps as number : x.condition.total_mass_g, y: runMetric(x, metric) as number, label: undefined })))
       : mine.filter(r => r.md != null && (by === 'mass' ? r.mass != null : r.mv != null)).map(r => ({ x: by === 'speed' ? r.mv as number : r.mass as number, y: r.md as number, label: `출력 ${r.c.output_value} · +${r.c.added_mass_g} g · n=${r.used}` }))
           .sort((a, b) => a.x - b.x);
     return { name, color, points, line: show === 'mean' && points.length > 1, dots: true };
@@ -183,7 +185,7 @@ export default function PlanCompare({ cells, runs, settings, aLimit, request, on
         vLines={[{ x: 0, label: align === 'peak' ? '최댓값' : '앞바퀴 오름', color: '#d0782a' }]}
         caption={show === 'mean' ? (align === 'events' ? `회차마다 앞바퀴 오름·내림, 뒷바퀴 오름·내림의 네 순간이 생기는 시각이 조금씩 다르므로, 각 회차의 시간축을 구간별로 늘이고 줄여 네 순간을 조건별 평균 시각에 맞춘 뒤 평균했습니다. 그래서 네 피크가 모두 살아 낱개 그래프와 비슷한 모양이 됩니다. ('회차별 최댓값 점 보기'를 켜면 각 회차의 최댓값이 점으로 나옵니다.) 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : align === 'peak' ? `선 = 각 회차의 최댓값 순간을 0초로 맞춰 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 최댓값입니다. 피크끼리 겹쳐 평균하므로 높이가 낱개 그래프와 비슷하게 유지됩니다. 이상치 처리(설정: ${method})로 빠진 회차는 평균에서 제외합니다.` : '선 = 각 조건의 회차들을 앞바퀴가 방지턱에 닿은 순간(0초)에 맞춘 뒤 같은 시각끼리 평균 낸 파형, 점 = 각 회차의 실제 최댓값입니다. 가장 큰 충격(내려올 때)은 회차마다 생기는 시각이 조금씩 달라 평균하면 서로 상쇄되어 선이 낮게 보이므로, 충격의 크기는 점으로 판단하세요. 앞바퀴 내림은 약 0.3~0.5초, 뒷바퀴 내림은 약 0.7~1.2초에 나타납니다.') : '고른 조건의 모든 회차를 앞바퀴 기준으로 겹쳤습니다(점 = 각 회차의 최댓값). 같은 색끼리 잘 겹치면 반복이 고르게 된 것입니다.'} />}
     {summarySeries.length > 0 && <XYChart name={`compare_summary_${show}_${by}`} title={by === 'speed' ? '통과 속도에 따른 충격 (선택 조건)' : '총 질량에 따른 충격 (선택 조건)'}
-      xLabel={by === 'speed' ? '방지턱 통과 속도 v (m/s)' : '차 전체 질량 (g)'} yLabel="평소보다 더 받은 가속도 Δa (g)" series={summarySeries} yZero
+      xLabel={by === 'speed' ? '방지턱 통과 속도 v (m/s)' : '차 전체 질량 (g)'} yLabel={`${IMPACT_METRIC_LABEL[metric]} Δa (g)`} series={summarySeries} yZero
       hLines={aLimit ? [{ y: aLimit - 1, label: `허용 기준 +${(aLimit - 1).toFixed(2)} g`, color: '#c33' }] : undefined}
       caption={show === 'mean' ? '점 하나 = 한 조건의 평균(방지턱을 못 찾은 회차는 뺌). 같은 색 선으로 이어 비교 변수에 따라 충격이 어떻게 변하는지 봅니다.' : '점 하나 = 한 회차. 같은 조건끼리 얼마나 흩어졌는지 봅니다.'} />}
     <div className="experiment-table-wrap"><table className="experiment-table"><thead><tr><th>조건</th><th>측정 (사용)</th><th>통과 속도 (m/s)</th><th>Δa 평균 (g)</th><th>Δa 범위</th></tr></thead>

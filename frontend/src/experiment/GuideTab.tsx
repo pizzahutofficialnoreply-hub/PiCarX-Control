@@ -87,7 +87,7 @@ function fitPi(points: { pi: number; d: number }[]) {
 
 export default function GuideTab({ ctx }: { ctx: ExperimentContext }) {
   const runs = (ctx.data?.runs ?? []).filter(r => !r.excluded && (r.condition.purpose ?? 'main') === 'main');
-  const piFit = useMemo(() => fitPi(runs.map(r => ({ pi: r.analysis.pi ?? 0, d: r.analysis.peak_delta_g ?? 0 }))), [runs]);
+  const piFit = useMemo(() => fitPi(runs.map(r => ({ pi: r.analysis.pi ?? 0, d: r.analysis.peak_delta_g ?? 0 }))), [runs]); // Π 그래프는 가장 큰 충격 기준(이론 원운동 비교)
   const [humanLimit, setHumanLimit] = usePersistentState('guide-human', 0.7);
   const [realH, setRealH] = usePersistentState('guide-realH', 100);
   const [realW, setRealW] = usePersistentState('guide-realW', 3600);

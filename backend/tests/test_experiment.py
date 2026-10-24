@@ -698,3 +698,34 @@ class SensorCleanupTests(unittest.TestCase):
                 "gx_dps": g, "gy_dps": [0.0] * 1000, "gz_dps": [0.0] * 1000}
         p = ia.pitch_series(cols)
         self.assertLess(abs(p[-1] - p[500]), 0.05)   # 정지 구간 영점을 제대로 잡으면 기울기가 흐르지 않음
+
+
+class ImpactMetricTests(unittest.TestCase):
+    def _run(self, rid, out, up, peak, hb=0.0, hm=2.0):
+        return {"id": rid, "excluded": False, "motor": {"heading_at_bump_deg": hb}, "heading_max_deg": hm,
+                "condition": {"bump_id": "b", "total_mass_g": 600, "output_mode": "pwm", "output_value": out, "direction": "forward"},
+                "analysis": {"bump_detected": True, "peak_delta_g": peak, "up_delta_g": up, "speed_mps": 0.1 + out / 500}}
+
+    def test_event_impulse_and_up_metric(self):
+        t = [i / 1000 for i in range(400)]
+        v = [1.0] * 400
+        for c, h in ((100, 0.5), (150, 3.0), (200, 0.7), (250, 2.0)):
+            for k in range(-5, 6):
+                v[c + k] = 1.0 + h * (1 - abs(k) / 6)
+        events = [{"kind": k, "peak_t_s": t[c], "t_s": t[c], "g": v[c]} for k, c in zip(("FU", "FD", "RU", "RD"), (100, 150, 200, 250))]
+        m = ia.event_metrics(t, v, {"events": events}, 600)
+        self.assertAlmostEqual(m["up_delta_g"], 0.6, places=3)
+        self.assertGreater(m["event_impulse_ns"]["FD"], m["event_impulse_ns"]["FU"])
+        self.assertAlmostEqual(m["up_impulse_ns"], m["event_impulse_ns"]["FU"] + m["event_impulse_ns"]["RU"], places=5)
+
+    def test_aggregate_uses_metric_and_drops_tilted_runs(self):
+        runs = [self._run("a", 40, 0.5, 3.0), self._run("b", 40, 0.7, 2.0), self._run("c", 40, 0.6, 4.0, hb=-15.0),
+                self._run("d", 40, None, 3.0)]
+        g = ia.aggregate(runs, "none", "up", 10)[0]
+        self.assertEqual(g["n_used"], 2)
+        self.assertAlmostEqual(g["mean_peak_delta_g"], 0.6, places=4)
+        self.assertAlmostEqual(g["mean_max_delta_g"], 2.5, places=4)
+        self.assertEqual(g["skipped_heading_ids"], ["c"])
+        self.assertEqual(g["skipped_no_metric_ids"], ["d"])
+        old = ia.aggregate(runs, "none")[0]
+        self.assertEqual(old["n_used"], 4)

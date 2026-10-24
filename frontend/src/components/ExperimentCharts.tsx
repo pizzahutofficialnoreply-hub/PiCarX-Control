@@ -2,7 +2,7 @@
 // 화면에 보이는 그대로 PNG/SVG로 저장합니다.
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Download, Image as ImageIcon } from 'lucide-react';
-import { EVENT_INFO, modelPredict, modelSolveSpeed, type ConditionGroup, type ModelResult, type PowerFit, type RunAnalysis, type RunSummary } from '../services/experiment';
+import { EVENT_INFO, IMPACT_METRIC_LABEL, IMPACT_METRIC_SHORT, modelPredict, modelSolveSpeed, runMetric, type ConditionGroup, type ImpactMetric, type ModelResult, type PowerFit, type RunAnalysis, type RunSummary } from '../services/experiment';
 import { usePersistentState } from '../services/persist';
 
 const W = 640, H = 360, M = { l: 58, r: 18, t: 30, b: 48 };
@@ -246,14 +246,15 @@ function RunTraceChartInner({ series, analysis, thresholdDelta, jumpG, title, na
 }
 
 /* ------------------------------------------------------------------ 속도–Δa 산점도 + 회귀곡선 */
-export function SpeedImpactChart({ runs, groups, fit, model: chosen, aLimit, title, name }: {
-  runs: RunSummary[]; groups: ConditionGroup[]; fit?: PowerFit; model?: ModelResult | null; aLimit: number | null; title: string; name: string;
+export function SpeedImpactChart({ runs, groups, fit, model: chosen, aLimit, title, name, metric = 'peak' }: {
+  runs: RunSummary[]; groups: ConditionGroup[]; fit?: PowerFit; model?: ModelResult | null; aLimit: number | null; title: string; name: string; metric?: ImpactMetric;
 }) {
+  const md = (r: RunSummary) => runMetric(r, metric) as number;
   const masses = Array.from(new Set(groups.map(g => g.total_mass_g).concat(runs.map(r => Math.round(r.condition.total_mass_g / 5) * 5)))).sort((a, b) => a - b);
   const color = (m: number) => MASS_COLORS[Math.max(0, masses.indexOf(m)) % MASS_COLORS.length];
-  const pts = runs.filter(r => r.analysis.speed_mps && r.analysis.peak_delta_g != null);
+  const pts = runs.filter(r => r.analysis.speed_mps && runMetric(r, metric) != null);
   const xs = pts.map(r => r.analysis.speed_mps as number).concat(groups.map(g => g.mean_speed_mps || NaN));
-  const ys = pts.map(r => r.analysis.peak_delta_g as number).concat(groups.map(g => g.kept_max_delta_g));
+  const ys = pts.map(r => md(r)).concat(groups.map(g => g.kept_max_delta_g));
   if (aLimit) ys.push(aLimit - 1);
   const x = niceRange(xs, 0.1);
   const y = niceRange([...ys, 0], 0.08, true);
@@ -279,13 +280,13 @@ export function SpeedImpactChart({ runs, groups, fit, model: chosen, aLimit, tit
     const lo = Math.max(x[0], 1e-3, Math.min(...mv) * 0.9), hi = Math.min(x[1], Math.max(...mv) * 1.1);
     return Array.from({ length: 50 }, (_, i) => lo + (hi - lo) * i / 49).map((v, i) => `${i ? 'L' : 'M'}${sx(v).toFixed(1)},${sy(Math.min(y[1], f(v))).toFixed(1)}`).join('');
   };
-  return <Figure name={name} caption={<>작은 점 = 한 번 넘은 기록, 큰 점과 세로 막대 = 같은 조건 평균(가장 큰 값·작은 값 1개씩 뺌)과 범위, 곡선 = {chosen ? `고른 관계식 ${chosen.formula}` : '관계식 Δa = k₀·vⁿ·mᵖ'}. 오른쪽 위로 갈수록 빠를수록 충격이 크다는 뜻입니다.{aLimit ? ` 빨간 점선 = 허용 기준(평소보다 +${(aLimit - 1).toFixed(2)} g), 빨간 테두리 점 = 기준을 넘은 회차, ◆ = 질량별 넘지 않는 최대 속도 v_max.` : ''}</>}>
+  return <Figure name={name} caption={<>작은 점 = 한 번 넘은 기록, 큰 점과 세로 막대 = 같은 조건 평균(이상치 규칙 적용)과 범위, 곡선 = {chosen ? `고른 관계식 ${chosen.formula}` : '관계식 Δa = k₀·vⁿ·mᵖ'}. 오른쪽 위로 갈수록 빠를수록 충격이 크다는 뜻입니다.{aLimit ? ` 빨간 점선 = 허용 기준(평소보다 +${(aLimit - 1).toFixed(2)} g), 빨간 테두리 점 = 기준을 넘은 회차, ◆ = 질량별 넘지 않는 최대 속도 v_max.` : ''}</>}>
     {ref => <svg ref={ref} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title}>
-      <Axes x={x} y={y} xLabel="방지턱 통과 속도 v (m/s)" yLabel="충격: 평소보다 더 받은 가속도 Δa (g)" title={title} />
+      <Axes x={x} y={y} xLabel="방지턱 통과 속도 v (m/s)" yLabel={`충격: ${IMPACT_METRIC_LABEL[metric]} Δa (g)`} title={title} />
       {aLimit && aLimit - 1 <= y[1] && <><line x1={M.l} x2={M.l + PW} y1={sy(aLimit - 1)} y2={sy(aLimit - 1)} stroke="#c33" strokeDasharray="6 4" /><text x={M.l + PW - 4} y={sy(aLimit - 1) - 5} fontSize={10.5} textAnchor="end" fill="#b22" fontFamily={FONT} {...HALO}>허용 기준 +{(aLimit - 1).toFixed(2)} g</text></>}
       {masses.map(m => { const d = curve(m); return d ? <path key={'c' + m} d={d} fill="none" stroke={color(m)} strokeWidth={1.6} opacity={0.85} /> : null; })}
-      {pts.map(r => { const o = aLimit != null && (r.analysis.peak_delta_g as number) > aLimit - 1;
-        return <circle key={r.id} cx={sx(r.analysis.speed_mps as number)} cy={sy(r.analysis.peak_delta_g as number)} r={o ? 3.6 : 2.8} fill={color(Math.round(r.condition.total_mass_g / 5) * 5)} opacity={o ? 0.9 : 0.35} stroke={o ? '#c62828' : 'none'} strokeWidth={1.4} />; })}
+      {pts.map(r => { const o = aLimit != null && md(r) > aLimit - 1;
+        return <circle key={r.id} cx={sx(r.analysis.speed_mps as number)} cy={sy(md(r))} r={o ? 3.6 : 2.8} fill={color(Math.round(r.condition.total_mass_g / 5) * 5)} opacity={o ? 0.9 : 0.35} stroke={o ? '#c62828' : 'none'} strokeWidth={1.4} />; })}
       {groups.filter(g => g.mean_speed_mps && g.mean_peak_delta_g != null).map(g => <g key={`${g.total_mass_g}-${g.output_mode}-${g.output_value}`}>
         <line x1={sx(g.mean_speed_mps as number)} x2={sx(g.mean_speed_mps as number)} y1={sy(g.kept_min_delta_g)} y2={sy(g.kept_max_delta_g)} stroke={color(g.total_mass_g)} strokeWidth={1.4} />
         {g.speed_min_mps != null && g.speed_max_mps != null && <line x1={sx(g.speed_min_mps)} x2={sx(g.speed_max_mps)} y1={sy(g.mean_peak_delta_g as number)} y2={sy(g.mean_peak_delta_g as number)} stroke={color(g.total_mass_g)} strokeWidth={1.1} opacity={0.7} />}
@@ -295,13 +296,13 @@ export function SpeedImpactChart({ runs, groups, fit, model: chosen, aLimit, tit
       <HoverLayer getTip={(px, py) => {
         type It = { kind: 'run'; r: RunSummary } | { kind: 'grp'; g: ConditionGroup };
         const items: It[] = [...groups.filter(g => g.mean_speed_mps && g.mean_peak_delta_g != null).map(g => ({ kind: 'grp' as const, g })), ...pts.map(r => ({ kind: 'run' as const, r }))];
-        const hit = nearestPoint(items, px, py, it => it.kind === 'grp' ? [sx(it.g.mean_speed_mps as number), sy(it.g.mean_peak_delta_g as number)] : [sx(it.r.analysis.speed_mps as number), sy(it.r.analysis.peak_delta_g as number)]);
+        const hit = nearestPoint(items, px, py, it => it.kind === 'grp' ? [sx(it.g.mean_speed_mps as number), sy(it.g.mean_peak_delta_g as number)] : [sx(it.r.analysis.speed_mps as number), sy(md(it.r))]);
         if (!hit) return null;
         if (hit.kind === 'grp') { const g = hit.g; const X = sx(g.mean_speed_mps as number), Y = sy(g.mean_peak_delta_g as number);
           return { px: X, py: Y, title: `평균 · ${g.total_mass_g.toLocaleString()} g · 출력 ${g.output_value}`, rows: [{ color: color(g.total_mass_g), text: `속도 ${(g.mean_speed_mps as number).toFixed(3)} m/s` }, { text: `Δa 평균 +${(g.mean_peak_delta_g as number).toFixed(3)} g (범위 ${g.kept_min_delta_g.toFixed(2)}~${g.kept_max_delta_g.toFixed(2)})` }, { text: `${g.run_ids.length}회 측정` }], dots: [{ px: X, py: Y, color: color(g.total_mass_g) }] }; }
-        const r = hit.r, X = sx(r.analysis.speed_mps as number), Y = sy(r.analysis.peak_delta_g as number), m = Math.round(r.condition.total_mass_g / 5) * 5;
+        const r = hit.r, X = sx(r.analysis.speed_mps as number), Y = sy(md(r)), m = Math.round(r.condition.total_mass_g / 5) * 5;
         const pred = model(m)?.(r.analysis.speed_mps as number);
-        return { px: X, py: Y, title: `${r.condition.trial}회차 · ${r.condition.total_mass_g.toLocaleString()} g · 출력 ${r.condition.output_value}`, rows: [{ color: color(m), text: `속도 ${(r.analysis.speed_mps as number).toFixed(3)} m/s` }, { text: `Δa +${(r.analysis.peak_delta_g as number).toFixed(3)} g (최대 ${r.analysis.peak_g?.toFixed(2)} g)` }, ...(pred != null ? [{ text: `식 예측 +${pred.toFixed(3)} g` }] : [])], dots: [{ px: X, py: Y, color: color(m) }] };
+        return { px: X, py: Y, title: `${r.condition.trial}회차 · ${r.condition.total_mass_g.toLocaleString()} g · 출력 ${r.condition.output_value}`, rows: [{ color: color(m), text: `속도 ${(r.analysis.speed_mps as number).toFixed(3)} m/s` }, { text: `${IMPACT_METRIC_SHORT[metric]} +${md(r).toFixed(3)} g (가장 큰 Δa ${r.analysis.peak_delta_g?.toFixed(2)} g)` }, ...(pred != null ? [{ text: `식 예측 +${pred.toFixed(3)} g` }] : [])], dots: [{ px: X, py: Y, color: color(m) }] };
       }} />
       <g fontFamily={FONT} fontSize={10.5}>{masses.map((m, i) => <g key={'l' + m} transform={`translate(${M.l + 10} ${M.t + 14 + i * 16})`}><circle r={4.5} cx={0} cy={-3.5} fill="#fff" stroke={color(m)} strokeWidth={2} /><text x={10} y={0} fill={INK}>{m.toLocaleString()} g</text></g>)}</g>
     </svg>}

@@ -1,7 +1,7 @@
 // 직접 만드는 관계식: 정해진 틀 없이 식을 글자로 쓰고, 데이터에 맞춰 매개변수를 구하고, 다른 식과 비교합니다.
 import { useState } from 'react';
 import { FlaskConical, Save, Trash2 } from 'lucide-react';
-import { outputFromSpeed, type ModelResult } from '../services/experiment';
+import { headingOut, outputFromSpeed, type ModelResult } from '../services/experiment';
 import { MASS_COLORS, XYChart } from '../components/ExperimentCharts';
 import { usePersistentState } from '../services/persist';
 import type { ExperimentContext } from './context';
@@ -42,11 +42,12 @@ export default function FormulaLab({ ctx, bump, env, formulas, setFormulas, onUs
   const known = Object.keys(KNOWN_VARS);
 
   const groups = (data?.groups ?? []).filter(g => g.bump_id === bump);
+  const metric = settings.impact_metric ?? 'up';
   const runs = (data?.runs ?? []).filter(r => r.condition.bump_id === bump && !r.excluded && (r.condition.purpose ?? 'main') === 'main' && r.analysis.bump_detected !== false
-    && (r.condition.direction ?? 'forward') === (settings.analysis_direction ?? 'forward'));
+    && (r.condition.direction ?? 'forward') === (settings.analysis_direction ?? 'forward') && !headingOut(r, settings.heading_limit_deg ?? 10));
   const points = (): Point[] => level === 'groups'
     ? groups.filter(g => g.mean_speed_mps && targetOfGroup(g, target) != null).map(g => ({ env: { ...env, v: g.mean_speed_mps as number, m: g.total_mass_g / 1000, P: g.output_value }, y: targetOfGroup(g, target) as number, label: `${g.total_mass_g}g·${g.output_value}` }))
-    : runs.filter(r => r.analysis.speed_mps && targetOfRun(r, target) != null).map(r => ({ env: { ...env, v: r.analysis.speed_mps as number, m: r.condition.total_mass_g / 1000, P: r.condition.output_value }, y: targetOfRun(r, target) as number, label: `${r.condition.total_mass_g}g·${r.condition.output_value}·${r.condition.trial}` }));
+    : runs.filter(r => r.analysis.speed_mps && targetOfRun(r, target, metric) != null).map(r => ({ env: { ...env, v: r.analysis.speed_mps as number, m: r.condition.total_mass_g / 1000, P: r.condition.output_value }, y: targetOfRun(r, target, metric) as number, label: `${r.condition.total_mass_g}g·${r.condition.output_value}·${r.condition.trial}` }));
   const run = (e = expr, t = target) => { const pts = points(); setRes({ fit: fitFormula(e, pts, known), pts, expr: e, target: t, level }); };
 
   const fit = res?.fit;

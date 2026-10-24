@@ -351,7 +351,7 @@ def pitch_events(t: Sequence[float], pitch: Sequence[float] | None, wheelbase_mm
     return ev
 
 
-ANALYSIS_VERSION = 7  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
+ANALYSIS_VERSION = 8  # 분석 방식이 바뀌면 올려서 저장된 시행을 자동으로 다시 분석
 
 EVENT_LABEL = {"FU": "앞바퀴 오름", "FD": "앞바퀴 내림", "RU": "뒷바퀴 오름", "RD": "뒷바퀴 내림"}
 
@@ -667,6 +667,112 @@ def _restore_peak_heights(result: dict[str, Any], t: Sequence[float], raw: Seque
     result["params"]["peak_keep"] = True
 
 
+# --------------------------------------------------------------------------- 단계별 충격·충격량, 보고서 지표
+IMPACT_METRICS = {
+    "up": "올라갈 때 충격(앞·뒤 바퀴 평균)",
+    "front_up": "앞바퀴 올라갈 때 충격",
+    "peak": "가장 큰 충격",
+}
+
+
+def _pulse_area(t: Sequence[float], v: Sequence[float], tc: float, lo: float, hi: float) -> tuple[float, float, float] | None:
+    """tc 근처(±3 ms) 꼭짓점에서 양옆으로 (a−1)이 꼭짓점 높이의 10% 아래로 떨어질 때까지(단, lo~hi 안) 넓이를 잽니다.
+
+    (넓이 g·s, 펄스 길이 s, 꼭짓점 Δa g)를 돌려줍니다. 이웃 단계와 겹치지 않게 lo~hi는 이웃 꼭짓점과의 가운데로 자릅니다.
+    """
+    n = len(t)
+    idx = [k for k in range(n) if abs(t[k] - tc) <= 0.003] or [min(range(n), key=lambda k: abs(t[k] - tc))]
+    i = max(idx, key=lambda k: v[k])
+    top = v[i] - 1.0
+    if top <= 0:
+        return None
+    lim = 0.1 * top
+    a = i
+    while a > 0 and v[a - 1] - 1.0 > lim and t[a - 1] >= lo:
+        a -= 1
+    b = i
+    while b < n - 1 and v[b + 1] - 1.0 > lim and t[b + 1] <= hi:
+        b += 1
+    area = 0.0
+    for k in range(a, b):
+        area += ((v[k] - 1.0) + (v[k + 1] - 1.0)) / 2 * (t[k + 1] - t[k])
+    return area, t[b] - t[a], top
+
+
+def event_metrics(t: Sequence[float], v: Sequence[float], result: dict[str, Any], mass_g: float | None) -> dict[str, Any]:
+    """네 단계(앞 오름·앞 내림·뒤 오름·뒤 내림)마다 Δa와 충격량, 그리고 보고서 지표.
+
+    - 단계 충격량 I = m·g·∫(a−1)dt (N·s), 펄스 구간은 꼭짓점 높이의 10%까지(이웃 단계와 겹치지 않게 자름)
+    - 올라갈 때 충격(up_delta_g) = (앞 오름 Δa + 뒤 오름 Δa) / 2 – 바퀴가 방지턱 모서리에 부딪히는 충격이라 속도에 따라 커짐
+    - 올라갈 때 충격량(up_impulse_ns) = 앞 오름 + 뒤 오름 충격량(차 전체가 받은 위쪽 운동량, 이론 m·v·sin α와 비교)
+    - 내려올 때 충격은 방지턱 높이만큼 떨어지는 낙하라 속도와 관계가 약해, 따로 기록만 합니다.
+    """
+    out: dict[str, Any] = {"event_delta_g": {}, "event_impulse_ns": {}, "event_pulse_s": {}, "up_delta_g": None,
+                           "front_up_delta_g": None, "rear_up_delta_g": None, "up_impulse_ns": None,
+                           "front_up_impulse_ns": None, "rear_up_impulse_ns": None}
+    if len(t) < 5:
+        return out
+    m = (mass_g or 0) / 1000.0
+    ev = sorted(result.get("events") or [], key=lambda e: e["peak_t_s"])
+    for j, e in enumerate(ev):
+        tc = e["peak_t_s"]
+        lo = max(tc - 0.06, (ev[j - 1]["peak_t_s"] + tc) / 2) if j > 0 else tc - 0.06
+        hi = min(tc + 0.06, (tc + ev[j + 1]["peak_t_s"]) / 2) if j + 1 < len(ev) else tc + 0.06
+        out["event_delta_g"][e["kind"]] = round(e["g"] - 1.0, 4)
+        p = _pulse_area(t, v, tc, lo, hi)
+        if p is None:
+            continue
+        out["event_pulse_s"][e["kind"]] = round(p[1], 5)
+        if m:
+            out["event_impulse_ns"][e["kind"]] = round(m * G * p[0], 6)
+    d, imp = out["event_delta_g"], out["event_impulse_ns"]
+    fu, ru = d.get("FU"), d.get("RU")
+    fi, ri = imp.get("FU"), imp.get("RU")
+    if fu is None and ru is None and result.get("pair_source") == "pitch" and result.get("front_g") is not None:
+        # 네 단계를 못 찾았지만 기울기로 앞·뒤 바퀴가 '오른' 시각은 찾은 경우: 그 피크가 올라갈 때 충격입니다.
+        fu = round(result["front_g"] - 1.0, 4)
+        ru = None if result.get("rear_g") is None else round(result["rear_g"] - 1.0, 4)
+        fi, ri = result.get("impulse_front_ns"), result.get("impulse_rear_ns")
+    out["front_up_delta_g"], out["rear_up_delta_g"] = fu, ru
+    out["front_up_impulse_ns"], out["rear_up_impulse_ns"] = fi, ri
+    if fu is not None and ru is not None:
+        out["up_delta_g"] = round((fu + ru) / 2, 4)
+    if fi is not None and ri is not None:
+        out["up_impulse_ns"] = round(fi + ri, 6)
+    return out
+
+
+def metric_delta(analysis: dict[str, Any] | None, metric: str = "peak") -> float | None:
+    """보고서 지표로 쓰는 회차 하나의 Δa(g)."""
+    a = analysis or {}
+    if metric == "up":
+        return a.get("up_delta_g")
+    if metric == "front_up":
+        return a.get("front_up_delta_g")
+    return a.get("peak_delta_g")
+
+
+def run_metric(run: dict[str, Any], metric: str = "peak") -> float | None:
+    """회차의 지표 값. 모의 데이터는 네 단계를 만들지 않으므로 앞·뒤 바퀴 피크(오름)로 대신합니다."""
+    a = run.get("analysis") or {}
+    d = metric_delta(a, metric)
+    if d is None and run.get("simulated") and metric in ("up", "front_up") and a.get("front_g") is not None:
+        f = a["front_g"] - 1.0
+        if metric == "front_up" or a.get("rear_g") is None:
+            return round(f, 4)
+        return round((f + a["rear_g"] - 1.0) / 2, 4)
+    return d
+
+
+def heading_out(run: dict[str, Any], limit_deg: float | None) -> bool:
+    """차가 비스듬히 지나간 회차: 방지턱 도착 때 방향이나 주행 중 최대 방향이 허용 각도를 넘음."""
+    if not limit_deg:
+        return False
+    hb = (run.get("motor") or {}).get("heading_at_bump_deg")
+    hm = run.get("heading_max_deg")
+    return (hb is not None and abs(hb) > limit_deg) or (hm is not None and abs(hm) > limit_deg)
+
+
 # --------------------------------------------------------------------------- 시행 분석
 def analyze_run(
     columns: dict[str, Sequence[float]],
@@ -941,6 +1047,7 @@ def analyze_run(
 
     # 이론식 ② 충격량·③ 원운동 비교용 값(바퀴가 턱에 오르는 순간의 충격 펄스)
     result.update(_pulse_metrics(t, v, result, mass_g, bump_radius, bump_height_mm, wheel_radius_mm))
+    result.update(event_metrics(t, v, result, mass_g))
     if filter_hz:
         _restore_peak_heights(result, t_all, v_raw_all, window[0], window[1])
 
@@ -1080,22 +1187,43 @@ def harmonize_pairs(runs: list[dict[str, Any]], tolerance: float = 0.3) -> list[
     return [fixed.get(r.get("id"), r) for r in runs]
 
 
-def aggregate(runs: list[dict[str, Any]], method: str = "trim") -> list[dict[str, Any]]:
+def aggregate(runs: list[dict[str, Any]], method: str = "trim", metric: str = "peak",
+              heading_limit_deg: float | None = None) -> list[dict[str, Any]]:
+    """조건별 평균. metric: 'peak'(가장 큰 충격), 'up'(올라갈 때 앞·뒤 평균), 'front_up'(앞바퀴 올라갈 때).
+
+    heading_limit_deg를 주면 방지턱에 비스듬히(그 각도 넘게) 들어간 회차는 계산에서 뺍니다.
+    """
     groups: dict[tuple, list[dict[str, Any]]] = {}
+    skipped: dict[tuple, dict[str, list[str]]] = {}
     for run in runs:
         if run.get("excluded"):
             continue
         a = run.get("analysis") or {}
-        if a.get("peak_delta_g") is None or a.get("bump_detected") is False:
+        if a.get("bump_detected") is False or a.get("peak_delta_g") is None:
             continue
-        groups.setdefault(group_key(run), []).append(run)
+        key = group_key(run)
+        if heading_out(run, heading_limit_deg):
+            skipped.setdefault(key, {}).setdefault("heading", []).append(run["id"])
+            continue
+        if run_metric(run, metric) is None:
+            skipped.setdefault(key, {}).setdefault("no_metric", []).append(run["id"])
+            continue
+        groups.setdefault(key, []).append(run)
     rows = []
     for key, items in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2], kv[0][3])):
-        deltas = [r["analysis"]["peak_delta_g"] for r in items]
+        deltas = [run_metric(r, metric) for r in items]
         flags, info = outlier_flags(deltas, method)
         kept_runs = [r for r, f in zip(items, flags) if not f]
-        kept = [r["analysis"]["peak_delta_g"] for r in kept_runs]
-        dropped = [r["analysis"]["peak_delta_g"] for r, f in zip(items, flags) if f]
+        kept = [run_metric(r, metric) for r in kept_runs]
+        dropped = [run_metric(r, metric) for r, f in zip(items, flags) if f]
+        maxes = [r["analysis"]["peak_delta_g"] for r in kept_runs if r["analysis"].get("peak_delta_g") is not None]
+        up_imps = [r["analysis"].get("up_impulse_ns") for r in kept_runs if r["analysis"].get("up_impulse_ns")]
+        ev_imp: dict[str, float] = {}
+        for kind in ("FU", "FD", "RU", "RD"):
+            vals = [(r["analysis"].get("event_impulse_ns") or {}).get(kind) for r in kept_runs]
+            vals = [x for x in vals if x is not None]
+            if vals:
+                ev_imp[kind] = round(sum(vals) / len(vals), 6)
         speeds = [r["analysis"].get("speed_mps") for r in kept_runs if r["analysis"].get("speed_mps")]
         pis = [r["analysis"].get("pi") for r in kept_runs if r["analysis"].get("pi")]
         imps = [r["analysis"].get("impulse_ns") for r in kept_runs if r["analysis"].get("impulse_ns")]
@@ -1132,9 +1260,14 @@ def aggregate(runs: list[dict[str, Any]], method: str = "trim") -> list[dict[str
             "mean_dvz_mps": round(_mean(dvzs), 5) if dvzs else None,
             "mean_crest_min_g": round(_mean(crests), 4) if crests else None,
             "mean_avg_force_n": round(_mean(favg), 4) if favg else None,
-            "event_delta_g": ev_mean, "event_n": ev_n,
+            "event_delta_g": ev_mean, "event_n": ev_n, "event_impulse_ns": ev_imp,
+            "metric": metric, "mean_max_delta_g": round(_mean(maxes), 4) if maxes else None,
+            "mean_up_impulse_ns": round(_mean(up_imps), 6) if up_imps else None,
+            "skipped_heading_ids": (skipped.get(key) or {}).get("heading", []),
+            "skipped_no_metric_ids": (skipped.get(key) or {}).get("no_metric", []),
             "mean_pi": round(_mean(pis), 4) if pis else None,
             "jump_count": sum(1 for r in items if r["analysis"].get("jump")),
+            "n_skipped": sum(len(x) for x in (skipped.get(key) or {}).values()),
             "run_ids": [r["id"] for r in items],
         })
     return rows

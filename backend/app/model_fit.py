@@ -363,8 +363,22 @@ def _f(x: float | None, d: int = 3) -> str:
     return "—" if x is None else f"{x:.{d}f}"
 
 
+def formula_text(model: dict[str, Any]) -> str:
+    """계수를 넣은 관계식 문자열(v: m/s, m: kg, Δa: g)."""
+    c = model["coef"]
+    mass = f" · m^{c['p']:.3f}" if c.get("p") else ""
+    if model["kind"] == "power":
+        return f"Δa = {c['k0']:.4g} · v^{c['n']:.3f}{mass}"
+    term = "v" if model["kind"] == "linear" else "v²"
+    sign = "+" if c["b"] >= 0 else "−"
+    text = f"Δa = {c['a']:.4g} {sign} {abs(c['b']):.4g}·{term}"
+    if c.get("c"):
+        text += f" {'+' if c['c'] >= 0 else '−'} {abs(c['c']):.4g}·m"
+    return text
+
+
 def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, Any], chosen: dict[str, Any] | None,
-              criterion: dict[str, Any] | None) -> list[str]:
+              criterion: dict[str, Any] | None, metric_label: str = "최대 수직 가속도 증가분") -> list[str]:
     """보고서 결론에 옮겨 쓸 수 있는 자동 해석 문장(숫자는 실제 데이터에서 계산)."""
     mine = [g for g in groups if g["bump_id"] == bump_id and g.get("mean_speed_mps") and g.get("mean_peak_delta_g") is not None]
     lines: list[str] = []
@@ -377,11 +391,15 @@ def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, 
             lo, hi = sub[0], sub[-1]
             ratio = hi["mean_peak_delta_g"] / lo["mean_peak_delta_g"] if lo["mean_peak_delta_g"] > 0 else None
             lines.append(f"총질량 {mass:g} g에서 통과 속도가 {lo['mean_speed_mps']:.3f} → {hi['mean_speed_mps']:.3f} m/s로 "
-                         f"{hi['mean_speed_mps'] / lo['mean_speed_mps']:.2f}배가 될 때 최대 수직 가속도 증가분 Δa는 "
+                         f"{hi['mean_speed_mps'] / lo['mean_speed_mps']:.2f}배가 될 때 {metric_label} Δa는 "
                          f"{lo['mean_peak_delta_g']:.3f} → {hi['mean_peak_delta_g']:.3f} g로 {_f(ratio, 2)}배가 되었다.")
+            fd_lo, fd_hi = (lo.get("event_delta_g") or {}).get("FD"), (hi.get("event_delta_g") or {}).get("FD")
+            if "가장 큰" not in metric_label and fd_lo and fd_hi:
+                lines.append(f"반면 앞바퀴가 방지턱에서 내려올 때의 충격은 {fd_lo:.3f} → {fd_hi:.3f} g({fd_hi / fd_lo:.2f}배)로 속도와 관계가 약했다. "
+                             "방지턱 높이만큼 떨어지는 낙하 충격이라 앞으로 가는 속도보다 높이에 따라 정해지기 때문이다.")
     if chosen:
         r2 = chosen["r2"]
-        lines.append(f"여러 후보식 중 교차검증 오차가 가장 작은(또는 선택한) 식은 '{chosen['name']}' {chosen['formula']}이며, "
+        lines.append(f"여러 후보식 중 교차검증 오차가 가장 작은(또는 선택한) 식은 '{chosen['name']}' {formula_text(chosen)}이며, "
                      f"결정계수 R² = {r2:.3f}{'(점 수와 매개변수 수가 같아 R²=1은 의미가 약함)' if chosen.get('exact_fit') else ''}이다.")
         if r2 < 0.3 and not chosen.get("exact_fit"):
             lines.append(f"주의: R²가 {r2:.2f}로 낮아(0이하는 평균값보다도 못 맞춤) 아직 속도와 충격 사이에 뚜렷한 관계가 보이지 않는다. "
@@ -433,7 +451,12 @@ def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, 
     vc = criterion.get("critical_speed_mps") if criterion else None
     if jumped:
         first = jumped[0]
-        text = f"지면 이탈(점프)은 약 {first['mean_speed_mps']:.3f} m/s부터 나타났다"
+        most = [g for g in jumped if g["jump_count"] >= 0.5 * max(1, g["n_runs"])]
+        if most and most[0] is not first:
+            text = (f"지면 이탈(점프)은 약 {first['mean_speed_mps']:.3f} m/s부터 일부 회차에서 나타났고, "
+                    f"약 {most[0]['mean_speed_mps']:.3f} m/s부터는 대부분 회차에서 나타났다")
+        else:
+            text = f"지면 이탈(점프)은 약 {first['mean_speed_mps']:.3f} m/s부터 나타났다"
         if vc:
             text += f"(원운동 모델의 이론 임계 속도 v_c = {vc:.3f} m/s, 차이 {abs(first['mean_speed_mps'] - vc) / vc * 100:.0f}%)"
         lines.append(text + ".")
@@ -443,7 +466,8 @@ def interpret(bump_id: str, groups: list[dict[str, Any]], comparison: dict[str, 
     if criterion and criterion.get("a_limit_g"):
         rows = [f"{v['mass_g']:g} g → " + (v["note"] if v.get("note") else f"{_f(v['vmax_mps'])} m/s") for v in criterion.get("vmax_by_mass", [])]
         if rows:
-            lines.append(f"허용 최대 수직 가속도 {criterion['a_limit_g']:.2f} g를 넘지 않는 최대 통과 속도는 " + ", ".join(rows) + "이다.")
+            lines.append(f"허용 기준({metric_label} {criterion['a_limit_g']:.2f} g, Δa {criterion['a_limit_g'] - 1:.2f} g)을 넘지 않는 최대 통과 속도는 "
+                         + ", ".join(rows) + "이다.")
     if comparison.get("note"):
         lines.append("주의: " + comparison["note"])
     return lines

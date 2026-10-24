@@ -3,6 +3,10 @@
 
 export type OutputMode = 'pwm' | 'duty';
 export type OutlierMethod = 'trim' | 'sigma2' | 'iqr' | 'none';
+/** 보고서 지표: up = 올라갈 때 충격(앞·뒤 바퀴 평균), front_up = 앞바퀴 올라갈 때, peak = 가장 큰 충격 */
+export type ImpactMetric = 'up' | 'front_up' | 'peak';
+export const IMPACT_METRIC_LABEL: Record<ImpactMetric, string> = { up: '올라갈 때 충격(앞·뒤 평균)', front_up: '앞바퀴 올라갈 때 충격', peak: '가장 큰 충격' };
+export const IMPACT_METRIC_SHORT: Record<ImpactMetric, string> = { up: '올라갈 때 Δa', front_up: '앞 오름 Δa', peak: '가장 큰 Δa' };
 export const OUTLIER_LABEL: Record<OutlierMethod, string> = {
   trim: '최댓값·최솟값 1개씩 빼기', sigma2: '평균 ± 2×표준편차 밖 빼기', iqr: '사분위수 범위(IQR) 1.5배 밖 빼기', none: '빼지 않음(전부 평균)',
 };
@@ -49,6 +53,8 @@ export type ExperimentSettings = {
   plan_bumps?: string[] | null;
   analysis_direction?: 'forward' | 'backward';
   outlier_method?: OutlierMethod;
+  impact_metric?: ImpactMetric;
+  heading_limit_deg?: number;
   ultrasonic_log?: boolean;
   ultrasonic_hz?: number;
   wall_stop_cm?: number;
@@ -77,7 +83,7 @@ export const DEFAULT_SETTINGS: ExperimentSettings = {
   wheelbase_mm: null, wheel_radius_mm: null, base_mass_g: null, threshold_delta_g: 0.3, min_gap_s: 0.03, jump_g: 0.2, filter_hz: 0, detect_level: 'normal',
   a_limit_mode: 'manual', a_limit_g: 1.7, a_limit_preset: 'trl614', a_limit_effective_g: 1.7, pre_roll_s: 1.0, run_seconds: 2.5, tail_s: 0.6,
   repeats: 5, return_enabled: true, return_output: null, return_scale: 1.0, rest_s: 1.5, heading_hold: true, heading_gain: 1.2, heading_ki: 0.8, heading_learn: true, heading_ff_forward: 0, heading_ff_backward: 0,
-  steering_source: 'gyro', kick_ms: 0, end_mode: 'time', accel_mode: 'instant', accel_s: 0.6, decel_s: 0.3, return_mode: null, spin_output: 100, spin_direction: 'left', creep_duty: 40, leg_timeout_s: 8, cross_threshold: 0.5, model_id: 'auto', plan_added_masses: [0, 150, 300], plan_outputs: [40, 55, 70, 85, 100], plan_repeats: 5,
+  steering_source: 'gyro', kick_ms: 0, end_mode: 'time', accel_mode: 'instant', accel_s: 0.6, decel_s: 0.3, return_mode: null, spin_output: 100, spin_direction: 'left', creep_duty: 40, leg_timeout_s: 8, cross_threshold: 0.5, model_id: 'auto', impact_metric: 'up', heading_limit_deg: 10, plan_added_masses: [0, 150, 300], plan_outputs: [40, 55, 70, 85, 100], plan_repeats: 5,
   bumps: [
     { id: 'A', name: 'A형 (완만)', height_mm: 10, width_mm: 60, radius_mm: 50 },
     { id: 'B', name: 'B형 (급함)', height_mm: 10, width_mm: 30, radius_mm: 16.25 },
@@ -115,6 +121,9 @@ export type RunAnalysis = {
   events?: BumpEvent[]; glitches_fixed?: number; max_gap_ms?: number | null;
   pitch?: { front_up_t_s: number; rear_up_t_s: number; front_down_t_s?: number; rear_down_t_s?: number; max_deg: number; cross_s?: number; speed_mps?: number } | null;
   entry_sin?: number | null; dvz_theory_mps?: number | null; impulse_theory_ns?: number | null; crest_min_g?: number | null; crest_theory_g?: number | null;
+  event_delta_g?: Partial<Record<EventKind, number>>; event_impulse_ns?: Partial<Record<EventKind, number>>; event_pulse_s?: Partial<Record<EventKind, number>>;
+  up_delta_g?: number | null; front_up_delta_g?: number | null; rear_up_delta_g?: number | null;
+  up_impulse_ns?: number | null; front_up_impulse_ns?: number | null; rear_up_impulse_ns?: number | null;
 };
 
 export type EventKind = 'FU' | 'FD' | 'RU' | 'RD';
@@ -176,6 +185,8 @@ export type ConditionGroup = {
   event_delta_g?: Partial<Record<EventKind, number>>; event_n?: Partial<Record<EventKind, number>>;
   mean_impulse_ns?: number | null; mean_pulse_s?: number | null; mean_dvz_mps?: number | null; mean_crest_min_g?: number | null; mean_avg_force_n?: number | null;
   direction?: 'forward' | 'backward';
+  metric?: ImpactMetric; mean_max_delta_g?: number | null; mean_up_impulse_ns?: number | null; event_impulse_ns?: Partial<Record<EventKind, number>>;
+  n_skipped?: number; skipped_heading_ids?: string[]; skipped_no_metric_ids?: string[];
 };
 export type SpeedModel = { bump_id: string; output_mode: OutputMode; a: number | null; b: number | null; c: number; r2: number | null; uses_mass: boolean; n: number; output_range: [number, number]; mass_range_g: [number, number] };
 export const speedFromOutput = (models: SpeedModel[] | undefined, bump: string, mode: OutputMode, output: number, massG: number): number | null => {
@@ -202,6 +213,7 @@ export type Criterion = {
 export type RunsResponse = {
   simulated: boolean; runs: RunSummary[]; groups: ConditionGroup[]; fits: Record<string, PowerFit>; criteria?: Record<string, Criterion>;
   models?: Record<string, ModelComparison>; chosen_models?: Record<string, string | null>; interpretation?: Record<string, string[]>;
+  metric?: { id: ImpactMetric; label: string; heading_limit_deg: number };
   speed_maps?: SpeedMap[]; speed_models?: SpeedModel[]; event_models?: Record<string, Partial<Record<EventKind, EventModel>>>; validation?: ValidationBundle; progress?: Progress;
 };
 
@@ -330,4 +342,22 @@ export function paramText(p: ModelParam, digits = 3): string {
   if (!p.ci95) return v;
   if (p.name === 'ln k₀') return `${v} (95% CI ${Math.exp(p.ci95[0]).toPrecision(3)} ~ ${Math.exp(p.ci95[1]).toPrecision(3)})`;
   return `${v} (95% CI ${p.ci95[0].toFixed(digits)} ~ ${p.ci95[1].toFixed(digits)})`;
+}
+
+/** 회차의 보고서 지표 Δa(g). 백엔드 impact_analysis.run_metric과 같은 규칙(모의 데이터는 앞·뒤 바퀴 피크로 대신). */
+export function runMetric(r: RunSummary, metric: ImpactMetric = 'up'): number | null {
+  const a = r.analysis;
+  let d: number | null | undefined = metric === 'up' ? a.up_delta_g : metric === 'front_up' ? a.front_up_delta_g : a.peak_delta_g;
+  if (d == null && r.simulated && metric !== 'peak' && a.front_g != null) {
+    const f = a.front_g - 1;
+    d = metric === 'front_up' || a.rear_g == null ? f : (f + a.rear_g - 1) / 2;
+  }
+  return d ?? null;
+}
+
+/** 방지턱에 비스듬히 들어간 회차(도착 때 방향·주행 중 최대 방향이 기준 각도 초과) */
+export function headingOut(r: RunSummary, limitDeg: number | null | undefined): boolean {
+  if (!limitDeg) return false;
+  const hb = r.motor?.heading_at_bump_deg, hm = r.heading_max_deg;
+  return (hb != null && Math.abs(hb) > limitDeg) || (hm != null && Math.abs(hm) > limitDeg);
 }

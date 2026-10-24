@@ -1,5 +1,5 @@
 // 이론·예측 탭이 함께 쓰는 계산: 방지턱 상수, 예측 모델(내장 관계식 또는 직접 만든 식), 데이터 점.
-import { bumpRadiusMm, G, modelPredict, type ConditionGroup, type ExperimentSettings, type ModelResult, type RunSummary } from '../services/experiment';
+import { bumpRadiusMm, G, modelPredict, runMetric, type ConditionGroup, type ImpactMetric, type ExperimentSettings, type ModelResult, type RunSummary } from '../services/experiment';
 import { evaluate, parse, type Env } from './formula';
 
 export type Target = 'delta' | 'peak' | 'force' | 'dynforce' | 'impulse' | 'pulse';
@@ -46,13 +46,13 @@ export function targetOfGroup(g: ConditionGroup, t: Target): number | null {
     case 'pulse': return g.mean_pulse_s ?? null;
   }
 }
-export function targetOfRun(r: RunSummary, t: Target): number | null {
+export function targetOfRun(r: RunSummary, t: Target, metric: ImpactMetric = 'peak'): number | null {
   const a = r.analysis, m = r.condition.total_mass_g / 1000;
   switch (t) {
-    case 'delta': return a.peak_delta_g;
+    case 'delta': return runMetric(r, metric);
     case 'peak': return a.peak_g;
     case 'force': return a.peak_force_n;
-    case 'dynforce': return a.peak_delta_g == null ? null : m * G * a.peak_delta_g;
+    case 'dynforce': { const d = runMetric(r, metric); return d == null ? null : m * G * d; }
     case 'impulse': return a.impulse_ns ?? null;
     case 'pulse': return a.pulse_s ?? null;
   }

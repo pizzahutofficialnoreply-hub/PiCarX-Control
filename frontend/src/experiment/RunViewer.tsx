@@ -154,6 +154,11 @@ export default function RunViewer({ runs, selectedId, setSelectedId, detail, set
         <div><small>속도·곡률 지수 Π</small><b>{fmt(a.pi, 2)}</b><span>1을 넘으면 이론상 뜸 · 뜨기 시작하는 속도 {fmt(a.critical_speed_mps, 2, 'm/s')}</span></div>
         <div><small>주행 진동 크기</small><b>{fmt(a.noise_sigma_g, 3, 'g')}</b><span>피크로 인정한 기준 {fmt(a.threshold_used_g, 2, 'g')} 이상{a.standout_ratio ? ` · 바퀴 피크가 진동의 ${a.standout_ratio}배` : ''}{(a.noise_sigma_g ?? 0) > 0.12 ? ' · 진동이 큰 편: 센서 고정·바퀴 상태를 확인하세요' : ''}</span></div>
       </div>
+      {(a.up_delta_g != null || a.front_up_delta_g != null) && <div className="exp-stats">
+        <div><small>올라갈 때 충격 (보고서 지표)</small><b>{fmt(a.up_delta_g, 2, 'g')}</b><span>앞바퀴 오름 {fmt(a.front_up_delta_g, 2, 'g')} · 뒷바퀴 오름 {fmt(a.rear_up_delta_g, 2, 'g')}의 평균 (Δa)</span></div>
+        <div><small>올라갈 때 충격량</small><b>{fmt(a.up_impulse_ns, 4, 'N·s')}</b><span>앞 {fmt(a.front_up_impulse_ns, 4)} + 뒤 {fmt(a.rear_up_impulse_ns, 4)} N·s{a.impulse_theory_ns ? ` · 이론 m·v·sin α = ${a.impulse_theory_ns.toFixed(4)} N·s` : ''}</span></div>
+        <div><small>내려올 때 충격</small><b>{fmt(a.event_delta_g?.FD, 2, 'g')}</b><span>앞바퀴 내림 (뒷바퀴 내림 {fmt(a.event_delta_g?.RD, 2, 'g')}) · 충격량 {fmt(a.event_impulse_ns?.FD, 4)} / {fmt(a.event_impulse_ns?.RD, 4)} N·s</span></div>
+      </div>}
       {(a.events ?? []).length === 4 && <div className="exp-events">
         <b>방지턱 4순간</b>
         {(a.events ?? []).map(e => <div key={e.kind} style={{ borderColor: EVENT_INFO[e.kind].color }}><small style={{ color: EVENT_INFO[e.kind].color }}>{EVENT_INFO[e.kind].label}</small><b>{e.g.toFixed(2)} g</b><span>+{(e.g - 1).toFixed(2)} g · {a.front_t_s != null ? `${((e.t_s - (a.events ?? [])[0].t_s) * 1000).toFixed(0)} ms` : ''}</span></div>)}
